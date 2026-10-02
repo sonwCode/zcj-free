@@ -12,21 +12,6 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 
 项目提供 **CLI** 和 **本地 WebUI** 两种使用方式。日常推荐使用 WebUI。
 
-> 项目说明：本仓库为 [myfanhua/turb-gpt-free-register](https://github.com/myfanhua/turb-gpt-free-register) 的个人 fork，基于其代码做二次开发（上游本身基于 [xiaoguzuiniu/gpt-free-register](https://github.com/xiaoguzuiniu/gpt-free-register) 改造）。
-
-- TG 交流群：[https://t.me/+uC3Ix0l2E085Njhl](https://t.me/+uC3Ix0l2E085Njhl)
-
-> 开源版说明：仓库只保留源码、配置模板和文档；运行时账号、Token、邮箱池、Codex 凭证、日志等真实数据均已通过 `.gitignore` 排除。
-
----
-
-## 特别鸣谢
-
-[![IPWO 住宅代理](https://raw.githubusercontent.com/myfanhua/turb-gpt-free-register/main/static/telegram-cloud-photo-size-5-6154589162401632962-y.jpg)](https://www.ipwo.net/?code=XEP358YGZ)
-
-IPWO 住宅代理提供覆盖195+国家和地区的住宅 IP 资源，支持多地区网络环境配置，适用于 AI 应用、浏览器自动化、海外服务访问及数据采集等场景。
-重点！2GB 动态住宅流量无门槛发放，[领取入口](https://www.ipwo.net/?code=XEP358YGZ)，进群不定时 IP 福利发放。
-
 ## 功能概览
 
 ### 注册
