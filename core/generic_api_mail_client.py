@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 import base64
 import html as html_lib
 from datetime import datetime
@@ -960,7 +961,7 @@ def fetch_latest_otp(
                 f"[GenericAPI] 暂未从取码接口拿到验证码，"
                 f"{interval}s 后重试（剩余 {remaining}s）..."
             )
-        time.sleep(interval)
+        _stop_sleep(interval)
 
     if best_otp:
         logger.warning(f"[GenericAPI] 总超时但已有候选，返回 OTP={best_otp}")

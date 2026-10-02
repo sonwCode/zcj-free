@@ -3,7 +3,7 @@ import copy
 import unittest
 from unittest.mock import patch
 
-from core.roxybrowser_client import RoxyBrowserClient
+from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 
 
 class _FakeResponse:
@@ -35,7 +35,7 @@ class RoxyBrowserClientRetryTests(unittest.TestCase):
         client.http = _FakeSession(responses)
         return client
 
-    @patch("core.roxybrowser_client.time.sleep")
+    @patch("core.roxybrowser_client._stop_sleep")
     @patch("core.roxybrowser_client._cfg.ROXY_CREATE_RETRY_DELAY", 3)
     @patch("core.roxybrowser_client._cfg.ROXY_CREATE_RETRIES", 3)
     def test_create_timeout_response_retries_with_same_payload(self, sleep_mock):
@@ -60,7 +60,7 @@ class RoxyBrowserClientRetryTests(unittest.TestCase):
         self.assertEqual(client.http.calls[1]["json"]["name"], "rb-fixed-name")
         sleep_mock.assert_called_once_with(3.0)
 
-    @patch("core.roxybrowser_client.time.sleep")
+    @patch("core.roxybrowser_client._stop_sleep")
     @patch("core.roxybrowser_client._cfg.ROXY_CREATE_RETRY_DELAY", 3)
     @patch("core.roxybrowser_client._cfg.ROXY_CREATE_RETRIES", 3)
     def test_create_stops_after_configured_attempts(self, sleep_mock):
@@ -76,7 +76,7 @@ class RoxyBrowserClientRetryTests(unittest.TestCase):
         self.assertEqual(len(client.http.calls), 3)
         self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [3.0, 6.0])
 
-    @patch("core.roxybrowser_client.time.sleep")
+    @patch("core.roxybrowser_client._stop_sleep")
     @patch("core.roxybrowser_client._cfg.ROXY_CREATE_RETRIES", 3)
     def test_create_non_transient_business_error_is_not_retried(self, sleep_mock):
         client = self._client([
@@ -89,7 +89,7 @@ class RoxyBrowserClientRetryTests(unittest.TestCase):
         self.assertEqual(len(client.http.calls), 1)
         sleep_mock.assert_not_called()
 
-    @patch("core.roxybrowser_client.time.sleep")
+    @patch("core.roxybrowser_client._stop_sleep")
     @patch("core.roxybrowser_client._cfg.ROXY_API_RETRY_DELAY", 2)
     @patch("core.roxybrowser_client._cfg.ROXY_API_RETRIES", 2)
     @patch("core.roxybrowser_client._cfg.ROXY_CREATE_RETRIES", 5)
@@ -104,6 +104,40 @@ class RoxyBrowserClientRetryTests(unittest.TestCase):
         self.assertTrue(result["data"]["ok"])
         self.assertEqual(len(client.http.calls), 2)
         sleep_mock.assert_called_once_with(2.0)
+
+    @patch("core.roxybrowser_client._stop_sleep")
+    def test_request_accepts_stop_cleanup_timeout_and_single_attempt(self, sleep_mock):
+        client = self._client([TimeoutError("connection timed out")])
+
+        with self.assertRaisesRegex(TimeoutError, "connection timed out"):
+            client.request(
+                "POST",
+                "/browser/close",
+                json_body={"dirId": "profile-1"},
+                timeout_seconds=4.5,
+                max_attempts=1,
+            )
+
+        self.assertEqual(client.http.calls[0]["timeout"], 4.5)
+        sleep_mock.assert_not_called()
+
+    def test_cleanup_profile_passes_limits_to_close_and_delete(self):
+        client = self._client([
+            _FakeResponse({"code": 0}),
+            _FakeResponse({"code": 0}),
+        ])
+        opened = RoxyOpenResult("profile-1", {}, created_by_run=True)
+
+        with patch("core.roxybrowser_client._cfg.ROXY_KEEP_BROWSER_OPEN", False), \
+             patch("core.roxybrowser_client._cfg.ROXY_ONE_PROFILE_PER_ACCOUNT", True), \
+             patch("core.roxybrowser_client._cfg.ROXY_DELETE_PROFILE_AFTER_RUN", True):
+            client.cleanup_profile(opened, timeout_seconds=4.5, max_attempts=1)
+
+        self.assertEqual([call["url"] for call in client.http.calls], [
+            "http://127.0.0.1:50000/browser/close",
+            "http://127.0.0.1:50000/browser/delete",
+        ])
+        self.assertEqual([call["timeout"] for call in client.http.calls], [4.5, 4.5])
 
 
 if __name__ == "__main__":

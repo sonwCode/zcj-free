@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from config import cloakbrowser as _cfg
+from core.stop_control import check_stop_requested as _check_stop_requested
 
 logger = logging.getLogger(__name__)
 
@@ -93,26 +94,46 @@ class CloakElement:
 
     def send_keys(self, *values: str) -> None:
         # 兼容 Selenium: el.send_keys(Keys.COMMAND, 'a')。
+        _check_stop_requested()
         text = "".join(str(v or "") for v in values)
         lower = text.lower()
         try:
             self.click()
         except Exception:
             pass
-        if "\ue03d" in text or "\ue009" in text or "command" in lower or "control" in lower:
-            # Selenium Keys.CONTROL/COMMAND 编码可能传入私有区字符；这里按全选处理。
-            try:
-                self.page.keyboard.press("Meta+A")
-            except Exception:
-                self.page.keyboard.press("Control+A")
+        _check_stop_requested()
+        if "\ue03d" in text or "command" in lower:
+            self.page.keyboard.press("Meta+A")
+            _check_stop_requested()
             return
-        try:
-            if self.locator is not None:
-                self.locator.fill(text, timeout=10000)
-            else:
-                self.handle.fill(text, timeout=10000)
-        except Exception:
-            self.page.keyboard.type(text, delay=35)
+        if "\ue009" in text or "control" in lower:
+            self.page.keyboard.press("Control+A")
+            _check_stop_requested()
+            return
+        special_keys = {
+            "\ue003": "Backspace",
+            "\ue004": "Tab",
+            "\ue006": "Enter",
+            "\ue007": "Enter",
+            "\ue008": "Shift",
+            "\ue009": "Control",
+            "\ue00a": "Alt",
+            "\ue00c": "Escape",
+            "\ue010": "End",
+            "\ue011": "Home",
+            "\ue012": "ArrowLeft",
+            "\ue013": "ArrowUp",
+            "\ue014": "ArrowRight",
+            "\ue015": "ArrowDown",
+            "\ue017": "Delete",
+        }
+        if text in special_keys:
+            self.page.keyboard.press(special_keys[text])
+            _check_stop_requested()
+            return
+        target = self.locator if self.locator is not None else self.handle
+        target.type(text, delay=35, timeout=10000)
+        _check_stop_requested()
 
     def get_attribute(self, name: str) -> str | None:
         try:

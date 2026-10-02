@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Iterable, Iterator
 
+from core.stop_control import check_stop_requested as _check_stop_requested
+
 logger = logging.getLogger(__name__)
 
 EMAIL_SOURCE_TYPES = ("outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail")
@@ -54,7 +56,14 @@ def parse_email_sources(value=None) -> list[str]:
         from config import email as _email_cfg
         value = _email_cfg.EMAIL_SOURCE
     if isinstance(value, str):
-        raw = value.replace(";", ",").replace("|", ",").split(",")
+        raw = (
+            value.replace("，", ",")
+            .replace("；", ",")
+            .replace("、", ",")
+            .replace(";", ",")
+            .replace("|", ",")
+            .split(",")
+        )
     elif isinstance(value, Iterable):
         raw = list(value)
     else:
@@ -118,6 +127,7 @@ def acquire_email(exclude_emails: Iterable[str] | str | None = None) -> str:
     excluded = _normalize_exclude_emails(exclude_emails)
     last_exc: Exception | None = None
     for source in sources:
+        _check_stop_requested()
         try:
             email = str(_pick_from_source(source, excluded) or "").strip()
             if not email:
@@ -131,6 +141,7 @@ def acquire_email(exclude_emails: Iterable[str] | str | None = None) -> str:
             logger.info(f"[EmailProvider] 使用邮箱来源: {source}, email={email}")
             return email
         except Exception as exc:
+            _check_stop_requested()
             last_exc = exc
             logger.warning(f"[EmailProvider] 来源 {source} 领取邮箱失败: {type(exc).__name__}: {exc}")
             continue
@@ -276,6 +287,8 @@ def wait_for_otp(
     except Exception:
         use_service = True
 
+    _check_stop_requested()
+
     if not use_service and not force_service:
         from core.manual_otp import wait_for_manual_otp
         from config import email as _email_cfg
@@ -286,7 +299,9 @@ def wait_for_otp(
             job_id = getattr(svc._THREAD_CTX, "job_id", None)
         except Exception:
             job_id = None
-        return wait_for_manual_otp(email, timeout=timeout, job_id=job_id)
+        result = wait_for_manual_otp(email, timeout=timeout, job_id=job_id)
+        _check_stop_requested()
+        return result
 
     extra_kwargs = {}
     if max_wait is not None:
@@ -295,6 +310,12 @@ def wait_for_otp(
         extra_kwargs["poll_interval"] = poll_interval
     if settle_seconds is not None:
         extra_kwargs["settle_seconds"] = settle_seconds
+
+    def _fetch(fetcher):
+        _check_stop_requested()
+        result = fetcher(email, after_ts=after_ts, **extra_kwargs)
+        _check_stop_requested()
+        return result
 
     # 新注册任务优先采用任务级来源；没有任务覆盖时，已注册账号优先采用落库来源。
     source = (
@@ -305,30 +326,30 @@ def wait_for_otp(
     )
     if source == "gptmail":
         from core.gptmail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return _fetch(fetch_latest_otp)
     if source == "cloudflare":
         from core.cf_temp_mail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return _fetch(fetch_latest_otp)
     if source == "cloudflare_domain":
         from core.qqmail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return _fetch(fetch_latest_otp)
     if source == "generic_api":
         from core.generic_api_mail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return _fetch(fetch_latest_otp)
     if source == "imap":
         from core.imap_mail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return _fetch(fetch_latest_otp)
     if source == "mailnest":
         from core.mailnest_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return _fetch(fetch_latest_otp)
     if source == "cloudmail":
         from core.cloudmail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return _fetch(fetch_latest_otp)
     if source == "remail":
         from core.remail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        return _fetch(fetch_latest_otp)
     from core.outlook_client import fetch_latest_otp
-    return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+    return _fetch(fetch_latest_otp)
 
 
 def email_material_line(email: str, source: str | None = None) -> str:

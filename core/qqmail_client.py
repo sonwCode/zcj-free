@@ -14,6 +14,7 @@ import logging
 import random
 import string
 import time
+from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 from datetime import datetime, timezone
 from email.header import decode_header
 from pathlib import Path
@@ -368,7 +369,7 @@ def fetch_latest_otp(
             logger.info(
                 f"[QQMail] 暂未收到 OpenAI 邮件，{interval}s 后重试（剩余 {remaining}s）..."
             )
-        time.sleep(interval)
+        _stop_sleep(interval)
 
     # 超时但有候选
     if best_otp:

@@ -17,7 +17,25 @@ def _load_functions():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
     wanted = {"_has_running_asyncio_loop", "_run_in_isolated_thread", "run_browser_use_codex_oauth"}
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
-    namespace = {"threading": threading, "logger": _Logger()}
+    binding = {"parent": 731, "child": None, "cleared": False}
+
+    def current_job_id():
+        return binding["parent"]
+
+    def bind_job_id(job_id):
+        binding["child"] = job_id
+
+    def clear_job_id():
+        binding["cleared"] = True
+
+    namespace = {
+        "threading": threading,
+        "logger": _Logger(),
+        "_current_job_id": current_job_id,
+        "_bind_job_id": bind_job_id,
+        "_clear_job_id": clear_job_id,
+        "_binding": binding,
+    }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace
 
@@ -50,6 +68,21 @@ class BrowserUseThreadIsolationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "fixture failure"):
             self.namespace["_run_in_isolated_thread"](fail)
+
+    def test_isolated_thread_propagates_parent_job_context(self):
+        binding = self.namespace["_binding"]
+        binding["parent"] = 842
+        binding["child"] = None
+        binding["cleared"] = False
+        observed = {}
+
+        def work():
+            observed["job_id"] = binding["child"]
+            return "done"
+
+        self.assertEqual(self.namespace["_run_in_isolated_thread"](work), "done")
+        self.assertEqual(observed["job_id"], 842)
+        self.assertTrue(binding["cleared"])
 
     def test_public_entry_routes_to_isolated_thread_when_loop_is_running(self):
         self.namespace["_has_running_asyncio_loop"] = lambda: True

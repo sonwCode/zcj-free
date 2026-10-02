@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ def wait_for_manual_otp(email: str, *, timeout: int = 180, job_id: int | None = 
             if has_tty:
                 # 非阻塞感：短暂等事件，再提示一次
                 if ev.wait(timeout=1.0):
+                    _check_stop_requested()
                     code = pop_manual_otp(email)
                     if code:
                         return code
@@ -141,14 +143,10 @@ def wait_for_manual_otp(email: str, *, timeout: int = 180, job_id: int | None = 
                     if code:
                         return code
             else:
-                ev.wait(timeout=1.0)
+                _stop_sleep(1.0)
 
-            # 支持任务被手动停止
-            try:
-                from core.registration_service import check_stop_requested
-                check_stop_requested()
-            except Exception:
-                pass
+            # 支持任务被手动停止；StopRequested 必须回到 worker 清理路径。
+            _check_stop_requested()
         raise TimeoutError(f"等待手动验证码超时（{timeout}s）：{email}")
     finally:
         clear_waiting(email)

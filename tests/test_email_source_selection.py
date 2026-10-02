@@ -19,6 +19,12 @@ else:
 
 
 class EmailSourceOverrideTests(unittest.TestCase):
+    def test_parse_accepts_fullwidth_source_separators(self):
+        self.assertEqual(
+            email_provider.parse_email_sources("outlook，generic_api"),
+            ["outlook", "generic_api"],
+        )
+
     def test_explicit_source_overrides_global_order(self):
         with patch.object(email_config, "EMAIL_SOURCE", "outlook,generic_api"), patch.object(
             email_provider, "_pick_from_source", side_effect=lambda source, excluded: source

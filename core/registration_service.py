@@ -11,12 +11,14 @@
 """
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from core import codex_retry_service, db, email_provider
+from core.stop_control import StopRequested
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +52,6 @@ def _normalize_job_excluded_emails(values: Any = None) -> list[str]:
             result.append(email)
             seen.add(key)
     return result
-
-
-class StopRequested(RuntimeError):
-    """用户手动停止注册任务。"""
 
 
 def _activate_job(job_id: int) -> None:
@@ -90,6 +88,26 @@ def check_stop_requested() -> None:
     job_id = getattr(_THREAD_CTX, "job_id", None)
     if is_stop_requested(job_id):
         raise StopRequested(f"任务 #{job_id} 已被用户手动停止")
+
+
+def stop_aware_sleep(seconds: float, quantum: float = 0.25) -> None:
+    """等待指定时长，并在停止信号到达时尽快抛出 StopRequested。"""
+    check_stop_requested()
+    remaining = max(0.0, float(seconds or 0.0))
+    quantum = max(0.02, float(quantum or 0.25))
+    job_id = getattr(_THREAD_CTX, "job_id", None)
+
+    while remaining > 0:
+        started = time.monotonic()
+        with _STOP_LOCK:
+            event = _STOP_EVENTS.get(int(job_id)) if job_id else None
+        if event is not None:
+            event.wait(timeout=min(remaining, quantum))
+        else:
+            time.sleep(min(remaining, quantum))
+        elapsed = max(0.0, time.monotonic() - started)
+        remaining -= elapsed
+        check_stop_requested()
 
 
 def _append_job_log(job_id: int, message: str) -> None:
@@ -343,7 +361,6 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     exclude_emails=excluded_emails,
                 )
             if is_stop_requested(job_id):
-                _release_unconsumed_job_email(email, "用户手动停止")
                 db.update_job(
                     job_id,
                     status="stopped",
@@ -354,6 +371,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     completed_at=datetime.now().isoformat(timespec="seconds"),
                 )
                 log_logger.warning(f"[Job {job_id}] 已按用户请求停止")
+                _release_unconsumed_job_email(email, "用户手动停止")
                 return
 
             result_dict = result if isinstance(result, dict) else {}
@@ -393,29 +411,34 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     _release_unconsumed_job_email(email_to_handle, result_error)
                 log_logger.error(f"[Job {job_id}] {result_status}: {result_error or 'unknown'}")
     except StopRequested as exc:
-        _release_unconsumed_job_email(email, str(exc))
         log_logger.warning(f"[Job {job_id}] 已停止: {exc}")
         db.update_job(
             job_id,
             status="stopped",
+            phase="stopped",
+            retryable=False,
             error="用户手动停止",
             completed_at=datetime.now().isoformat(timespec="seconds"),
         )
+        _release_unconsumed_job_email(email, str(exc))
     except Exception as exc:
         err_text = f"{type(exc).__name__}: {exc}"
+        if is_stop_requested(job_id):
+            log_logger.warning(f"[Job {job_id}] 停止中捕获异常，按停止处理: {err_text}")
+            db.update_job(
+                job_id,
+                status="stopped",
+                phase="stopped",
+                retryable=False,
+                error="用户手动停止",
+                completed_at=datetime.now().isoformat(timespec="seconds"),
+            )
+            _release_unconsumed_job_email(email, err_text)
+            return
         if _should_disable_failed_registration_email(err_text):
             _disable_job_email(email, err_text)
         else:
             _release_unconsumed_job_email(email, err_text)
-        if is_stop_requested(job_id):
-            log_logger.warning(f"[Job {job_id}] 停止中捕获异常，按停止处理: {type(exc).__name__}: {exc}")
-            db.update_job(
-                job_id,
-                status="stopped",
-                error="用户手动停止",
-                completed_at=datetime.now().isoformat(timespec="seconds"),
-            )
-            return
         log_logger.exception(f"[Job {job_id}] 异常")
         db.update_job(
             job_id,
@@ -445,7 +468,7 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
         )
         now_iso = datetime.now().isoformat(timespec="seconds")
         if is_stop_requested(job_id) or result.get("status") == "stopped":
-            db.update_job(job_id, status="stopped", email=email, account_id=account_id, error=str(result.get("message") or "用户手动停止")[:500], completed_at=now_iso)
+            db.update_job(job_id, status="stopped", phase="stopped", retryable=False, email=email, account_id=account_id, error=str(result.get("message") or "用户手动停止")[:500], completed_at=now_iso)
         elif result.get("ok"):
             db.update_job(
                 job_id,
@@ -723,6 +746,8 @@ def request_stop_job(job_id: int) -> dict:
             db.update_job(
                 job_id,
                 status="stopped",
+                phase="stopped",
+                retryable=False,
                 completed_at=now_iso,
                 error="用户手动停止（任务实例不存在）",
             )

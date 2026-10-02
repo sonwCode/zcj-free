@@ -13,6 +13,7 @@ import secrets
 import string
 import threading
 import time
+from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email import policy
@@ -599,7 +600,7 @@ def fetch_latest_otp(
         except CFTempMailError as exc:
             last_error = str(exc)
             logger.warning("[Cloudflare] 拉取邮件失败: %s", exc)
-            time.sleep(interval)
+            _stop_sleep(interval)
             continue
 
         if messages:
@@ -692,7 +693,7 @@ def fetch_latest_otp(
             )
         if remaining <= 0:
             break
-        time.sleep(min(interval, max(1, remaining)))
+        _stop_sleep(min(interval, max(1, remaining)))
 
     if best_otp:
         logger.warning("[Cloudflare] 总超时但已有候选，返回 OTP=%s", best_otp)

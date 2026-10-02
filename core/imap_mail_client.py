@@ -6,6 +6,7 @@ import email as email_lib
 import imaplib
 import logging
 import time
+from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -172,7 +173,7 @@ def fetch_latest_otp(
             break
         if best_otp and settle_until is not None and time.time() >= settle_until:
             return best_otp
-        time.sleep(max(1, interval))
+        _stop_sleep(max(1, interval))
 
     if best_otp:
         return best_otp

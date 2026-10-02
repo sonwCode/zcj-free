@@ -29,6 +29,7 @@ import logging
 import os
 import threading
 import time
+from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.header import decode_header
@@ -1271,7 +1272,7 @@ def fetch_latest_otp(
             logger.info(
                 f"[Outlook] 暂未收到符合条件的 OpenAI 邮件，{interval}s 后重试（剩余 {remaining}s）..."
             )
-        time.sleep(interval)
+        _stop_sleep(interval)
 
     # 超时但已经锁定过候选（settle 没等到结束就到 deadline 了）
     if best_otp:

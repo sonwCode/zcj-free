@@ -12,6 +12,7 @@ import json
 import logging
 import random
 import time
+from core.stop_control import sleep as _stop_sleep
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
@@ -101,7 +102,7 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
                 attempt, max_attempts, type(exc).__name__, str(exc)[:200], delay,
             )
             if delay > 0:
-                time.sleep(delay)
+                _stop_sleep(delay)
 
     assert last_exc is not None
     raise last_exc
@@ -148,7 +149,7 @@ def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
                 attempt, max_attempts, type(exc).__name__, str(exc)[:200], delay,
             )
             if delay > 0:
-                time.sleep(delay)
+                _stop_sleep(delay)
 
     raise RuntimeError("authorize 导航重试耗尽")
 
@@ -176,7 +177,7 @@ def _warm_auth_document_for_reauth(session: BrowserSession) -> None:
             logger.debug("[2FA] Auth document 预热异常：%s: %s", type(exc).__name__, str(exc)[:160])
         _clear_twofa_session_circuit(session, source="Auth document 预热")
         if attempt < 2:
-            time.sleep(float(attempt))
+            _stop_sleep(float(attempt))
     logger.info("[2FA] Auth document 预热未通过，继续正式 authorize 重试链")
 
 
@@ -218,7 +219,7 @@ def post_register_dwell(
     if seconds <= 0:
         return
     logger.info("[%s] 注册成功后随机停留 %.1fs：%s", label, seconds, email)
-    time.sleep(seconds)
+    _stop_sleep(seconds)
 
 
 def _account_material_line(email: str, row: dict | None = None) -> str:

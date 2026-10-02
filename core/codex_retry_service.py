@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from core import db
+from core.stop_control import StopRequested
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +241,13 @@ def run_worker(
         db.update_account_codex_status(email, "stopped", result["message"])
         logger.warning("[Codex 补跑] %s 已停止: %s", email, result["message"])
         return result
+    except StopRequested as exc:
+        result = {"status": "stopped", "ok": False, "message": str(exc) or "用户手动停止 Codex 补跑"}
+        db.update_account_codex_status(email, "stopped", result["message"])
+        logger.warning("[Codex 补跑] %s 已停止", email)
+        return result
+    except BaseException:
+        raise
     except Exception as exc:
         if is_stop_requested(email):
             result = {"status": "stopped", "ok": False, "message": "用户手动停止 Codex 补跑"}

@@ -35,6 +35,7 @@ import pyotp
 from config import codex as _cfg
 from core.session import BrowserSession
 from core.humanize import delay as human_delay
+from core.stop_control import sleep as _stop_sleep
 from core.openai_auth import (
     _is_transient_network_error,
     _is_retryable_authorize_error,
@@ -84,7 +85,7 @@ def _with_net_retry(label: str, fn):
                 f"[Codex] {label} 临时性网络错误 ({type(exc).__name__}: {str(exc)[:120]})，"
                 f"{backoff:.1f}s 后重试 (尝试 {attempt}/{_NET_MAX_ATTEMPTS})..."
             )
-            time.sleep(backoff)
+            _stop_sleep(backoff)
     raise last_exc if last_exc else RuntimeError(f"[Codex] {label} 重试耗尽但无异常记录")
 
 
@@ -116,7 +117,7 @@ def _with_auth_navigation_retry(session: BrowserSession, label: str, fn):
                 label, attempt, _NET_MAX_ATTEMPTS, type(exc).__name__,
                 str(exc)[:160], backoff,
             )
-            time.sleep(backoff)
+            _stop_sleep(backoff)
     raise last_exc if last_exc else RuntimeError(f"[Codex] {label} 重试耗尽")
 
 
@@ -517,7 +518,7 @@ def _submit_sub2_callback(callback_url: str, *, session_id: str = "", redirect_u
                 raise
             delay = base_delay * attempt
             logger.warning("[Codex][sub2] callback 上传失败，将在 %.1fs 后重试：attempt=%s/%s error=%s", delay, attempt, max_attempts, exc)
-            time.sleep(delay)
+            _stop_sleep(delay)
     raise RuntimeError(f"[Codex][sub2] callback 上传失败：{last_exc}")
 
 
@@ -907,7 +908,7 @@ def _submit_cpa_callback(callback_url: str) -> dict:
                 "[Codex][CPA] callback 提交失败，将在 %.1fs 后重试：attempt=%s/%s error=%s",
                 delay, attempt, max_attempts, exc
             )
-            time.sleep(delay)
+            _stop_sleep(delay)
     raise RuntimeError(f"[Codex][CPA] callback 提交失败：{last_exc}")
 
 
@@ -1419,7 +1420,7 @@ def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "
         return
     seconds = random.uniform(3.0, 8.0)
     logger.info(f"{prefix} 换号前随机等待 {seconds:.1f} 秒")
-    time.sleep(seconds)
+    _stop_sleep(seconds)
 
 
 def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
@@ -1598,7 +1599,7 @@ def _get_workspace_id(session: BrowserSession) -> str:
             if not raw:
                 raise RuntimeError("[Codex] 找不到 oai-client-auth-session cookie，无法取 workspace_id")
             raise RuntimeError("[Codex] oai-client-auth-session 中无可用 workspace_id")
-        time.sleep(min(_WORKSPACE_POLL_INTERVAL_SECONDS, remaining))
+        _stop_sleep(min(_WORKSPACE_POLL_INTERVAL_SECONDS, remaining))
 
 
 def _select_workspace_and_get_callback(session: BrowserSession, state: str) -> str:

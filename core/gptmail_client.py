@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -195,7 +196,7 @@ def fetch_latest_otp(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        time.sleep(min(interval, remaining))
+        _stop_sleep(min(interval, remaining))
 
     if best_otp:
         return best_otp

@@ -18,6 +18,7 @@ from config import roxybrowser as _roxy_cfg
 from config import openai_protocol as _protocol_cfg
 from config import register as _register_cfg
 from core.session import BrowserSession
+from core.stop_control import sleep as _stop_sleep
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
     follow_authorize,
@@ -127,7 +128,7 @@ def _finalize_registration_session(
                 f"[登录态] 回调或拉取 Token 失败：{email}，"
                 f"{type(exc).__name__}: {str(exc)[:180]}，{backoff:.1f}s 后重试"
             )
-            time.sleep(backoff)
+            _stop_sleep(backoff)
 
     raise RuntimeError(
         f"OAuth 回调/拉取 Token 重试耗尽：{email}，"
@@ -781,7 +782,7 @@ def run_serial_batch(count: int, delay: float, continue_on_fail: bool, batch_dir
 
         if delay > 0 and index < count - 1:
             logger.info(f"[批量] 等待 {delay} 秒后继续")
-            time.sleep(delay)
+            _stop_sleep(delay)
     return results
 
 
@@ -810,7 +811,7 @@ def run_parallel_batch(
         future_to_index[future] = next_index
         next_index += 1
         if delay > 0 and next_index < count:
-            time.sleep(delay)
+            _stop_sleep(delay)
         return True
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="reg-cli") as executor:

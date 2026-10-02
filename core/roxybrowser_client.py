@@ -13,6 +13,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import requests
 
 from config import roxybrowser as _cfg
+from core.stop_control import sleep as _stop_sleep
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ def _wait_for_create_slot() -> None:
 
     if wait_for > 0:
         logger.info("[Roxy] /browser/create 请求错峰，等待 %.2fs", wait_for)
-        time.sleep(wait_for)
+        _stop_sleep(wait_for)
 
 
 @dataclass
@@ -235,16 +236,34 @@ class RoxyBrowserClient:
             or "http 429" in text
         )
 
-    def request(self, method: str, path: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json_body: dict | None = None,
+        timeout_seconds: float | None = None,
+        max_attempts: int | None = None,
+    ) -> dict:
         url = _join_url(self.api_base, path)
         method_u = method.upper()
         is_create = str(path or "").rstrip("/").endswith("/create") or "browser/create" in str(path or "")
-        if is_create:
-            max_attempts = max(1, int(getattr(_cfg, "ROXY_CREATE_RETRIES", 3) or 3))
-            base_delay = max(0.5, float(getattr(_cfg, "ROXY_CREATE_RETRY_DELAY", 3) or 3))
+        if max_attempts is None:
+            if is_create:
+                max_attempts = max(1, int(getattr(_cfg, "ROXY_CREATE_RETRIES", 3) or 3))
+                base_delay = max(0.5, float(getattr(_cfg, "ROXY_CREATE_RETRY_DELAY", 3) or 3))
+            else:
+                max_attempts = max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
+                base_delay = max(0.5, float(getattr(_cfg, "ROXY_API_RETRY_DELAY", 2) or 2))
         else:
-            max_attempts = max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
-            base_delay = max(0.5, float(getattr(_cfg, "ROXY_API_RETRY_DELAY", 2) or 2))
+            max_attempts = max(1, int(max_attempts))
+            base_delay = 0.0
+        request_timeout = (
+            max(1.0, float(timeout_seconds))
+            if timeout_seconds is not None
+            else max(5, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90))
+        )
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -257,7 +276,7 @@ class RoxyBrowserClient:
                     url,
                     params=params or None,
                     json=json_body if json_body is not None else None,
-                    timeout=max(5, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
+                    timeout=request_timeout,
                 )
                 text = resp.text or ""
                 try:
@@ -288,7 +307,7 @@ class RoxyBrowserClient:
                     " create payload/name " if is_create else "请求参数",
                     method_u, path, attempt, max_attempts, exc,
                 )
-                time.sleep(delay)
+                _stop_sleep(delay)
         raise last_exc or RuntimeError(f"Roxy API 请求失败 {method_u} {path}")
 
     def try_request(self, method: str, path: str, *, params: dict | None = None, json_body: dict | None = None) -> tuple[bool, dict | str]:
@@ -589,7 +608,13 @@ class RoxyBrowserClient:
             created_by_run=created_by_run,
         )
 
-    def close_profile(self, profile_id: str) -> None:
+    def close_profile(
+        self,
+        profile_id: str,
+        *,
+        timeout_seconds: float | None = None,
+        max_attempts: int | None = None,
+    ) -> None:
         if not profile_id:
             return
         path = str(_cfg.ROXY_CLOSE_PATH).format(profile_id=profile_id)
@@ -603,12 +628,20 @@ class RoxyBrowserClient:
                 path,
                 params=body if str(_cfg.ROXY_CLOSE_METHOD).upper() == "GET" else None,
                 json_body=body if str(_cfg.ROXY_CLOSE_METHOD).upper() != "GET" else None,
+                timeout_seconds=timeout_seconds,
+                max_attempts=max_attempts,
             )
             logger.info("[Roxy] 已关闭环境：%s", profile_id)
         except Exception as exc:
             logger.warning("[Roxy] 关闭环境失败：%s", exc)
 
-    def delete_profile(self, profile_id: str) -> None:
+    def delete_profile(
+        self,
+        profile_id: str,
+        *,
+        timeout_seconds: float | None = None,
+        max_attempts: int | None = None,
+    ) -> None:
         if not profile_id:
             return
         path = str(getattr(_cfg, "ROXY_DELETE_PATH", "/browser/delete")).format(profile_id=profile_id)
@@ -623,19 +656,31 @@ class RoxyBrowserClient:
                 path,
                 params=body if method.upper() == "GET" else None,
                 json_body=body if method.upper() != "GET" else None,
+                timeout_seconds=timeout_seconds,
+                max_attempts=max_attempts,
             )
             logger.info("[Roxy] 已删除环境：%s", profile_id)
         except Exception as exc:
             logger.warning("[Roxy] 删除环境失败：%s", exc)
 
-    def cleanup_profile(self, opened: RoxyOpenResult | None) -> None:
+    def cleanup_profile(
+        self,
+        opened: RoxyOpenResult | None,
+        *,
+        timeout_seconds: float | None = None,
+        max_attempts: int | None = None,
+    ) -> None:
         """任务结束清理：关闭窗口；一号一环境时删除本轮创建的 Profile。"""
         keep_open = bool(getattr(_cfg, "ROXY_KEEP_BROWSER_OPEN", False))
         try:
             if not opened or not opened.profile_id:
                 return
             if not keep_open:
-                self.close_profile(opened.profile_id)
+                self.close_profile(
+                    opened.profile_id,
+                    timeout_seconds=timeout_seconds,
+                    max_attempts=max_attempts,
+                )
 
             should_delete = (
                 bool(getattr(_cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
@@ -647,7 +692,11 @@ class RoxyBrowserClient:
                 if keep_open:
                     logger.info("[Roxy] ROXY_KEEP_BROWSER_OPEN=True，跳过删除环境：%s", opened.profile_id)
                     return
-                self.delete_profile(opened.profile_id)
+                self.delete_profile(
+                    opened.profile_id,
+                    timeout_seconds=timeout_seconds,
+                    max_attempts=max_attempts,
+                )
         finally:
             if not keep_open:
                 self.close_proxy_pool_relay()

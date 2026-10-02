@@ -12,6 +12,7 @@ import time
 
 from config import openai_protocol as _protocol_cfg
 from core.session import BrowserSession
+from core.stop_control import sleep as _stop_sleep
 from core.sentinel import (
     generate_requirements_token,
     build_sentinel_request_body,
@@ -204,7 +205,7 @@ def _interruptible_sleep(seconds: float, interval: float = 0.25) -> None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
-        time.sleep(min(max(0.01, interval), remaining))
+        _stop_sleep(min(max(0.01, interval), remaining))
 
 
 def _request_with_proxy_retry(session: BrowserSession, label: str, fn):
@@ -308,7 +309,7 @@ def follow_authorize(session: BrowserSession, authorize_url: str) -> str:
                 f"[步骤4] authorize 临时失败 ({type(exc).__name__}: {str(exc)[:120]})，"
                 f"保留当前 session/deviceId/CF Cookie，{backoff:.1f}s 后重试..."
             )
-            time.sleep(backoff)
+            _stop_sleep(backoff)
 
     # 三次都失败：抛出最后一次异常
     raise last_exc if last_exc else RuntimeError("步骤4 重试耗尽但无异常记录")

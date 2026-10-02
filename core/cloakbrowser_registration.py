@@ -2,7 +2,9 @@
 """通过 CloakBrowser + Playwright 适配层执行 ChatGPT 注册。"""
 from __future__ import annotations
 
+import contextvars
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -25,8 +27,61 @@ from core.roxy_registration import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+_STOP_CLEANUP_TIMEOUT_SECONDS = 2.0
 
-def run_cloak_registration(
+
+def _current_job_id() -> int | None:
+    try:
+        from core.registration_service import _THREAD_CTX
+    except ImportError:
+        return None
+    value = getattr(_THREAD_CTX, "job_id", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _bind_job_id(job_id: int | None) -> None:
+    if job_id is None:
+        return
+    try:
+        from core.registration_service import _THREAD_CTX
+    except ImportError:
+        return
+    _THREAD_CTX.job_id = int(job_id)
+
+
+def _clear_job_id() -> None:
+    try:
+        from core.registration_service import _THREAD_CTX
+        delattr(_THREAD_CTX, "job_id")
+    except (ImportError, AttributeError):
+        pass
+
+
+def _bounded_cleanup(label: str, callback):
+    """清理卡住时让注册 worker 回到停止状态落库路径。"""
+    result = []
+    errors = []
+
+    def _run() -> None:
+        try:
+            result.append(callback())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run, name=f"cloak-cleanup-{label}", daemon=True)
+    thread.start()
+    thread.join(_STOP_CLEANUP_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        logger.warning("[Cloak注册] 清理 %s 超时 %.1fs，继续停止流程", label, _STOP_CLEANUP_TIMEOUT_SECONDS)
+    elif errors:
+        logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(errors[0]).__name__, errors[0])
+    return result[0] if result else None
+
+
+def _run_cloak_registration_impl(
     email: str | None,
     name: str,
     birthday: str,
@@ -166,9 +221,9 @@ def run_cloak_registration(
         # 统计注册浏览器关闭前的完整会话；注册后停留期间的网络请求也计入。
         post_register_dwell(email, label="Cloak注册")
         if traffic_tracker is not None:
-            network_traffic = traffic_tracker.stop()
+            network_traffic = _bounded_cleanup("traffic_tracker.stop", traffic_tracker.stop)
         if data_saver is not None:
-            data_saver.stop()
+            _bounded_cleanup("data_saver.stop", data_saver.stop)
         account_id = save_account_data(
             email=email,
             access_token=access_token,
@@ -205,13 +260,6 @@ def run_cloak_registration(
             "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
         }
     except Exception as exc:
-        if traffic_tracker is not None:
-            try:
-                network_traffic = traffic_tracker.stop()
-            except Exception:
-                pass
-        if data_saver is not None:
-            data_saver.stop()
         logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)
         try:
@@ -234,14 +282,60 @@ def run_cloak_registration(
         }
     finally:
         if traffic_tracker is not None:
-            try:
-                traffic_tracker.stop()
-            except Exception:
-                pass
+            _bounded_cleanup("traffic_tracker.stop", traffic_tracker.stop)
         if data_saver is not None:
-            data_saver.stop()
+            _bounded_cleanup("data_saver.stop", data_saver.stop)
         if driver and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            _bounded_cleanup("driver.quit", driver.quit)
+
+
+def _run_in_isolated_thread(fn: Callable, *args, **kwargs):
+    """在没有外部 asyncio loop 的独立线程运行同步 Playwright 流程。"""
+    result_box: dict[str, object] = {}
+    error_box: dict[str, BaseException] = {}
+    parent_thread_name = threading.current_thread().name
+    job_id = _current_job_id()
+    inherited_context = contextvars.copy_context()
+
+    def _target() -> None:
+        if job_id is not None:
+            _bind_job_id(job_id)
+        try:
+            result_box["value"] = inherited_context.run(fn, *args, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 - 需要跨线程回传停止异常
+            error_box["error"] = exc
+        finally:
+            if job_id is not None:
+                _clear_job_id()
+
+    thread = threading.Thread(target=_target, name=parent_thread_name, daemon=False)
+    thread.start()
+    thread.join()
+    if "error" in error_box:
+        raise error_box["error"]
+    return result_box.get("value")
+
+
+def run_cloak_registration(
+    email: str | None,
+    name: str,
+    birthday: str,
+    proxy: str = None,
+    otp_code: str = None,
+    batch_dir: Path | None = None,
+    on_email_acquired: Callable[[str], None] | None = None,
+    exclude_emails=None,
+) -> dict:
+    """CloakBrowser 注册入口；同步 Playwright 始终运行在隔离线程。"""
+    logger.info("[Cloak注册] 使用隔离线程启动同步 Playwright")
+    return _run_in_isolated_thread(
+        _run_cloak_registration_impl,
+        email=email,
+        name=name,
+        birthday=birthday,
+        proxy=proxy,
+        otp_code=otp_code,
+        batch_dir=batch_dir,
+        on_email_acquired=on_email_acquired,
+        exclude_emails=exclude_emails,
+    )
