@@ -1,4 +1,6 @@
-# Turb GPT Register
+# zcj-free
+
+GPT 账号自动化注册工具，支持多注册通道与 WebUI 管理。
 
 ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目支持三套注册驱动：
 
