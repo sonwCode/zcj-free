@@ -435,7 +435,16 @@ def _refresh_after_missing_page_element(driver, step: str, retry_index: int) -> 
             "%s %s未找到，刷新页面重试（第 %s/%s 次）：url=%s",
             _log_prefix(driver), step, retry_index + 1, max_retries, current_url[:180],
         )
-        driver.refresh()
+        if "/auth/error" in current_url.lower() or "chrome-error" in current_url.lower():
+            _safe_get(
+                driver,
+                "https://chatgpt.com/auth/login",
+                timeout=45,
+                attempts=2,
+                accept_hosts=("chatgpt.com",),
+            )
+        else:
+            driver.refresh()
         _stop_aware_sleep(1.5)
         _page_warmup(driver, reason=f"missing_{step}")
         return True
@@ -1933,19 +1942,16 @@ def _click_passwordless_signup_if_present(driver) -> dict:
         const btn = candidates.find(isPasswordlessOtp);
         if (!btn) return {ok:false, reason:'missing_passwordless_button'};
         btn.scrollIntoView({block:'center'});
+        try { btn.click(); }
+        catch (_) { btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); }
         return {
           ok:true,
-          reason:'passwordless_send_otp_target',
-          button: btn,
+          reason:'clicked_passwordless_send_otp',
           name: btn.getAttribute('name') || '',
           value: btn.getAttribute('value') || '',
           text: (btn.textContent || '').trim().slice(0, 80)
         };
         """) or {"ok": False, "reason": "empty_result"}
-        if result.get("ok") and result.get("button"):
-            _human_click(driver, result.get("button"), label="passwordless_otp")
-            result["reason"] = "clicked_passwordless_send_otp"
-            result.pop("button", None)
         return result
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -1980,18 +1986,17 @@ def _click_continue_with_password_if_present(driver) -> dict:
         const btn = candidates.find(isPasswordCreate);
         if (!btn) return {ok:false, reason:'missing_continue_with_password'};
         btn.scrollIntoView({block:'center'});
+        try { btn.click(); }
+        catch (_) {
+          btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+        }
         return {
           ok:true,
-          reason:'continue_with_password_target',
-          button: btn,
+          reason:'clicked_continue_with_password',
           href: btn.getAttribute('href') || '',
           text: (btn.textContent || '').trim().slice(0, 80)
         };
         """) or {"ok": False, "reason": "empty_result"}
-        if result.get("ok") and result.get("button"):
-            _human_click(driver, result.get("button"), label="continue_with_password")
-            result["reason"] = "clicked_continue_with_password"
-            result.pop("button", None)
         return result
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -2091,7 +2096,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
         buttons[0].el.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets', input, button: buttons[0].el};
+        return {ok:true, reason:'password_targets'};
         """) or {}
         _check_manual_stop()
         if not result.get('ok'):
@@ -2103,8 +2108,22 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                 end = time.time() + timeout
                 continue
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
-        _human_type_text(driver, result.get("input"), password, clear=True)
+        password_result = driver.execute_script("""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const input = [...document.querySelectorAll('input[type=\"password\"],input[name*=\"password\" i],input[autocomplete=\"new-password\"]')]
+          .find(el => visible(el) && !el.disabled && !el.readOnly);
+        if (!input) return {ok:false, reason:'missing_password_input'};
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(input, String(arguments[0])); else input.value = String(arguments[0]);
+        input.dispatchEvent(new Event('input', {bubbles:true}));
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+        input.blur();
+        return {ok:true, reason:'password_filled'};
+        """, password) or {};
         _check_manual_stop()
+        if not password_result.get('ok'):
+            raise RuntimeError(f"密码输入失败：{password_result}")
         # React/Auth0 会在 input/change 后异步校验密码强度并启用 Continue。
         # 之前输入完 0.4~1.4s 就点，偶发点在按钮还未真正可提交/事件未绑定完成时，页面无反应。
         human_delay("form", minimum=2.0, maximum=3.6)
@@ -2136,10 +2155,11 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         const target = scored[0]?.el;
         if (!target) return {ok:false, reason:'missing_enabled_submit'};
         target.scrollIntoView({block:'center'});
+        try { target.click(); }
+        catch (_) { target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); }
         return {
           ok:true,
-          reason:'enabled_submit_target',
-          button: target,
+          reason:'clicked_enabled_submit',
           text: (target.textContent || target.getAttribute('value') || '').trim().slice(0, 80),
           type: target.getAttribute('type') || '',
           dd: target.getAttribute('data-dd-action-name') || '',
@@ -2147,7 +2167,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         };
         """) or {}
         _check_manual_stop()
-        if not submit_result.get("ok") or not submit_result.get("button"):
+        if not submit_result.get("ok"):
             reason = str(submit_result.get('reason') or '')
             if reason == 'missing_enabled_submit' and _refresh_after_missing_page_element(
                 driver, "密码页 Continue 按钮", missing_element_refreshes
@@ -2156,7 +2176,6 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                 end = time.time() + timeout
                 continue
             raise RuntimeError(f"密码页找不到可点击的 Continue 按钮：{submit_result} state={_password_page_state(driver)}")
-        _human_click(driver, submit_result.get("button"), label="password_submit")
         _check_manual_stop()
         logger.info("%s 已填写并点击密码页 Continue：detail=%s", _log_prefix(driver), {k: v for k, v in submit_result.items() if k != "button"})
         # 高延迟代理下 Auth0 提交和导航可能明显超过 20 秒；过早进入 OTP 阶段
@@ -2438,6 +2457,7 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
     end = time.time() + timeout
     auto_jump_end = time.time() + max(3, int(auto_jump_wait or 15))
     last_data = None
+    last_url = ""
     forced_chatgpt_open = False
 
     while time.time() < end:
@@ -2446,10 +2466,12 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
             current = str(driver.current_url or '')
         except Exception:
             current = ''
+        last_url = current[:240]
 
         if 'chatgpt.com' not in current:
             if _switch_to_chatgpt_window_if_any(driver):
                 current = str(getattr(driver, "current_url", "") or "")
+                last_url = current[:240]
             elif time.time() >= auto_jump_end and not forced_chatgpt_open:
                 try:
                     logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 15))
@@ -2457,6 +2479,7 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                     forced_chatgpt_open = True
                     _stop_aware_sleep(3)
                     current = str(getattr(driver, "current_url", "") or "")
+                    last_url = current[:240]
                 except Exception as exc:
                     last_data = f"{type(exc).__name__}: {exc}"
             else:
@@ -2474,7 +2497,10 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                 last_data = f"{type(exc).__name__}: {exc}"
         _stop_aware_sleep(2)
 
-    raise RuntimeError(f"等待 /api/auth/session accessToken 超时，最后响应: {str(last_data)[:800]}")
+    raise RuntimeError(
+        f"等待 /api/auth/session accessToken 超时，最后 URL={last_url or 'unknown'}，"
+        f"最后响应: {str(last_data)[:800]}"
+    )
 
 
 def _check_manual_stop() -> None:

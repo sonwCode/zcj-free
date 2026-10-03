@@ -271,6 +271,26 @@ def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 18)
         logger.info("[Codex][Browser] 已点击一次性验证码入口，未立即检测到 OTP 页，继续后续 OTP 轮询")
 
 
+def _codex_auth_error_state(driver) -> dict:
+    """识别登录页错误/资源加载失败，避免把错误页当作 OTP 页长时间等待。"""
+    try:
+        state = driver.execute_script("""
+        return {url: location.href, text: (document.body && document.body.innerText || '').slice(0, 900)};
+        """) or {}
+    except Exception as exc:
+        return {"url": getattr(driver, "current_url", ""), "text": "", "error": f"{type(exc).__name__}: {exc}"}
+    url = str(state.get("url") or "").lower()
+    text = str(state.get("text") or "").lower()
+    hit = (
+        "oops, an error occurred" in text
+        or "failed to fetch dynamically imported module" in text
+        or "chrome-error" in url
+        or "/auth/error" in url
+        or ("/log-in" in url and not _is_email_verification_page(driver) and "try again" in text)
+    )
+    return {"hit": hit, "url": url, "text": text[:240]}
+
+
 def _wait_for_otp_input(driver, timeout: int = 30) -> None:
     """验证码已收到但 OTP 输入框可能尚未出现（点完一次性验证码后常有中间页/延迟渲染）。
 
@@ -280,6 +300,9 @@ def _wait_for_otp_input(driver, timeout: int = 30) -> None:
     end = time.time() + timeout
     passwordless_retries = 0
     while time.time() < end:
+        error_state = _codex_auth_error_state(driver)
+        if error_state.get("hit"):
+            raise RuntimeError(f"Codex 授权页面加载失败：url={error_state.get('url')} text={error_state.get('text')}")
         if _is_email_verification_page(driver):
             return
         if _is_login_password_page(driver) and passwordless_retries < 2:
@@ -530,7 +553,14 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             continue
         used_codes.add(code)
         logger.info("[Codex][Browser] 邮箱 OTP 收到：length=%s", len(code))
-        _wait_for_otp_input(driver, timeout=30)
+        try:
+            _wait_for_otp_input(driver, timeout=30)
+        except Exception as exc:
+            if otp_attempt >= max_otp_attempts:
+                raise
+            logger.warning("[Codex][Browser] OTP 输入页不可用，重新打开授权流程：%s", str(exc)[:220])
+            _restart_email_otp_flow("OTP 页面错误或动态资源加载失败")
+            continue
         _install_email_otp_validate_hook(driver)
         validate_before = _email_otp_validate_snapshot(driver)
         _clear_otp_inputs(driver)

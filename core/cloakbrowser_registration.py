@@ -20,9 +20,10 @@ from core.humanize import delay as human_delay
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
 from core.roxy_registration import (  # noqa: F401
-    _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
+    _maybe_accept, _type_email_address, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
+    _safe_get,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,10 +84,9 @@ def _bounded_cleanup(label: str, callback):
 
 def _restart_cloak_email_otp(driver, email: str) -> None:
     """重新打开登录入口提交邮箱，避免登录页状态下继续点击 resend。"""
-    driver.get("https://chatgpt.com/auth/login")
+    _safe_get(driver, "https://chatgpt.com/auth/login", timeout=60, attempts=2, accept_hosts=("chatgpt.com",))
     human_delay("navigate")
     _maybe_accept(driver)
-    _type_email_address(driver, email, timeout=15)
     _submit_email_and_wait_next(driver, email, attempts=2)
 
 
@@ -126,7 +126,7 @@ def _run_cloak_registration_impl(
 
         otp_after_ts = time.time()
         logger.info("[Cloak注册] 打开登录页：https://chatgpt.com/auth/login")
-        driver.get("https://chatgpt.com/auth/login")
+        _safe_get(driver, "https://chatgpt.com/auth/login", timeout=60, attempts=2, accept_hosts=("chatgpt.com",))
         human_delay("navigate")
         _maybe_accept(driver)
         _check_manual_stop()
