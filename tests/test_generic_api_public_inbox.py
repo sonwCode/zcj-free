@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from core.generic_api_mail_client import (
     GenericApiEmailAccount,
+    GenericApiMailError,
+    _extract_structured_api_code,
     _public_inbox_latest_code_url,
     fetch_latest_otp,
 )
@@ -44,7 +47,108 @@ class _Session:
         })
 
 
+class _StructuredSession:
+    def __init__(self, payload):
+        self.payload = payload
+        self.urls = []
+        self.proxies = {}
+        self.trust_env = True
+
+    def get(self, url, **_kwargs):
+        self.urls.append(url)
+        return _Response(self.payload)
+
+
 class GenericApiPublicInboxTests(unittest.TestCase):
+    def test_otp_diagnostics_do_not_log_code_values(self):
+        source = (Path(__file__).parents[1] / "core" / "generic_api_mail_client.py").read_text(encoding="utf-8")
+        self.assertNotIn("OTP={code}", source)
+        self.assertNotIn("OTP={best_otp}", source)
+        self.assertNotIn("structured API 跳过旧验证码: code=%s", source)
+        self.assertNotIn("inline messages 页面提取到 OTP=%s", source)
+        self.assertIn("OTP：length=", source)
+
+    def test_structured_message_list_filters_old_and_selects_newest(self):
+        payload = {
+            "items": [
+                {
+                    "id": "message-older-after",
+                    "receivedAt": 2600,
+                    "subject": "Your temporary ChatGPT login code",
+                    "bodyPreview": "Enter this temporary verification code to continue: 123456",
+                    "verificationCode": "123456",
+                },
+                {
+                    "id": "message-newest",
+                    "receivedAt": 3000,
+                    "subject": "Your temporary ChatGPT login code",
+                    "bodyPreview": "Enter this temporary verification code to continue: 654321",
+                    "verificationCode": "654321",
+                },
+                {
+                    "id": "message-old",
+                    "receivedAt": 2000,
+                    "subject": "Your temporary ChatGPT login code",
+                    "bodyPreview": "Enter this temporary verification code to continue: 111111",
+                    "verificationCode": "111111",
+                },
+            ]
+        }
+        parsed = _extract_structured_api_code(json.dumps(payload), after_ts=2500)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], "654321")
+        self.assertEqual(parsed[1]["mail_id"], "message-newest")
+        old_only = {"items": [payload["items"][2]]}
+        self.assertIsNone(_extract_structured_api_code(json.dumps(old_only), after_ts=2500))
+
+        email = "inbox@example.com"
+        account = GenericApiEmailAccount(
+            email=email,
+            code_url="https://mail.example/v1/pickup?email=inbox@example.com&token=service-token",
+        )
+        session = _StructuredSession(payload)
+        with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
+             patch("core.generic_api_mail_client.requests.Session", return_value=session):
+            code = fetch_latest_otp(
+                email,
+                after_ts=2500,
+                max_wait=2,
+                poll_interval=0.01,
+                settle_seconds=0,
+            )
+        self.assertEqual(code, "654321")
+        self.assertEqual(len(session.urls), 1)
+        self.assertIn("_otp_poll=", session.urls[0])
+
+        old_session = _StructuredSession(old_only)
+        with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
+             patch("core.generic_api_mail_client.requests.Session", return_value=old_session):
+            with self.assertRaises(GenericApiMailError):
+                fetch_latest_otp(
+                    email,
+                    after_ts=2500,
+                    max_wait=0.05,
+                    poll_interval=0.01,
+                    settle_seconds=0,
+                )
+        self.assertGreaterEqual(len(old_session.urls), 1)
+
+    def test_fetch_latest_otp_excludes_previously_submitted_code(self):
+        email = "inbox@example.com"
+        account = GenericApiEmailAccount(email=email, code_url="https://mail.example/v1/pickup?email=inbox@example.com&token=service-token")
+        payload = {"items": [{
+            "id": "old-message", "receivedAt": 4000,
+            "subject": "Your temporary ChatGPT login code",
+            "bodyPreview": "Enter this temporary verification code to continue: 654321",
+            "verificationCode": "654321",
+        }]}
+        session = _StructuredSession(payload)
+        with patch("core.generic_api_mail_client.get_account_context", return_value=account), \
+             patch("core.generic_api_mail_client.requests.Session", return_value=session):
+            with self.assertRaises(GenericApiMailError):
+                fetch_latest_otp(email, after_ts=3000, exclude_codes={"654321"}, max_wait=0.05, poll_interval=0.01, settle_seconds=0)
+
+
     def test_remail_console_pickup_page_is_normalized_to_json_endpoint(self):
         page_url = (
             "https://remail.aishop6.com/pickup?"

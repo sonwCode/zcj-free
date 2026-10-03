@@ -402,6 +402,102 @@ def _parse_generic_api_ts(value) -> float | None:
     return None
 
 
+def _extract_structured_message_list_code(
+    data: dict, after_ts: float | None = None
+) -> tuple[str, dict] | None:
+    """从 ReMail 等 items 响应中按邮件时间选择最新验证码。"""
+    payload = data
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        payload = nested
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+
+    candidates: list[tuple[float, int, str, dict]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        received_at = next(
+            (
+                item.get(name)
+                for name in (
+                    "receivedAt",
+                    "received_at",
+                    "timestamp",
+                    "createdAt",
+                    "created_at",
+                )
+                if item.get(name) not in (None, "")
+            ),
+            None,
+        )
+        msg_ts = _parse_generic_api_ts(received_at)
+        if after_ts and msg_ts and msg_ts + 30 < after_ts:
+            continue
+
+        raw_code = next(
+            (
+                item.get(name)
+                for name in ("verificationCode", "verification_code", "code", "otp")
+                if item.get(name) not in (None, "")
+            ),
+            None,
+        )
+        code = None
+        if raw_code is not None:
+            match = _CODE_REGEX.search(str(raw_code))
+            code = match.group(1) if match else None
+        if not code:
+            body = "\n".join(
+                str(item.get(name) or "")
+                for name in ("subject", "bodyPreview", "body_preview", "text", "content")
+            )
+            code = extract_otp(
+                {
+                    "subject": str(item.get("subject") or ""),
+                    "text": body,
+                    "content": body,
+                }
+            )
+        if not code:
+            continue
+
+        candidates.append(
+            (
+                msg_ts if msg_ts is not None else float("-inf"),
+                index,
+                code,
+                {
+                    "source": "structured_api",
+                    "mail_id": item.get("id") or item.get("messageId"),
+                    "received_at": received_at,
+                    "msg_ts": msg_ts,
+                    "subject": item.get("subject"),
+                    "from": item.get("fromAddress") or item.get("sender") or item.get("from"),
+                },
+            )
+        )
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda value: (value[0], -value[1]), reverse=True)
+    _timestamp, _index, code, metadata = candidates[0]
+    return code, metadata
+
+
+def _is_structured_message_list_response(text: str) -> bool:
+    """判断响应是否是已知邮件列表格式，避免旧列表走通用展平回退。"""
+    try:
+        data = json.loads(text or "")
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    payload = data.get("data") if isinstance(data.get("data"), dict) else data
+    return isinstance(payload, dict) and isinstance(payload.get("items"), list)
+
+
 def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tuple[str, dict] | None:
     """
     兼容 newzoe 这类直接返回 JSON 的取码接口：
@@ -416,6 +512,14 @@ def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tu
     except Exception:
         return None
     if not isinstance(data, dict):
+        return None
+
+    message_list_result = _extract_structured_message_list_code(data, after_ts=after_ts)
+    if message_list_result:
+        return message_list_result
+    list_payload = data.get("data") if isinstance(data.get("data"), dict) else data
+    if isinstance(list_payload, dict) and isinstance(list_payload.get("items"), list):
+        # 已识别为消息列表但当前没有 after_ts 之后的邮件，禁止展平旧列表回退。
         return None
 
     # 常见字段优先级：code / otp / verification_code；没有再回退从拉平文本提取。
@@ -449,8 +553,8 @@ def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tu
     msg_ts = _parse_generic_api_ts(ts_raw)
     if after_ts and msg_ts and msg_ts + 2 < after_ts:
         logger.debug(
-            "[GenericAPI] structured API 跳过旧验证码: code=%s ts=%s after=%s subject=%r",
-            code,
+            "[GenericAPI] structured API 跳过旧验证码：length=%s ts=%s after=%s subject=%r",
+            len(code),
             ts_raw,
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(after_ts)),
             str(data.get("subject") or "")[:80],
@@ -544,7 +648,7 @@ def _fetch_yangyang_otp(
         code = _extract_yangyang_openai_code(subject, body)
         if code:
             logger.info(
-                f"[GenericAPI] yangyang 页面提取到 OTP={code}, "
+                f"[GenericAPI] yangyang 页面提取到 OTP：length={len(code)}，"
                 f"mail_id={msg_id}, ts={detail.get('receivedAt') or item.get('received_at')}, subject={subject[:80]!r}"
             )
             return code, {
@@ -631,8 +735,8 @@ def _fetch_inline_messages_page_otp(
         code = _extract_yangyang_openai_code(str(item.get("subject") or ""), str(item.get("body") or ""))
         if code:
             logger.info(
-                "[GenericAPI] inline messages 页面提取到 OTP=%s, mail_id=%s, ts=%s, subject=%r",
-                code, item.get("mail_id"), item.get("received_at"), str(item.get("subject") or "")[:80],
+                "[GenericAPI] inline messages 页面提取到 OTP：length=%s, mail_id=%s, ts=%s, subject=%r",
+                len(code), item.get("mail_id"), item.get("received_at"), str(item.get("subject") or "")[:80],
             )
             return code, {
                 "mail_id": item.get("mail_id"),
@@ -733,6 +837,7 @@ def fetch_latest_otp(
     max_wait: int | None = None,
     poll_interval: int | None = None,
     settle_seconds: int | None = None,
+    exclude_codes: set[str] | None = None,
 ) -> str:
     """
     轮询该邮箱配置的 code_url，直到提取到 6 位验证码或超时。
@@ -741,6 +846,7 @@ def fetch_latest_otp(
     如果期间取码地址返回了不同验证码，则替换候选并重置 settle 倒计时；
     连续 settle 秒没有变化后才返回，避免取到接口缓存中的旧码。
     """
+    excluded_codes = {str(code).strip() for code in (exclude_codes or set()) if str(code).strip()}
     account = get_account_context(email)
     if account is None:
         raise GenericApiMailError(f"通用 API 邮箱不存在或未导入: {email}")
@@ -833,19 +939,19 @@ def fetch_latest_otp(
                     best_seen_at = now_seen
                     settle_until = now_seen + settle
                     logger.info(
-                        f"[GenericAPI] 首次锁定 OTP={code}, source={result_source} mail_id={yy_meta.get('mail_id')} ts={yy_meta.get('received_at')}, "
+                        f"[GenericAPI] 首次锁定 OTP：length={len(code)}, source={result_source} mail_id={yy_meta.get('mail_id')} ts={yy_meta.get('received_at')}，"
                         f"等 {settle}s 看取码接口是否出现更新验证码..."
                     )
                 elif code != best_otp:
                     logger.info(
-                        f"[GenericAPI] 发现更新 OTP={code}, source={result_source} mail_id={yy_meta.get('mail_id')} ts={yy_meta.get('received_at')}，"
-                        f"替换之前的 {best_otp}, 重置 settle 计时"
+                        f"[GenericAPI] 发现更新 OTP：length={len(code)}, source={result_source} mail_id={yy_meta.get('mail_id')} ts={yy_meta.get('received_at')}，"
+                        f"替换之前的 OTP：length={len(best_otp)}，重置 settle 计时"
                     )
                     best_otp = code
                     best_seen_at = now_seen
                     settle_until = now_seen + settle
                 else:
-                    logger.debug(f"[GenericAPI] 取码接口仍返回候选 OTP={best_otp}")
+                    logger.debug("[GenericAPI] 取码接口仍返回候选 OTP：length=%s", len(best_otp))
                 resp = None
                 text = ""
             else:
@@ -881,8 +987,16 @@ def fetch_latest_otp(
                         after_ts=None if public_inbox_api_url else after_ts,
                     )
                 structured_meta = structured[1] if structured else {}
-                code = structured[0] if structured else _extract_code(text)
+                if structured:
+                    code = structured[0]
+                elif _is_structured_message_list_response(text):
+                    code = None
+                else:
+                    code = _extract_code(text)
                 if mailbox_mismatch:
+                    code = None
+                if code and code in excluded_codes:
+                    logger.info("[GenericAPI] 跳过已提交的旧 OTP：length=%s", len(code))
                     code = None
                 if code:
                     if (
@@ -905,32 +1019,32 @@ def fetch_latest_otp(
                         settle_until = now_seen + settle
                         if structured_meta:
                             logger.info(
-                                f"[GenericAPI] 首次锁定 OTP={code}, source=structured_api "
+                                f"[GenericAPI] 首次锁定 OTP：length={len(code)}, source=structured_api "
                                 f"ts={structured_meta.get('received_at')} subject={str(structured_meta.get('subject') or '')[:80]!r}, "
                                 f"等 {settle}s 看取码接口是否出现更新验证码..."
                             )
                         else:
                             logger.info(
-                                f"[GenericAPI] 首次锁定 OTP={code}, "
+                                f"[GenericAPI] 首次锁定 OTP：length={len(code)}, "
                                 f"等 {settle}s 看取码接口是否出现更新验证码..."
                             )
                     elif code != best_otp:
                         if structured_meta:
                             logger.info(
-                                f"[GenericAPI] 发现更新 OTP={code}, source=structured_api "
+                                f"[GenericAPI] 发现更新 OTP：length={len(code)}, source=structured_api "
                                 f"ts={structured_meta.get('received_at')} subject={str(structured_meta.get('subject') or '')[:80]!r}，"
-                                f"替换之前的 {best_otp}, 重置 settle 计时"
+                                f"替换之前的 OTP：length={len(best_otp)}，重置 settle 计时"
                             )
                         else:
                             logger.info(
-                                f"[GenericAPI] 发现更新 OTP={code}，"
-                                f"替换之前的 {best_otp}, 重置 settle 计时"
+                                f"[GenericAPI] 发现更新 OTP：length={len(code)}，"
+                                f"替换之前的 OTP：length={len(best_otp)}，重置 settle 计时"
                             )
                         best_otp = code
                         best_seen_at = now_seen
                         settle_until = now_seen + settle
                     else:
-                        logger.debug(f"[GenericAPI] 取码接口仍返回候选 OTP={best_otp}")
+                        logger.debug("[GenericAPI] 取码接口仍返回候选 OTP：length=%s", len(best_otp))
                 else:
                     if not mailbox_mismatch:
                         if public_inbox_api_url and isinstance(public_payload, dict) and public_payload.get("code") is None:
@@ -945,7 +1059,7 @@ def fetch_latest_otp(
         now = time.time()
         if best_otp and settle_until is not None and now >= settle_until:
             logger.info(
-                f"[GenericAPI] settle 完成，返回 OTP={best_otp}, "
+                f"[GenericAPI] settle 完成，返回 OTP：length={len(best_otp)}，"
                 f"候选锁定时间={time.strftime('%H:%M:%S', time.localtime(best_seen_at))}"
             )
             return best_otp
@@ -953,7 +1067,7 @@ def fetch_latest_otp(
         remaining = int(deadline - now)
         if best_otp and settle_until is not None:
             logger.info(
-                f"[GenericAPI] 已锁定候选 OTP={best_otp}，等 settle 中"
+                f"[GenericAPI] 已锁定候选 OTP：length={len(best_otp)}，等 settle 中"
                 f"（剩余 settle ~{max(0, int(settle_until - now))}s, 总剩余 {remaining}s）..."
             )
         else:
@@ -964,7 +1078,7 @@ def fetch_latest_otp(
         _stop_sleep(interval)
 
     if best_otp:
-        logger.warning(f"[GenericAPI] 总超时但已有候选，返回 OTP={best_otp}")
+        logger.warning("[GenericAPI] 总超时但已有候选，返回 OTP：length=%s", len(best_otp))
         return best_otp
 
     raise GenericApiMailError(f"等待通用 API 验证码超时: {email}; {last_error}")

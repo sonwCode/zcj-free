@@ -275,6 +275,7 @@ def wait_for_otp(
     settle_seconds: int | None = None,
     email_source: str | None = None,
     force_service: bool = False,
+    exclude_codes: set[str] | None = None,
 ) -> str:
     """等待并返回该邮箱最新的 ChatGPT OTP（6 位数字字符串）。
 
@@ -310,6 +311,8 @@ def wait_for_otp(
         extra_kwargs["poll_interval"] = poll_interval
     if settle_seconds is not None:
         extra_kwargs["settle_seconds"] = settle_seconds
+    if exclude_codes:
+        extra_kwargs["exclude_codes"] = set(exclude_codes)
 
     def _fetch(fetcher):
         _check_stop_requested()

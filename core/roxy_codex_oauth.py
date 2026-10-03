@@ -406,16 +406,18 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
           .filter(x => x.below)
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
-        buttons[0].el.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets', input, button: buttons[0].el};
+        return {ok:true, reason:'password_targets'};
         """) or {}
         if not result.get("ok"):
             logger.info("[Codex][Browser] 登录密码页未找到输入/提交按钮：%s", result)
             _stop_sleep(0.5)
             continue
-        _human_type_text(driver, result.get("input"), password, clear=True)
+        if not result.get("ok"):
+            logger.info("[Codex][Browser] 登录密码页目标未找到：%s", result)
+            continue
+        _human_type_password_by_selector(driver, password)
         human_delay("form", minimum=2.0, maximum=3.6)
-        _human_click(driver, result.get("button"), label="codex_password_submit")
+        _click_if_present(driver, ["button[type='submit']"], timeout=8)
         logger.info("[Codex][Browser] 已填写并提交登录密码：%s", email)
         wait_end = time.time() + 12
         while time.time() < wait_end:

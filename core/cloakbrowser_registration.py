@@ -81,6 +81,15 @@ def _bounded_cleanup(label: str, callback):
     return result[0] if result else None
 
 
+def _restart_cloak_email_otp(driver, email: str) -> None:
+    """重新打开登录入口提交邮箱，避免登录页状态下继续点击 resend。"""
+    driver.get("https://chatgpt.com/auth/login")
+    human_delay("navigate")
+    _maybe_accept(driver)
+    _type_email_address(driver, email, timeout=15)
+    _submit_email_and_wait_next(driver, email, attempts=2)
+
+
 def _run_cloak_registration_impl(
     email: str | None,
     name: str,
@@ -144,27 +153,38 @@ def _run_cloak_registration_impl(
         _check_manual_stop()
 
         current_otp = otp_code
+        used_otps: set[str] = set()
         max_otp_attempts = 3
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
                 try:
-                    current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                    current_otp = wait_for_otp(email, after_ts=otp_after_ts, exclude_codes=used_otps)
+                    if current_otp in used_otps:
+                        raise RuntimeError("取码接口仍返回已提交的旧验证码")
                 except Exception as exc:
                     if otp_attempt >= max_otp_attempts:
                         raise
                     logger.warning(
-                        "[Cloak注册][OTP] 一直未收到验证码，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
+                        "[Cloak注册][OTP] 未收到新验证码，重新提交邮箱触发 OTP（下一轮 %s/%s）：%s: %s",
                         otp_attempt + 1,
                         max_otp_attempts,
                         type(exc).__name__,
                         str(exc)[:180],
                     )
                     otp_after_ts = time.time()
-                    _click_resend_email_otp(driver, timeout=25)
+                    _restart_cloak_email_otp(driver, email)
                     human_delay("api")
                     current_otp = None
                     continue
+            current_otp = str(current_otp or "").strip()
+            if current_otp in used_otps:
+                if otp_attempt >= max_otp_attempts:
+                    raise RuntimeError("邮箱验证码重复返回，已达到最大重试次数")
+                otp_after_ts = time.time()
+                current_otp = None
+                continue
+            used_otps.add(current_otp)
             logger.info("[Cloak注册][OTP] 收到验证码：%s", current_otp)
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
@@ -180,7 +200,7 @@ def _run_cloak_registration_impl(
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             otp_after_ts = time.time()
-            _click_resend_email_otp(driver, timeout=25)
+            _restart_cloak_email_otp(driver, email)
             human_delay("api")
             current_otp = None
 
