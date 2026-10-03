@@ -13,6 +13,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT
@@ -609,12 +610,27 @@ def _generic_api_email_line(row: dict) -> str:
 
 
 def _normalize_generic_api_code_url(value: object) -> str:
-    """修复导入文本中误粘贴到 URL 前面的短横线。"""
+    """规范化通用取码链接，兼容 ReMail 控制台复制的网页地址。"""
     url = str(value or "").strip()
     if url.startswith("-"):
         candidate = url.lstrip("-")
         if candidate.lower().startswith(("http://", "https://")):
-            return candidate
+            url = candidate
+
+    # ReMail 控制台给出的 /pickup 页面会返回前端 HTML；实际取码接口是
+    # 同一组 email/token 参数下的 /v1/pickup JSON endpoint。
+    try:
+        parsed = urlsplit(url)
+        query_keys = {key for key, _value in parse_qsl(parsed.query, keep_blank_values=True)}
+        if (
+            parsed.scheme.lower() in ("http", "https")
+            and parsed.netloc
+            and parsed.path.rstrip("/").lower() == "/pickup"
+            and {"email", "token"}.issubset(query_keys)
+        ):
+            return urlunsplit(parsed._replace(path="/v1/pickup"))
+    except ValueError:
+        pass
     return url
 
 

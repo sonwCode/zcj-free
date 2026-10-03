@@ -8,6 +8,7 @@ from core.generic_api_mail_client import (
     _public_inbox_latest_code_url,
     fetch_latest_otp,
 )
+from core.db import _normalize_generic_api_code_url
 
 
 class _Response:
@@ -44,6 +45,17 @@ class _Session:
 
 
 class GenericApiPublicInboxTests(unittest.TestCase):
+    def test_remail_console_pickup_page_is_normalized_to_json_endpoint(self):
+        page_url = (
+            "https://remail.aishop6.com/pickup?"
+            "email=inbox@example.com&token=service-token"
+        )
+        self.assertEqual(
+            _normalize_generic_api_code_url(page_url),
+            "https://remail.aishop6.com/v1/pickup?"
+            "email=inbox@example.com&token=service-token",
+        )
+
     def test_public_link_is_converted_to_latest_code_api(self):
         self.assertEqual(
             _public_inbox_latest_code_url("https://mail.knm03.com/i/HTOJyWzFuVXC"),
