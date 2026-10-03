@@ -99,6 +99,9 @@ def _run_cloak_registration_impl(
     traffic_tracker: PlaywrightTrafficTracker | None = None
     data_saver: BrowserDataSaver | None = None
     network_traffic: dict | None = None
+    traffic_tracker_stopped = False
+    data_saver_stopped = False
+    driver_quit = False
     try:
         driver, opened = build_cloak_driver(proxy=proxy)
         try:
@@ -220,9 +223,11 @@ def _run_cloak_registration_impl(
 
         # 统计注册浏览器关闭前的完整会话；注册后停留期间的网络请求也计入。
         post_register_dwell(email, label="Cloak注册")
-        if traffic_tracker is not None:
+        if traffic_tracker is not None and not traffic_tracker_stopped:
+            traffic_tracker_stopped = True
             network_traffic = _bounded_cleanup("traffic_tracker.stop", traffic_tracker.stop)
-        if data_saver is not None:
+        if data_saver is not None and not data_saver_stopped:
+            data_saver_stopped = True
             _bounded_cleanup("data_saver.stop", data_saver.stop)
         account_id = save_account_data(
             email=email,
@@ -281,11 +286,14 @@ def _run_cloak_registration_impl(
             "error": f"{type(exc).__name__}: {str(exc)[:300]}",
         }
     finally:
-        if traffic_tracker is not None:
+        if traffic_tracker is not None and not traffic_tracker_stopped:
+            traffic_tracker_stopped = True
             _bounded_cleanup("traffic_tracker.stop", traffic_tracker.stop)
-        if data_saver is not None:
+        if data_saver is not None and not data_saver_stopped:
+            data_saver_stopped = True
             _bounded_cleanup("data_saver.stop", data_saver.stop)
-        if driver and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
+        if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
+            driver_quit = True
             _bounded_cleanup("driver.quit", driver.quit)
 
 

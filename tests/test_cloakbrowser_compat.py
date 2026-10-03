@@ -21,6 +21,10 @@ class _Locator:
         self.value += text
         self.calls.append(("type", text, delay, timeout))
 
+    def fill(self, text, timeout=None):
+        self.value = text
+        self.calls.append(("fill", text, timeout))
+
 
 class _Keyboard:
     def __init__(self):
@@ -59,6 +63,15 @@ class CloakElementCompatibilityTests(unittest.TestCase):
             element.send_keys(char)
 
         self.assertEqual(locator.value, "mail@example.test")
+
+    def test_fill_writes_complete_value_atomically(self):
+        locator = _Locator("partial")
+        element = CloakElement(page=_Page(), locator=locator)
+
+        element.fill("mail@example.test")
+
+        self.assertEqual(locator.value, "mail@example.test")
+        self.assertIn(("fill", "mail@example.test", 10000), locator.calls)
 
     def test_send_keys_dispatches_backspace_as_a_key(self):
         page = _Page()

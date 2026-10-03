@@ -1435,6 +1435,8 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
     http = sms_provider._http()
     max_retries = _cfg.SMS_MAX_RETRIES
     provider = _sms_provider_name()
+    # 预检阶段可能直接抛出短信依赖错误；异常清理路径也会读取该变量。
+    activation_id = None
 
     def cancel_and_report_failure(activation_id, reason) -> None:
         if not activation_id:

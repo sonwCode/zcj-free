@@ -230,12 +230,17 @@ def pick_domain_email() -> str:
             "EMAIL_DOMAIN 未配置，请在 config/email.py 中设置你的 Cloudflare 域名"
         )
 
-    prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-    email = f"{prefix}@{domain}"
-
-    claim_next_domain_email(email)
-    logger.info(f"[QQMail] 生成域名邮箱: {email}")
-    return email
+    for _ in range(20):
+        prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        email = f"{prefix}@{domain}"
+        try:
+            claim_next_domain_email(email)
+        except ValueError:
+            # 随机地址极低概率碰撞已有任务，换一个地址而不是复用旧账号。
+            continue
+        logger.info(f"[QQMail] 生成域名邮箱: {email}")
+        return email
+    raise QQMailClientError("连续生成域名邮箱时发生地址冲突，请稍后重试")
 
 
 def release_domain_email(email: str, status: str = "available", note: str | None = None) -> None:

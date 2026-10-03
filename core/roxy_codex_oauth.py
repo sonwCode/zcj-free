@@ -1616,6 +1616,8 @@ def _do_phone_verification_if_present(driver) -> dict | None:
     provider = str(getattr(sms_provider._cfg, "SMS_PROVIDER", "") or "").strip().lower() if hasattr(sms_provider, "_cfg") else ""
     http = sms_provider._http()
     max_retries = int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10) if hasattr(sms_provider, "_cfg") else 10
+    # 预检阶段可能直接抛出短信依赖错误；异常清理路径也会读取该变量。
+    activation_id = None
     try:
         # 如果页面没有手机号输入框，直接返回。
         try:

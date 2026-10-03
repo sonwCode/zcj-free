@@ -246,8 +246,6 @@ def run_worker(
         db.update_account_codex_status(email, "stopped", result["message"])
         logger.warning("[Codex 补跑] %s 已停止", email)
         return result
-    except BaseException:
-        raise
     except Exception as exc:
         if is_stop_requested(email):
             result = {"status": "stopped", "ok": False, "message": "用户手动停止 Codex 补跑"}

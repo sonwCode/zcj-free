@@ -949,6 +949,20 @@ def _decorate_imap_email(row: dict, account_by_email: dict[str, dict] | None = N
     return out
 
 
+def _decorate_domain_email(row: dict, account_by_email: dict[str, dict] | None = None) -> dict:
+    """为域名邮箱池补齐已注册账号关联字段，与其它本地邮箱池保持一致。"""
+    out = dict(row)
+    out["copy_line"] = str(out.get("copy_line") or out.get("email") or "")
+    account = account_by_email.get((out.get("email") or "").lower()) if account_by_email else None
+    if account:
+        out["registered_account_id"] = account.get("id")
+        out["access_token"] = account.get("access_token")
+        out["access_token_preview"] = ((account.get("access_token") or "")[:40] + "...") if account.get("access_token") else ""
+        out["account_copy_line"] = _account_line(account)
+        out["totp_secret"] = account.get("totp_secret")
+    return out
+
+
 def list_email_pool_page(
     source: str = "all",
     status: str | None = None,
@@ -1031,7 +1045,7 @@ def list_email_pool_page(
         elif item_source == "imap":
             item = _decorate_imap_email(item, {str(item.get("email") or "").lower(): account} if account else {})
         else:
-            item = dict(item)
+            item = _decorate_domain_email(item, {str(item.get("email") or "").lower(): account} if account else {})
         item["source"] = item_source
         if not item.get("copy_line"):
             item["copy_line"] = item.get("email") or ""
@@ -1072,8 +1086,14 @@ def insert_account(
     with _LOCK:
         accounts = _load_accounts()
         outlook_rows = _load_outlook()
+        generic_rows = _load_generic_api_emails()
+        imap_rows = _load_imap_emails()
+        domain_rows = _load_domain_pool()
         existing = _find_by_email(accounts, email)
         outlook_row = _find_by_email(outlook_rows, email)
+        generic_row = _find_by_email(generic_rows, email)
+        imap_row = _find_by_email(imap_rows, email)
+        domain_row = _find_by_email(domain_rows, email)
         extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
 
         if existing is None:
@@ -1103,22 +1123,67 @@ def insert_account(
             "updated_at": _now(),
         })
 
-        if outlook_row:
+        # 注册成功后把账号关联信息回写到实际邮箱来源池。历史实现只更新
+        # Outlook，导致 generic_api/imap/域名邮箱仍像“未完成”的孤立素材。
+        source_hint = str(email_source if email_source is not None else row.get("email_source") or "").strip().lower()
+        source_hint = {
+            "domain": "cloudflare_domain",
+            "cloudflare-domain": "cloudflare_domain",
+            "generic-api": "generic_api",
+        }.get(source_hint, source_hint)
+        if source_hint not in {"outlook", "generic_api", "imap", "cloudflare_domain"}:
+            source_hint = ""
+        if not source_hint:
+            if outlook_row is not None:
+                source_hint = "outlook"
+            elif generic_row is not None:
+                source_hint = "generic_api"
+            elif imap_row is not None:
+                source_hint = "imap"
+            elif domain_row is not None:
+                source_hint = "cloudflare_domain"
+
+        # 账号表也保存规范化后的来源名，避免历史别名（domain/generic-api）
+        # 让后续 resolve_email_source() 退回到错误的全局来源。
+        if source_hint:
+            row["email_source"] = source_hint
+
+        pool_row = {
+            "outlook": outlook_row,
+            "generic_api": generic_row,
+            "imap": imap_row,
+            "cloudflare_domain": domain_row,
+        }.get(source_hint)
+        pool_now = _now()
+
+        if pool_row is not None:
+            pool_row["status"] = "used"
+            pool_row["used_at"] = pool_row.get("used_at") or pool_now
+            pool_row["registered_account_id"] = row_id
+            pool_row["access_token"] = access_token
+            pool_row["completed_at"] = pool_now
+            pool_row["updated_at"] = pool_now
+            if totp_secret:
+                pool_row["totp_secret"] = totp_secret
+
+        if outlook_row and source_hint == "outlook":
             row["password"] = outlook_row.get("password")
             row["client_id"] = outlook_row.get("client_id")
             row["refresh_token"] = outlook_row.get("refresh_token")
             row["original_email_line"] = _outlook_line(outlook_row)
-            outlook_row["status"] = "used"
-            outlook_row["used_at"] = outlook_row.get("used_at") or _now()
-            outlook_row["registered_account_id"] = row_id
-            outlook_row["access_token"] = access_token
-            outlook_row["completed_at"] = _now()
-            if totp_secret:
-                outlook_row["totp_secret"] = totp_secret
+        elif generic_row and source_hint == "generic_api":
+            row["original_email_line"] = _generic_api_email_line(generic_row)
+        elif imap_row and source_hint == "imap":
+            row["original_email_line"] = _imap_email_line(imap_row)
+        elif domain_row and source_hint == "cloudflare_domain":
+            row["original_email_line"] = str(domain_row.get("email") or email)
 
         row["copy_line"] = _account_line(row)
         _save_accounts(accounts)
         _save_outlook(outlook_rows)
+        _save_generic_api_emails(generic_rows)
+        _save_imap_emails(imap_rows)
+        _save_domain_pool(domain_rows)
         return row_id
 
 
@@ -3415,6 +3480,99 @@ def job_status_counts() -> dict:
     return counts
 
 
+def recover_interrupted_registration_jobs(exclude_job_ids: set[int] | None = None) -> list[dict]:
+    """把 WebUI 重启前遗留的注册任务落为可重试终态。
+
+    线程池状态只存在于进程内，服务重启后 pending/running/stopping 不可能继续执行；
+    若保留原状态，任务列表会永久显示活动中。返回值保留邮箱和账号信息，供服务层
+    回收尚未生成账号的邮箱素材。
+    """
+    excluded = {int(value) for value in (exclude_job_ids or set())}
+    with _LOCK:
+        jobs = _load_jobs()
+        accounts = _load_accounts()
+        account_by_id = {
+            int(row.get("id")): row
+            for row in accounts
+            if str(row.get("id") or "").strip().lstrip("-").isdigit()
+        }
+        account_by_email = {
+            str(row.get("email") or "").strip().casefold(): row
+            for row in accounts
+            if str(row.get("email") or "").strip()
+        }
+        now = _now()
+        recovered: list[dict] = []
+        for row in jobs:
+            job_id = int(row.get("id") or 0)
+            if job_id in excluded or row.get("status") not in {"pending", "running", "stopping"}:
+                continue
+
+            original_status = str(row.get("status") or "")
+            email = str(row.get("email") or "").strip() or None
+            account = None
+            raw_account_id = row.get("account_id")
+            if raw_account_id is not None:
+                try:
+                    account = account_by_id.get(int(raw_account_id))
+                except (TypeError, ValueError):
+                    account = None
+            if account is None and email:
+                account = account_by_email.get(email.casefold())
+
+            if original_status == "pending":
+                row.update({
+                    "status": "cancelled",
+                    "phase": "cancelled",
+                    "error_code": "webui_restarted",
+                    "retryable": True,
+                    "account_status": "cancelled",
+                    "codex_status": "not_started",
+                    "error_message": "WebUI 重启导致排队任务取消，请重试",
+                    "completed_at": now,
+                })
+            elif account is not None:
+                account_id = int(account.get("id"))
+                codex_status = str(account.get("codex_status") or "not_started").strip().lower()
+                codex_complete = codex_status in {"success", "skipped"}
+                row.update({
+                    "status": "success" if codex_complete else "partial_success",
+                    "phase": "completed" if codex_complete else "codex",
+                    "error_code": None if codex_complete else "webui_restarted",
+                    "retryable": False if codex_complete or codex_status == "deactivated" else True,
+                    "account_status": "success",
+                    "codex_status": codex_status,
+                    "email": email or account.get("email"),
+                    "account_id": account_id,
+                    "error_message": None if codex_complete else "WebUI 重启导致 Codex 阶段中断，请补跑 Codex",
+                    "completed_at": now,
+                })
+            else:
+                row.update({
+                    "status": "stopped",
+                    "phase": "stopped",
+                    "error_code": "webui_restarted",
+                    "retryable": True,
+                    "account_status": "stopped",
+                    "codex_status": "not_started",
+                    "error_message": "WebUI 重启导致注册任务中断，请重试",
+                    "completed_at": now,
+                })
+
+            recovered.append({
+                "id": job_id,
+                "job_type": row.get("job_type", "registration"),
+                "email": email or (account or {}).get("email"),
+                "account_id": (account or {}).get("id"),
+                "status": row.get("status"),
+                "had_account": account is not None,
+            })
+
+        if recovered:
+            _save_jobs(jobs)
+        return recovered
+
+
 def get_job(job_id: int) -> dict | None:
     with _LOCK:
         row = next((r for r in _load_jobs() if int(r.get("id") or 0) == int(job_id)), None)
@@ -3633,20 +3791,31 @@ def _find_domain_email(rows: list[dict], email: str) -> dict | None:
 
 
 def claim_next_domain_email(email: str) -> dict:
-    """记录一个新的域名邮箱地址到池中（标记为 available）。"""
+    """记录并占用一个域名邮箱地址，供当前注册任务使用。"""
     with _LOCK:
         rows = _load_domain_pool()
-        if _find_domain_email(rows, email):
-            # 已存在，直接返回
-            row = _find_domain_email(rows, email)
+        row = _find_domain_email(rows, email)
+        now = _now()
+        if row:
+            # 旧的 available 行可能来自上次未消耗的任务，重新领取时原子占用。
+            # 已经绑定账号或仍在使用的行不覆盖其关联信息。
+            if str(row.get("status") or "").strip().lower() in {"", "available"}:
+                row["status"] = "used"
+                row["used_at"] = now
+                row["note"] = None
+                row["updated_at"] = now
+                _save_domain_pool(rows)
+            else:
+                raise ValueError(f"域名邮箱已占用，不能重复领取: {email}")
             return row
         row = {
             "id": _next_id(rows),
             "email": email,
-            "status": "available",
-            "used_at": None,
+            "status": "used",
+            "used_at": now,
             "note": None,
-            "created_at": _now(),
+            "created_at": now,
+            "updated_at": now,
         }
         rows.append(row)
         _save_domain_pool(rows)

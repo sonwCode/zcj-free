@@ -10,8 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-ROOT = Path(__file__).resolve().parents[2]
-PROJECT = ROOT / "turb-gpt-register"
+PROJECT = Path(__file__).resolve().parents[1]
 STAGED_PROVIDER = PROJECT / "core" / "sms_provider.py"
 ROXY_SOURCE = PROJECT / "core" / "roxy_codex_oauth.py"
 BROWSER_USE_SOURCE = PROJECT / "core" / "browser_use_codex_oauth.py"
@@ -53,6 +52,7 @@ def _load_staged_provider():
         "config",
         "core",
         "core.registration_service",
+        "core.stop_control",
         "staged_sms_provider",
     )
     previous = {name: sys.modules.get(name, sentinel) for name in module_names}
@@ -105,6 +105,10 @@ def _load_staged_provider():
         core.registration_service = registration_service
         sys.modules["core"] = core
         sys.modules["core.registration_service"] = registration_service
+        stop_control = types.ModuleType("core.stop_control")
+        stop_control.sleep = lambda seconds, quantum=0.25: None
+        core.stop_control = stop_control
+        sys.modules["core.stop_control"] = stop_control
 
         spec = importlib.util.spec_from_file_location("staged_sms_provider", STAGED_PROVIDER)
         module = importlib.util.module_from_spec(spec)
@@ -330,7 +334,11 @@ class SmsProviderStrategyTests(unittest.TestCase):
         ])
         sleeps = []
 
-        with patch.object(sms_provider.time, "sleep", side_effect=sleeps.append):
+        with patch.object(
+            sms_provider,
+            "_stop_sleep",
+            side_effect=lambda seconds, quantum=0.25: sleeps.append(seconds),
+        ):
             code = sms_provider.wait_for_sms_code("a1", http=http, max_wait=2, poll_interval=0)
 
         self.assertEqual(code, "222")

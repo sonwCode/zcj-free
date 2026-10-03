@@ -64,6 +64,8 @@ class _SmsProvider:
 
     def preflight_sms_dependency(self, http):
         self.events.append(("preflight",))
+        if self.mode == "preflight_error":
+            raise _SmsNoBalanceError("preflight no balance")
 
     def acquire_number(self, http):
         self.events.append(("acquire",))
@@ -185,6 +187,15 @@ class CodexPhoneFeedbackTests(unittest.TestCase):
         self.assertEqual(phone_activation["price_currency"], "USD")
         self.assertLess(provider.events.index(("success", "activation-1")), provider.events.index(("complete", "activation-1")))
         self.assertNotIn(("failure", "activation-1", "code_timeout"), provider.events)
+
+    def test_preflight_provider_error_preserves_original_exception(self):
+        provider = _SmsProvider("preflight_error")
+        function = _load_phone_function(provider, [])
+
+        with self.assertRaisesRegex(_SmsNoBalanceError, "preflight no balance"):
+            function(object())
+
+        self.assertEqual(provider.events, [("preflight",)])
 
 
 if __name__ == "__main__":

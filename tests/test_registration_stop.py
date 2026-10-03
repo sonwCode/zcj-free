@@ -147,6 +147,9 @@ class RegistrationStopTests(unittest.TestCase):
             self.assertEqual(stopped[0].get("error"), "用户手动停止")
             self.assertEqual(stopped[0].get("phase"), "stopped")
             self.assertIs(stopped[0].get("retryable"), False)
+            self.assertEqual(stopped[0].get("account_status"), "stopped")
+            self.assertEqual(stopped[0].get("codex_status"), "not_started")
+            self.assertEqual(stopped[0].get("error_code"), "stopped")
             release.assert_called_once_with(email, "fixture stop")
             self.assertNotIn(job_id, registration_service._ACTIVE_JOBS)
         finally:
@@ -186,7 +189,82 @@ class RegistrationStopTests(unittest.TestCase):
             self.assertEqual(stopped[0].get("phase"), "stopped")
             self.assertIs(stopped[0].get("retryable"), False)
             self.assertEqual(stopped[0].get("error"), "用户手动停止")
+            self.assertEqual(stopped[0].get("account_status"), "stopped")
+            self.assertEqual(stopped[0].get("codex_status"), "not_started")
+            self.assertEqual(stopped[0].get("error_code"), "stopped")
             self.assertNotIn(job_id, registration_service._ACTIVE_JOBS)
+        finally:
+            Path(log_file).unlink(missing_ok=True)
+
+    def test_terminal_partial_success_and_blocked_jobs_are_not_stoppable(self):
+        for status in ("partial_success", "blocked"):
+            with self.subTest(status=status), patch.object(
+                registration_service.db,
+                "get_job",
+                return_value={"id": 1, "status": status},
+            ), patch.object(registration_service.db, "update_job") as update_job:
+                result = registration_service.request_stop_job(1)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["state"], status)
+            update_job.assert_not_called()
+
+    def test_cancel_pending_codex_retry_releases_reservation_and_account_state(self):
+        job = {
+            "id": 77,
+            "status": "pending",
+            "job_type": "codex_retry",
+            "email": "queued-codex@example.test",
+        }
+        with patch.object(registration_service.db, "list_jobs", return_value=[job]), \
+                patch.object(registration_service.db, "update_job") as update_job, \
+                patch.object(registration_service.db, "update_account_codex_status") as update_account, \
+                patch.object(codex_retry_service, "release") as release:
+            self.assertEqual(registration_service.cancel_pending_jobs(), 1)
+
+        release.assert_called_once_with(job["email"])
+        update_account.assert_called_once_with(
+            job["email"], "stopped", "用户手动取消 Codex 补跑排队"
+        )
+        update_job.assert_called_once()
+        self.assertEqual(update_job.call_args.kwargs["status"], "cancelled")
+        self.assertEqual(update_job.call_args.kwargs["account_status"], "success")
+        self.assertEqual(update_job.call_args.kwargs["codex_status"], "stopped")
+        self.assertTrue(update_job.call_args.kwargs["retryable"])
+
+    def test_worker_persists_failed_terminal_status_fields(self):
+        job_id = self._next_job_id()
+        email = f"worker-failed-{job_id}@example.test"
+        log_file = tempfile.NamedTemporaryFile(delete=False).name
+        job = {
+            "id": job_id,
+            "status": "pending",
+            "email_source_mode": "auto",
+            "email_source": "outlook",
+            "log_file": log_file,
+        }
+        updates = []
+        fake_main = types.ModuleType("main")
+
+        def run_registration(**kwargs):
+            raise RuntimeError("fixture registration failure")
+
+        fake_main.run_registration = run_registration
+
+        with patch.object(registration_service.db, "get_job", return_value=job), \
+                patch.object(registration_service.db, "update_job", side_effect=lambda _job_id, **kwargs: updates.append(kwargs)), \
+                patch.object(registration_service, "_prepare_registration_args", return_value=(email, "Test User", "1990-01-01")), \
+                patch.object(registration_service, "_release_unconsumed_job_email"), \
+                patch.object(registration_service.email_provider, "email_source_context", return_value=contextlib.nullcontext()), \
+                patch.dict(sys.modules, {"main": fake_main}):
+            registration_service._run_one_job(job_id, log_file)
+
+        try:
+            failed = [item for item in updates if item.get("status") == "failed"][-1]
+            self.assertEqual(failed["phase"], "registration")
+            self.assertEqual(failed["account_status"], "failed")
+            self.assertEqual(failed["codex_status"], "not_started")
+            self.assertEqual(failed["error_code"], "runtimeerror")
+            self.assertTrue(failed["retryable"])
         finally:
             Path(log_file).unlink(missing_ok=True)
 
@@ -278,6 +356,71 @@ class RegistrationStopTests(unittest.TestCase):
         finally:
             Path(log_file).unlink(missing_ok=True)
 
+    def test_worker_keeps_saved_account_when_stop_arrives_after_registration(self):
+        job_id = self._next_job_id()
+        email = f"saved-stop-{job_id}@example.test"
+        log_file = tempfile.NamedTemporaryFile(delete=False).name
+        job = {
+            "id": job_id,
+            "status": "pending",
+            "email_source_mode": "auto",
+            "email_source": "outlook",
+            "log_file": log_file,
+        }
+        updates = []
+        fake_main = types.ModuleType("main")
+
+        def run_registration(**kwargs):
+            self._set_stop(job_id)
+            return {
+                "success": True,
+                "task_status": "partial_success",
+                "account_status": "success",
+                "codex_status": "failed",
+                "account_id": 88,
+                "email": email,
+                "error": "Codex failed after account save",
+            }
+
+        fake_main.run_registration = run_registration
+
+        with patch.object(registration_service.db, "get_job", return_value=job), \
+                patch.object(registration_service.db, "update_job", side_effect=lambda _id, **kwargs: updates.append(kwargs)), \
+                patch.object(registration_service, "_prepare_registration_args", return_value=(email, "Test User", "1990-01-01")), \
+                patch.object(registration_service, "_release_unconsumed_job_email") as release, \
+                patch.object(registration_service.email_provider, "email_source_context", return_value=contextlib.nullcontext()), \
+                patch.dict(sys.modules, {"main": fake_main}):
+            registration_service._run_one_job(job_id, log_file)
+
+        try:
+            terminal = [item for item in updates if item.get("status") == "partial_success"][-1]
+            self.assertEqual(terminal["account_status"], "success")
+            self.assertEqual(terminal["codex_status"], "failed")
+            self.assertEqual(terminal["account_id"], 88)
+            self.assertTrue(terminal["retryable"])
+            self.assertEqual(terminal["error"], "用户手动停止，账号已保存，Codex 可补跑")
+            release.assert_not_called()
+        finally:
+            Path(log_file).unlink(missing_ok=True)
+
+    def test_recover_interrupted_jobs_releases_only_unconsumed_email(self):
+        recovered = [
+            {"id": 1, "email": "unconsumed@example.test", "had_account": False},
+            {"id": 2, "email": "saved@example.test", "had_account": True},
+        ]
+        released = []
+        with patch.object(
+            registration_service.db,
+            "recover_interrupted_registration_jobs",
+            return_value=recovered,
+        ), patch.object(
+            registration_service,
+            "_release_unconsumed_job_email",
+            side_effect=lambda email, reason: released.append((email, reason)),
+        ):
+            self.assertEqual(registration_service.recover_interrupted_jobs(), 2)
+        self.assertEqual([item[0] for item in released], ["unconsumed@example.test"])
+
     def test_roxy_broad_exception_does_not_swallow_stop(self):
         class Driver:
             def execute_script(self, script):
@@ -307,6 +450,56 @@ class RegistrationStopTests(unittest.TestCase):
         self.assertFalse(codex_retry_service.is_retrying(email))
         update_status.assert_called_once()
         self.assertEqual(update_status.call_args.args[1], "stopped")
+
+    def test_codex_retry_converts_ordinary_exception_to_failed_result(self):
+        email = "retry-error@example.test"
+        key = email.casefold()
+        with codex_retry_service._RETRYING_LOCK:
+            codex_retry_service._RETRYING.add(key)
+            codex_retry_service._RESERVED_AT[key] = time.time()
+
+        fake_codex = types.ModuleType("core.codex_oauth")
+
+        def fail(_email, force=False):
+            raise RuntimeError("fixture oauth failure")
+
+        fake_codex.run_codex_oauth = fail
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(codex_retry_service, "check_stop_requested", return_value=None), \
+                    patch.object(codex_retry_service.db, "update_account_codex_status") as update_status, \
+                    patch.dict(sys.modules, {"core.codex_oauth": fake_codex}):
+                result = codex_retry_service.run_worker(
+                    email,
+                    clear_log=False,
+                    target_log_path=Path(tmp) / "retry.log",
+                )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("fixture oauth failure", result["message"])
+        self.assertFalse(codex_retry_service.is_retrying(email))
+        update_status.assert_called_once()
+        self.assertEqual(update_status.call_args.args[1], "failed")
+
+    def test_codex_retry_job_persists_account_and_codex_terminal_states(self):
+        job_id = self._next_job_id()
+        email = "retry-job@example.test"
+        job = {"id": job_id, "status": "pending"}
+        updates = []
+        with patch.object(registration_service.db, "get_job", return_value=job), \
+                patch.object(registration_service.db, "update_job", side_effect=lambda _id, **kwargs: updates.append(kwargs)), \
+                patch.object(codex_retry_service, "run_worker", return_value={
+                    "status": "failed", "ok": False, "message": "oauth failed",
+                }), \
+                patch.object(codex_retry_service, "release"):
+            registration_service._run_codex_retry_job(job_id, "retry.log", email, 42)
+
+        terminal = [item for item in updates if item.get("status") == "failed"][-1]
+        self.assertEqual(terminal["phase"], "codex")
+        self.assertEqual(terminal["account_status"], "success")
+        self.assertEqual(terminal["codex_status"], "failed")
+        self.assertEqual(terminal["error_code"], "codex_failed")
+        self.assertTrue(terminal["retryable"])
+        self.assertEqual(terminal["account_id"], 42)
 
 
 if __name__ == "__main__":

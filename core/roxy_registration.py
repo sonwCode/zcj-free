@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import string
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +27,35 @@ from core.stop_control import (
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 
 logger = logging.getLogger(__name__)
+_ROXY_STOP_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+
+def _bounded_stop_cleanup(label: str, callback):
+    """停止信号到达后限制浏览器清理等待，确保任务能落库为 stopped。"""
+    if not _is_stop_requested():
+        return callback()
+
+    result: list[object] = []
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result.append(callback())
+        except BaseException as exc:  # noqa: BLE001 - 清理异常不能覆盖任务终态
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run, name=f"roxy-cleanup-{label}", daemon=True)
+    thread.start()
+    timeout = max(
+        1.0,
+        float(getattr(_cfg, "ROXY_STOP_CLEANUP_TIMEOUT", _ROXY_STOP_CLEANUP_TIMEOUT_SECONDS) or _ROXY_STOP_CLEANUP_TIMEOUT_SECONDS),
+    )
+    thread.join(timeout)
+    if thread.is_alive():
+        logger.warning("[Roxy注册] 停止清理 %s 超时 %.1fs，继续状态收尾", label, timeout)
+    elif errors:
+        logger.debug("[Roxy注册] 停止清理 %s 失败：%s: %s", label, type(errors[0]).__name__, errors[0])
+    return result[0] if result else None
 
 
 def _enable_performance_logging(options) -> None:
@@ -524,6 +554,87 @@ def _find_visible_email_input_js(driver):
     """)
 
 
+def _is_cloak_driver(driver) -> bool:
+    return bool(driver is not None and driver.__class__.__name__ == "CloakSeleniumDriver")
+
+
+def _find_visible_email_input(driver):
+    """Use a live Playwright locator for Cloak instead of a one-shot handle."""
+    if not _is_cloak_driver(driver):
+        return _find_visible_email_input_js(driver)
+    try:
+        for selector in _EMAIL_INPUT_SELECTORS:
+            for element in driver.find_elements("css selector", selector):
+                if _visible(element):
+                    return element
+    except Exception as exc:
+        logger.debug("%s 通过 live locator 查找邮箱输入框失败：%s: %s", _log_prefix(driver), type(exc).__name__, exc)
+    return None
+
+
+def _set_visible_email_value_js(driver, email: str) -> dict:
+    """Re-apply an email value to the current DOM node after a React rerender."""
+    try:
+        return driver.execute_script(r"""
+        const value = String(arguments[0] || '').trim();
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+          && !el.disabled && !el.readOnly;
+        const input = [...document.querySelectorAll('input[type="email"],input[name="email"],input[name="username"],input[autocomplete*="email"]')]
+          .find(visible);
+        if (!input) return {ok:false, reason:'missing_email_input'};
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        input.focus();
+        if (setter) setter.call(input, value); else input.value = value;
+        try { input.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, inputType:'insertText', data:value})); } catch (_) {}
+        try { input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value})); } catch (_) {
+          input.dispatchEvent(new Event('input', {bubbles:true}));
+        }
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+        return {ok:true, value:input.value};
+        """, email) or {}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _write_email_value(driver, element, email: str) -> bool:
+    """Write a complete email value and verify the live DOM after React updates."""
+    value = str(email or "").strip()
+    if not _is_cloak_driver(driver):
+        _human_type_text(driver, element, value, clear=True)
+        return True
+
+    candidate = element
+    for attempt in range(2):
+        _check_manual_stop()
+        if candidate is None:
+            candidate = _find_visible_email_input(driver)
+        try:
+            fill = getattr(candidate, "fill", None)
+            if not callable(fill):
+                raise RuntimeError("Cloak 邮箱输入框没有 fill 方法")
+            fill(value)
+        except Exception as exc:
+            logger.debug("%s Cloak 邮箱整值填充失败 attempt=%s: %s: %s", _log_prefix(driver), attempt + 1, type(exc).__name__, exc)
+        _stop_aware_sleep(0.12)
+        state = _email_input_value_state(driver)
+        values = [str(item.get("value") or "").strip().lower() for item in (state.get("inputs") or [])]
+        if value.lower() in values:
+            return True
+        # React 可能在 fill 返回后立即替换节点；下一轮重新取得 live locator。
+        candidate = None
+
+    repaired = _set_visible_email_value_js(driver, value)
+    _stop_aware_sleep(0.12)
+    state = _email_input_value_state(driver)
+    values = [str(item.get("value") or "").strip().lower() for item in (state.get("inputs") or [])]
+    if value.lower() in values:
+        logger.info("%s Cloak 邮箱已通过 DOM setter 修复并校验：%s", _log_prefix(driver), repaired)
+        return True
+    logger.warning("%s Cloak 邮箱写入仍未校验通过：expected=%s state=%s repair=%s", _log_prefix(driver), value, state, repaired)
+    return False
+
+
 def _is_oauth_consent_like(driver) -> bool:
     """检测是否已到 OAuth 授权/consent 页。这里不能再点任何邮箱分支或全局提交按钮。"""
     try:
@@ -613,7 +724,7 @@ def _wait_for_email_input(driver, timeout: int | None = None):
             _check_manual_stop()
             if advanced:
                 raise _EmailFlowAdvanced(advanced)
-            el = _find_visible_email_input_js(driver)
+            el = _find_visible_email_input(driver)
             if el:
                 _check_manual_stop()
                 return el
@@ -635,7 +746,7 @@ def _wait_for_email_input(driver, timeout: int | None = None):
 def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
     """进入邮箱登录/注册方式并填写邮箱。全程不依赖页面可见文字。"""
     el = _wait_for_email_input(driver, timeout=timeout)
-    _human_type_text(driver, el, email, clear=True)
+    _write_email_value(driver, el, email)
 
 
 def _submit_nearest_form_for_active_input(driver) -> bool:
@@ -1140,7 +1251,7 @@ def _submit_email_and_wait_next(
                 current_email = str(email_supplier() or "").strip()
                 if not current_email:
                     raise RuntimeError("邮箱分配器返回了空邮箱地址")
-                _human_type_text(driver, email_input, current_email, clear=True)
+                _write_email_value(driver, email_input, current_email)
                 _check_manual_stop()
         except _EmailFlowAdvanced as exc:
             if exc.state == "login_password":
@@ -2391,6 +2502,10 @@ def run_roxy_registration(
     asset_cache: RoxyLocalAssetCache | None = None
     asset_cache_snapshot: dict | None = None
     network_traffic: dict | None = None
+    asset_cache_stopped = False
+    traffic_tracker_stopped = False
+    data_saver_stopped = False
+    driver_quit = False
 
     def _merge_proxy_transport_traffic() -> None:
         """用代理链全量计数补正仅覆盖当前页面 target 的 CDP 统计。"""
@@ -2627,17 +2742,20 @@ def run_roxy_registration(
         # 统计注册浏览器关闭前的完整会话；注册后停留期间的网络请求也计入。
         post_register_dwell(email, label="Roxy注册")
         _traffic_checkpoint()
-        if asset_cache is not None:
-            asset_cache_snapshot = asset_cache.stop()
-        if traffic_tracker is not None:
-            network_traffic = traffic_tracker.stop()
+        if asset_cache is not None and not asset_cache_stopped:
+            asset_cache_stopped = True
+            asset_cache_snapshot = _bounded_stop_cleanup("asset_cache.stop", asset_cache.stop)
+        if traffic_tracker is not None and not traffic_tracker_stopped:
+            traffic_tracker_stopped = True
+            network_traffic = _bounded_stop_cleanup("traffic_tracker.stop", traffic_tracker.stop)
         if asset_cache_snapshot is not None:
             if not isinstance(network_traffic, dict):
                 network_traffic = {}
             network_traffic["local_asset_cache"] = asset_cache_snapshot
         _merge_proxy_transport_traffic()
-        if data_saver is not None:
-            data_saver.stop()
+        if data_saver is not None and not data_saver_stopped:
+            data_saver_stopped = True
+            _bounded_stop_cleanup("data_saver.stop", data_saver.stop)
         account_id = save_account_data(
             email=email,
             access_token=access_token,
@@ -2674,19 +2792,22 @@ def run_roxy_registration(
             "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
         }
     except Exception as exc:
-        if asset_cache is not None and asset_cache_snapshot is None:
+        if asset_cache is not None and asset_cache_snapshot is None and not asset_cache_stopped:
+            asset_cache_stopped = True
             try:
-                asset_cache_snapshot = asset_cache.stop()
+                asset_cache_snapshot = _bounded_stop_cleanup("asset_cache.stop", asset_cache.stop)
             except Exception:
                 pass
-        if traffic_tracker is not None:
+        if traffic_tracker is not None and not traffic_tracker_stopped:
+            traffic_tracker_stopped = True
             try:
-                network_traffic = traffic_tracker.stop()
+                network_traffic = _bounded_stop_cleanup("traffic_tracker.stop", traffic_tracker.stop)
             except Exception:
                 pass
         _merge_proxy_transport_traffic()
-        if data_saver is not None:
-            data_saver.stop()
+        if data_saver is not None and not data_saver_stopped:
+            data_saver_stopped = True
+            _bounded_stop_cleanup("data_saver.stop", data_saver.stop)
         logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Roxy注册] 失败详情", exc_info=True)
         # 未确认创建前回收邮箱；确认后避免重复使用。
@@ -2709,21 +2830,25 @@ def run_roxy_registration(
             "error": f"{type(exc).__name__}: {str(exc)[:300]}",
         }
     finally:
-        if asset_cache is not None:
+        if asset_cache is not None and not asset_cache_stopped:
+            asset_cache_stopped = True
             try:
-                asset_cache.stop()
+                _bounded_stop_cleanup("asset_cache.stop", asset_cache.stop)
             except Exception:
                 pass
-        if traffic_tracker is not None:
+        if traffic_tracker is not None and not traffic_tracker_stopped:
+            traffic_tracker_stopped = True
             try:
-                traffic_tracker.stop()
+                _bounded_stop_cleanup("traffic_tracker.stop", traffic_tracker.stop)
             except Exception:
                 pass
-        if data_saver is not None:
-            data_saver.stop()
-        if driver and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
+        if data_saver is not None and not data_saver_stopped:
+            data_saver_stopped = True
+            _bounded_stop_cleanup("data_saver.stop", data_saver.stop)
+        if driver and not driver_quit and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
+            driver_quit = True
             try:
-                driver.quit()
+                _bounded_stop_cleanup("driver.quit", driver.quit)
             except Exception:
                 pass
         if not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
@@ -2739,8 +2864,11 @@ def run_roxy_registration(
                     "[Roxy] 检测到停止信号，使用停止期清理超时 %.1fs（单次请求）",
                     cleanup_timeout,
                 )
-            client.cleanup_profile(
-                opened,
-                timeout_seconds=cleanup_timeout,
-                max_attempts=cleanup_attempts,
+            _bounded_stop_cleanup(
+                "client.cleanup_profile",
+                lambda: client.cleanup_profile(
+                    opened,
+                    timeout_seconds=cleanup_timeout,
+                    max_attempts=cleanup_attempts,
+                ),
             )

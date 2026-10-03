@@ -11,7 +11,7 @@ class RegistrationExecutorTests(unittest.TestCase):
     def tearDown(self):
         registration_service.shutdown_executor(wait=True)
 
-    def test_worker_change_waits_for_previous_generation_to_drain(self):
+    def test_worker_change_does_not_block_previous_generation(self):
         old_executor = registration_service.get_executor(1)
         started = threading.Event()
         release = threading.Event()
@@ -31,10 +31,9 @@ class RegistrationExecutorTests(unittest.TestCase):
 
         switch_thread = threading.Thread(target=switch_workers)
         switch_thread.start()
-        self.assertFalse(switched.wait(0.1))
+        self.assertTrue(switched.wait(1))
 
         release.set()
-        self.assertTrue(switched.wait(2))
         switch_thread.join(1)
         old_future.result(timeout=1)
 
