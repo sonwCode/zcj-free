@@ -209,7 +209,13 @@ def _run_cloak_registration_impl(
             create_acknowledged = True
             human_delay("post_auth")
 
-        session_info = _fetch_chatgpt_session(driver, timeout=120)
+        session_info = _fetch_chatgpt_session(
+            driver,
+            timeout=150,
+            auto_jump_wait=45,
+            email=email,
+            password=openai_password,
+        )
         access_token = session_info["accessToken"]
         logger.info("[Cloak注册] 已拿到 accessToken：%s", email)
 

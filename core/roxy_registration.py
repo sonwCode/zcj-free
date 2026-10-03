@@ -2401,22 +2401,144 @@ def _click_if_enabled_submit(driver) -> bool:
         return False
 
 
+def _read_chatgpt_session_via_context(driver) -> dict | None:
+    """通过共享 BrowserContext 请求读取 session，避免页面脚本缓存或 target 状态异常。"""
+    context = getattr(driver, "context", None)
+    request = getattr(context, "request", None) if context is not None else None
+    if request is None:
+        return None
+    try:
+        response = request.get(
+            "https://chatgpt.com/api/auth/session",
+            timeout=5000,
+            headers={
+                "accept": "application/json",
+                "referer": "https://chatgpt.com/",
+                "cache-control": "no-cache",
+            },
+        )
+        data = response.json()
+        if isinstance(data, dict):
+            data["_http_status"] = getattr(response, "status", None)
+            return data
+    except Exception as exc:
+        logger.debug("%s 通过 BrowserContext 读取 session 失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:160])
+    return None
+
+
+def _fill_login_password_with_value(driver, password: str, timeout: int = 25) -> bool:
+    """在 auth 登录密码页填写给定密码并提交；只返回状态，不跨边界返回 DOM。"""
+    if not str(password or "").strip():
+        return False
+    end = time.time() + timeout
+    while time.time() < end:
+        _check_manual_stop()
+        if _has_access_token(driver):
+            return True
+        if _is_email_verification_page(driver):
+            logger.info("%s 登录恢复进入邮箱 OTP 页，保留当前状态交给上层诊断", _log_prefix(driver))
+            return False
+        if not _is_login_password_page(driver):
+            _stop_aware_sleep(0.5)
+            continue
+        try:
+            result = driver.execute_script(r"""
+            const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+              && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+              && !el.disabled && !el.readOnly;
+            const input = [...document.querySelectorAll('input[type=\"password\"],input[name*=\"password\" i],input[autocomplete=\"current-password\"]')]
+              .find(visible);
+            if (!input) return {ok:false, reason:'missing_password_input'};
+            const form = input.closest('form');
+            const scope = form || document;
+            const button = [...scope.querySelectorAll('button[type=\"submit\"],input[type=\"submit\"],button')]
+              .find(el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true');
+            if (!button) return {ok:false, reason:'missing_password_submit'};
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            if (setter) setter.call(input, String(arguments[0])); else input.value = String(arguments[0]);
+            input.dispatchEvent(new Event('input', {bubbles:true}));
+            input.dispatchEvent(new Event('change', {bubbles:true}));
+            input.blur();
+            button.scrollIntoView({block:'center'});
+            try {
+              if (form && typeof form.requestSubmit === 'function') form.requestSubmit(button);
+              else button.click();
+            } catch (_) {
+              button.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+            }
+            return {ok:true, reason:'password_submitted'};
+            """, password) or {};
+            if not result.get("ok"):
+                _stop_aware_sleep(0.5)
+                continue
+            logger.info("%s 登录恢复已提交密码", _log_prefix(driver))
+            wait_end = time.time() + 25
+            while time.time() < wait_end:
+                _check_manual_stop()
+                if _has_access_token(driver):
+                    return True
+                if _is_email_verification_page(driver):
+                    return False
+                if not _is_login_password_page(driver):
+                    return True
+                _stop_aware_sleep(0.5)
+            return False
+        except Exception as exc:
+            logger.debug("%s 登录恢复填写密码失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:160])
+            _stop_aware_sleep(0.5)
+    return False
+
+
+def _recover_chatgpt_login_session(driver, email: str, password: str | None) -> bool:
+    """session 缺失时最多执行一次邮箱+密码登录恢复。"""
+    if not email or not password:
+        return False
+    try:
+        logger.warning("%s session 仍无 accessToken，尝试一次有界登录恢复：email=%s", _log_prefix(driver), email)
+        _safe_get(driver, "https://chatgpt.com/auth/login", timeout=45, attempts=2, accept_hosts=("chatgpt.com",))
+        human_delay("navigate")
+        _maybe_accept(driver)
+        _type_email_address(driver, email, timeout=20)
+        human_delay("form")
+        _submit_email_step(driver, email)
+        state = _wait_email_submit_next_state(driver, email, timeout=25)
+        if state == "logged_in":
+            return True
+        if state != "login_password" and not _is_login_password_page(driver):
+            logger.warning("%s 登录恢复未进入密码页：state=%s url=%s", _log_prefix(driver), state, str(getattr(driver, "current_url", "") or "")[:180])
+            return False
+        return _fill_login_password_with_value(driver, password, timeout=25)
+    except Exception as exc:
+        logger.warning("%s 登录恢复失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:220])
+        return False
+
+
 def _read_chatgpt_session_once(driver) -> dict | None:
-    """当前页面必须在 chatgpt.com；读取 /api/auth/session，拿不到 token 返回 None。"""
+    """优先通过共享 context 读取，再用页面 fetch 兜底。"""
+    context_data = _read_chatgpt_session_via_context(driver)
+    if isinstance(context_data, dict):
+        if context_data.get("accessToken"):
+            logger.info("%s /api/auth/session 已返回 accessToken via=context", _log_prefix(driver))
+            return context_data
+        logger.info("%s context session 无 accessToken，HTTP=%s keys=%s", _log_prefix(driver), context_data.get("_http_status"), list(context_data.keys()))
     script = r"""
     const done = arguments[0];
-    fetch('/api/auth/session', {credentials: 'include'})
-      .then(r => r.json())
-      .then(j => done({ok: true, data: j}))
+    fetch('/api/auth/session', {
+      credentials: 'include',
+      cache: 'no-store',
+      headers: {'accept': 'application/json', 'cache-control': 'no-cache'}
+    })
+      .then(async r => done({ok: true, status: r.status, data: await r.json()}))
       .catch(e => done({ok: false, error: String(e)}));
     """
     result = driver.execute_async_script(script)
     if result and result.get("ok"):
         data = result.get("data") or {}
         if data.get("accessToken"):
-            logger.info("%s /api/auth/session 已返回 accessToken", _log_prefix(driver))
+            logger.info("%s /api/auth/session 已返回 accessToken via=page", _log_prefix(driver))
             return data
-        logger.info("%s 等待 ChatGPT session 写入 accessToken，当前响应 keys=%s", _log_prefix(driver), list(data.keys()))
+        logger.info("%s 页面 session 无 accessToken，HTTP=%s keys=%s", _log_prefix(driver), result.get("status"), list(data.keys()))
     return None
 
 
@@ -2446,19 +2568,23 @@ def _switch_to_chatgpt_window_if_any(driver) -> bool:
     return False
 
 
-def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) -> dict:
-    """等待页面完成跳转并从 ChatGPT 页面内读取登录 session/accessToken。
-
-    旧逻辑会在 auth.openai.com 上一直等到总超时，Cloak/部分 Chromium 场景下
-    实际账号已创建成功但当前句柄 URL 没及时更新，导致白等 120 秒。现在只给
-    自动跳转 `auto_jump_wait` 秒；超过后立即主动打开 chatgpt.com 读 session。
-    """
+def _fetch_chatgpt_session(
+    driver,
+    timeout: int = 150,
+    auto_jump_wait: int = 45,
+    email: str | None = None,
+    password: str | None = None,
+) -> dict:
+    """等待 OAuth 回调完成并有界恢复 ChatGPT session/accessToken。"""
     _check_manual_stop()
     end = time.time() + timeout
-    auto_jump_end = time.time() + max(3, int(auto_jump_wait or 15))
+    auto_jump_end = time.time() + max(20, int(auto_jump_wait or 45))
     last_data = None
     last_url = ""
     forced_chatgpt_open = False
+    warning_only_rounds = 0
+    session_refreshes = 0
+    login_recovery_attempted = False
 
     while time.time() < end:
         _check_manual_stop()
@@ -2474,7 +2600,10 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                 last_url = current[:240]
             elif time.time() >= auto_jump_end and not forced_chatgpt_open:
                 try:
-                    logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 15))
+                    logger.info(
+                        "%s OAuth 回调等待已达 %ss，主动打开 ChatGPT 读取 session：current=%s",
+                        _log_prefix(driver), int(auto_jump_wait or 45), current[:180],
+                    )
                     _safe_get(driver, "https://chatgpt.com/", timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
                     forced_chatgpt_open = True
                     _stop_aware_sleep(3)
@@ -2492,7 +2621,39 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                 _check_manual_stop()
                 if data:
                     return data
-                last_data = "session 暂无 accessToken"
+                keys = list(data.keys()) if isinstance(data, dict) else []
+                warning_only = isinstance(data, dict) and "WARNING_BANNER" in data and not data.get("accessToken")
+                warning_only_rounds = warning_only_rounds + 1 if warning_only else 0
+                last_data = f"session keys={keys}"
+
+                if forced_chatgpt_open and warning_only:
+                    if warning_only_rounds in (5, 12) and session_refreshes < 2:
+                        session_refreshes += 1
+                        logger.warning(
+                            "%s session 仍只有 WARNING_BANNER，执行第 %s 次无缓存刷新",
+                            _log_prefix(driver), session_refreshes,
+                        )
+                        try:
+                            probe_url = f"https://chatgpt.com/?__session_probe={int(time.time())}"
+                            _safe_get(driver, probe_url, timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
+                            _stop_aware_sleep(3)
+                        except Exception as refresh_exc:
+                            last_data = f"session_refresh {type(refresh_exc).__name__}: {str(refresh_exc)[:180]}"
+                    elif (
+                        warning_only_rounds >= 20
+                        and not login_recovery_attempted
+                        and email
+                        and password
+                    ):
+                        login_recovery_attempted = True
+                        if _recover_chatgpt_login_session(driver, email, password):
+                            logger.info("%s 登录恢复完成，重新等待 ChatGPT session", _log_prefix(driver))
+                            forced_chatgpt_open = False
+                            warning_only_rounds = 0
+                            session_refreshes = 0
+                            auto_jump_end = time.time() + 20
+                            continue
+                        last_data = "session WARNING_BANNER；登录恢复未完成"
             except Exception as exc:
                 last_data = f"{type(exc).__name__}: {exc}"
         _stop_aware_sleep(2)
@@ -2714,7 +2875,13 @@ def run_roxy_registration(
 
         logger.info("[Roxy注册] 等待 ChatGPT 跳转并写入 session/accessToken")
         _check_manual_stop()
-        session_info = _fetch_chatgpt_session(driver, timeout=120)
+        session_info = _fetch_chatgpt_session(
+            driver,
+            timeout=150,
+            auto_jump_wait=45,
+            email=email,
+            password=openai_password,
+        )
         _traffic_checkpoint()
         access_token = session_info["accessToken"]
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
