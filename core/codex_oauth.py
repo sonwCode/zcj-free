@@ -4,8 +4,7 @@
 
 旧方案"复用注册的已登录 session"会撞 /choose-an-account 卡死（React SPA 解析不出
 可提交字段）。新方案改为用**全新干净 session**从头登录，走 OpenAI 标准风控路径，
-手机号验证靠接码平台自动收码，当前通过 core.sms_provider 支持 GrizzlySMS 和 L_API.md
-定义的本地 L 取号服务。
+手机号验证靠 SMSBower 自动取号和收码。
 
 完整接口链由 Auth 返回的 page/type/continue_url 动态决定：
     - 提交邮箱后可能进入密码、邮箱 OTP 或其他验证页
@@ -1410,8 +1409,8 @@ def _submit_email_otp(session: BrowserSession, code: str) -> dict:
 # ============================================================
 
 def _sms_provider_name() -> str:
-    """当前接码通道名，仅用于 Codex 流程日志。"""
-    return str(getattr(_cfg, "SMS_PROVIDER", "grizzly") or "grizzly").strip().lower()
+    """返回统一短信适配器当前渠道名，仅用于 Codex 日志。"""
+    return sms_provider._provider()
 
 
 def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "[Codex]") -> None:
@@ -1429,11 +1428,10 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
     一个号收不到码或被 OpenAI 拒就取消换号，最多 SMS_MAX_RETRIES 次（热加载）。
 
     实际平台适配在 core.sms_provider：
-        - SMS_PROVIDER="grizzly"：GrizzlySMS handler_api.php
-        - SMS_PROVIDER="l"：L_API.md 的 /take-phone 和 /fetch-code JSON 接口
+        - SMSBower 或 Tiger SMS handler_api.php：按价格/库存取号，并通过 getStatus 收码
     """
     http = sms_provider._http()
-    max_retries = _cfg.SMS_MAX_RETRIES
+    max_retries = max(1, int(_cfg.SMS_MAX_RETRIES or 10))
     provider = _sms_provider_name()
     # 预检阶段可能直接抛出短信依赖错误；异常清理路径也会读取该变量。
     activation_id = None
@@ -1461,9 +1459,24 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
             activation_id = None
             try:
                 activation_id, phone = sms_provider.acquire_number(http)
+                snapshot = {}
+                try:
+                    snapshot = sms_provider.get_activation_info(activation_id) or {}
+                except Exception:
+                    snapshot = {}
+                price = " ".join(
+                    part for part in (str(snapshot.get("price_amount") or ""), str(snapshot.get("price_currency") or "")) if part
+                ) or "unknown"
                 logger.info(
                     f"[Codex] 手机验证尝试 {attempt}/{max_retries}，"
                     f"provider={provider}, activation_id={activation_id}, 号码=+{phone}"
+                )
+                logger.info(
+                    "[Codex] 号码采购快照：region=%s provider_country=%s price=%s "
+                    "price_limit_max=%s price_validated=%s",
+                    snapshot.get("phone_country_name") or snapshot.get("phone_region") or "unknown",
+                    snapshot.get("country") or "unknown", price,
+                    snapshot.get("price_limit_max") or "unlimited", snapshot.get("price_validated", False),
                 )
 
                 # 发短信
@@ -1542,8 +1555,14 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 continue
             except Exception as exc:
                 last_err = exc
-                logger.warning("[Codex] 手机验证流程异常：%s", str(exc)[:240])
+                err_text = str(exc) or ""
+                logger.warning("[Codex] 手机验证流程异常（%s/%s）：%s", attempt, max_retries, err_text[:240])
                 cancel_and_report_failure(activation_id, exc)
+                if "invalid_auth_step" in err_text.lower():
+                    raise
+                if attempt < max_retries:
+                    _sleep_before_phone_retry(attempt, max_retries)
+                    continue
                 raise
 
         raise RuntimeError(

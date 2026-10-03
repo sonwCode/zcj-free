@@ -208,7 +208,9 @@
     }
     #qrPanel:not(.hidden) { width: min(520px, calc(100vw - 48px)); text-align: center; }
     #logPanel h3, #retryLogPanel h3, #liveLogPanel h3, #totpLogPanel h3, #emailChangeLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    #logPanel h3 .btn, #retryLogPanel h3 .btn, #liveLogPanel h3 .btn, #totpLogPanel h3 .btn, #emailChangeLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
+    #logPanel h3 .log-head-actions, #retryLogPanel h3 .log-head-actions, #liveLogPanel h3 .log-head-actions, #totpLogPanel h3 .log-head-actions, #emailChangeLogPanel h3 .log-head-actions { margin-left:auto; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+    #logPanel h3 .log-head-actions .btn, #retryLogPanel h3 .log-head-actions .btn, #liveLogPanel h3 .log-head-actions .btn, #totpLogPanel h3 .log-head-actions .btn, #emailChangeLogPanel h3 .log-head-actions .btn { margin-left:0; float:none !important; }
+    #qrPanel h3 .btn { margin-left:auto; float:none !important; }
     #logPanel .log, #retryLogPanel .log, #liveLogPanel .log, #totpLogPanel .log, #emailChangeLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
     #qrPanel img { display:block; max-width:min(360px, calc(100vw - 96px)); max-height:420px; margin:12px auto; border:1px solid var(--line); border-radius:10px; background:#fff; }
     #qrPanel .qr-link { display:block; word-break:break-all; white-space:normal; font-size:12px; color:var(--muted); margin-top:8px; }
@@ -2410,27 +2412,19 @@
       <div class="jobs-v2-pager" id="pager-accounts-v2"></div>
     </section>
     <div class="body hidden" id="retryLogPanel">
-      <h3>补跑日志：<span id="retryLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
-        <button class="btn" id="btnCloseRetryLog" style="float:right;min-height:28px;">关闭</button>
-      </h3>
+      <h3>补跑日志：<span id="retryLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span><span class="log-head-actions"><button type="button" class="btn log-copy-btn" data-copy-log-target="retryLogContent" disabled title="复制当前 Codex 补跑日志">复制日志</button><button type="button" class="btn" id="btnCloseRetryLog" style="min-height:28px;">关闭</button></span></h3>
       <div class="log" id="retryLogContent">加载中…</div>
     </div>
   <div class="body hidden" id="liveLogPanel">
-      <h3>查活日志：<span id="liveLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
-        <button class="btn" id="btnCloseLiveLog" style="float:right;min-height:28px;">关闭</button>
-      </h3>
+      <h3>查活日志：<span id="liveLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span><span class="log-head-actions"><button type="button" class="btn log-copy-btn" data-copy-log-target="liveLogContent" disabled title="复制当前查活日志">复制日志</button><button type="button" class="btn" id="btnCloseLiveLog" style="min-height:28px;">关闭</button></span></h3>
       <div class="log" id="liveLogContent">加载中…</div>
     </div>
     <div class="body hidden" id="totpLogPanel">
-      <h3>2FA日志：<span id="totpLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
-        <button class="btn" id="btnCloseTotpLog" style="float:right;min-height:28px;">关闭</button>
-      </h3>
+      <h3>2FA日志：<span id="totpLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span><span class="log-head-actions"><button type="button" class="btn log-copy-btn" data-copy-log-target="totpLogContent" disabled title="复制当前 2FA 日志">复制日志</button><button type="button" class="btn" id="btnCloseTotpLog" style="min-height:28px;">关闭</button></span></h3>
       <div class="log" id="totpLogContent">加载中…</div>
     </div>
     <div class="body hidden" id="emailChangeLogPanel">
-      <h3>换绑日志：<span id="emailChangeLogAccount" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
-        <button class="btn" id="btnCloseEmailChangeLog" style="float:right;min-height:28px;">关闭</button>
-      </h3>
+      <h3>换绑日志：<span id="emailChangeLogAccount" style="font-size:13px;font-weight:400;color:var(--muted);"></span><span class="log-head-actions"><button type="button" class="btn log-copy-btn" data-copy-log-target="emailChangeLogContent" disabled title="复制当前换绑日志">复制日志</button><button type="button" class="btn" id="btnCloseEmailChangeLog" style="min-height:28px;">关闭</button></span></h3>
       <div class="log" id="emailChangeLogContent">加载中…</div>
     </div>
   </div>
@@ -2681,7 +2675,7 @@
   </div>
 </div>
 <div class="body hidden" id="logPanel">
-  <h3>任务 #<span id="logJobId"></span> 日志 <button class="btn" id="btnCloseLog" style="float:right;min-height:28px;">关闭</button></h3>
+  <h3>任务 #<span id="logJobId"></span> 日志 <span class="log-head-actions"><button type="button" class="btn log-copy-btn" data-copy-log-target="logContent" disabled title="复制当前任务日志">复制日志</button><button type="button" class="btn" id="btnCloseLog" style="min-height:28px;">关闭</button></span></h3>
   <div class="log" id="logContent">加载中…</div>
 </div>
 <div id="qrPanel" class="body hidden">
@@ -2906,6 +2900,33 @@ async function copyText(text) {
     showToast('已复制');
   } catch(e) { showToast('复制失败'); }
 }
+const LOG_COPY_PLACEHOLDERS = new Set(['加载中…', '(暂无日志)', '(暂无日志，等待任务写入…)', '(暂无换绑日志)']);
+function updateLogCopyButton(targetId) {
+  const button = document.querySelector('[data-copy-log-target="' + targetId + '"]');
+  const target = document.getElementById(targetId);
+  if (!button || !target) return;
+  const text = String(target.textContent || '').trim();
+  button.disabled = !text || LOG_COPY_PLACEHOLDERS.has(text);
+}
+function copyLogFromPanel(button) {
+  const target = document.getElementById(button.dataset.copyLogTarget || '');
+  const text = String(target?.textContent || '').trim();
+  if (!text || LOG_COPY_PLACEHOLDERS.has(text)) { showToast('暂无可复制日志'); return; }
+  copyText(text);
+}
+function bindLogCopyButtons() {
+  document.querySelectorAll('[data-copy-log-target]').forEach((button) => {
+    const targetId = button.dataset.copyLogTarget;
+    const target = document.getElementById(targetId);
+    button.addEventListener('click', () => copyLogFromPanel(button));
+    if (target) {
+      const observer = new MutationObserver(() => updateLogCopyButton(targetId));
+      observer.observe(target, { childList: true, characterData: true, subtree: true });
+    }
+    updateLogCopyButton(targetId);
+  });
+}
+bindLogCopyButtons();
 async function api(url, opts) {
   const r = await fetch(url, opts);
   const j = await r.json().catch(()=>({}));
@@ -3497,8 +3518,21 @@ function _codexAccountInfoCellV2(r) {
   if (cny !== '—') priceParts.push(cny);
   if (usd !== '—') priceParts.push(usd);
   const price = priceParts.length ? priceParts.join('/') : '未知';
+  const limitSymbol = String(info.price_limit_currency ?? '').toUpperCase() === 'USD' ? '$' : '';
+  const apiLimit = _codexMoneyLabel(info.price_limit_max, limitSymbol);
+  const configuredLimit = _codexMoneyLabel(info.price_limit_configured_max, '¥');
+  const limitText = configuredLimit !== '—'
+    ? configuredLimit + (apiLimit !== '—' ? ' (' + apiLimit + ')' : '')
+    : apiLimit;
+  const priceDisplay = limitText !== '—' ? price + ' / 上限 ' + limitText : price;
   const titleParts = [];
+  const provider = String(info.provider ?? '').trim();
   const source = String(info.price_source ?? '').trim();
+  const fxSource = String(info.price_limit_fx_source ?? '').trim();
+  const fxRate = String(info.price_limit_fx_rate ?? '').trim();
+  if (provider) titleParts.push('短信平台: ' + provider);
+  if (fxRate) titleParts.push('CNY/USD: ' + fxRate);
+  if (fxSource) titleParts.push('汇率来源: ' + fxSource);
   const rateDate = String(info.rate_date ?? '').trim();
   if (source) titleParts.push('价格来源: ' + source);
   if (rateDate) titleParts.push('USD/CNY 汇率日期: ' + rateDate);
@@ -3506,7 +3540,7 @@ function _codexAccountInfoCellV2(r) {
   return '<div class="acc-v2-codex-info"' + titleAttr + '>'
     + '<div class="acc-v2-codex-info-line"><span class="acc-v2-codex-info-label">手机号：</span>' + esc(phone) + '</div>'
     + '<div class="acc-v2-codex-info-line"><span class="acc-v2-codex-info-label">归属地：</span>' + esc(region) + '</div>'
-    + '<div class="acc-v2-codex-info-line"><span class="acc-v2-codex-info-label">价格：</span>' + esc(price) + '</div></div>';
+    + '<div class="acc-v2-codex-info-line"><span class="acc-v2-codex-info-label">价格：</span>' + esc(priceDisplay) + '</div></div>';
 }
 function _codexCellV2(r) {
   const s = String(r.codex_status || '').toLowerCase();

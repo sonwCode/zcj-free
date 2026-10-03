@@ -697,32 +697,47 @@ EDITABLE_FIELDS = [
 
     {
         "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "接码通道", "help": "grizzly / smsbower / l / h；smsbower 使用 SMSBower handler_api，l/h 使用本地取号服务",
+        "label": "短信平台", "help": "只允许 SMSBower 或 Tiger SMS；修改后新激活使用该平台",
+        "choices": [
+            {"value": "smsbower", "label": "SMSBower"},
+            {"value": "tiger", "label": "Tiger SMS"},
+        ],
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "国家代码", "help": "传给接码平台的 country；SMSBower 按其国家表填写，GrizzlySMS 常用美国=187；H 通道作为 H_API.md 的 country",
+        "label": "国家代码", "help": "填写当前短信平台的国家代码；留空时按价格和库存随机选择",
     },
     {
         "key": "SMS_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "服务/项目代码", "help": "GrizzlySMS/L/SMSBower 作为 service；SMSBower 的 OpenAI (ChatGPT) 推荐填 dr，填 openai/chatgpt 时程序会自动转换；H 通道作为 projectId",
+        "label": "短信服务代码", "help": "OpenAI (ChatGPT) 推荐填 dr；填 openai/chatgpt 时程序会自动转换",
     },
     {
         "key": "SMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "最高号码价格", "help": "留空不限。SMSBower 下按人民币配置并换算为美元；其他通道沿用平台原生币种",
+        "label": "最高价格（人民币）", "help": "两个平台都按此人民币上限限制；程序实时换算成平台所需的 USD maxPrice",
     },
     {
         "key": "SMS_MAX_RETRIES", "file": "codex.py", "type": "int", "group": "接码平台",
-        "label": "换号重试次数", "help": "一个号收不到短信/被OpenAI拒时换下一个号，最多重试几次",
+        "label": "换号重试次数", "help": "一个号收不到短信或被 OpenAI 拒绝时换下一个号，最多重试几次",
     },
     {
         "key": "SMS_CODE_WAIT", "file": "codex.py", "type": "int", "group": "接码平台",
-        "label": "单号等短信(秒)", "help": "单个号等待短信到达的最长秒数，超时则换号",
+        "label": "单号等短信(秒)", "help": "单个号码等待短信到达的最长秒数，超时则释放并换号",
     },
     {
-        "key": "SMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "GrizzlySMS API密钥", "help": "GrizzlySMS 平台 API Key，保存在 .env（SMS_API_KEY），不写回 config/*.py",
-        "storage": "env", "secret": True,
+        "key": "SMS_POLL_INTERVAL", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "短信轮询间隔(秒)", "help": "轮询当前短信平台状态的间隔",
+    },
+    {
+        "key": "SMS_REQUEST_TIMEOUT", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "短信平台请求超时(秒)", "help": "访问当前短信平台 API 的 HTTP 超时时间",
+    },
+    {
+        "key": "SMSBOWER_RANDOM_COUNTRY", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "按价格随机选国家", "help": "未指定国家且配置最高价格时，从有库存候选国家中随机取号",
+    },
+    {
+        "key": "SMSBOWER_RANDOM_COUNTRY_ATTEMPTS", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "随机国家候选数", "help": "单次取号最多尝试的价格范围内国家数量",
     },
     {
         "key": "SMSBOWER_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -730,12 +745,33 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "SMSBOWER_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "SMSBower API密钥", "help": "SMSBower 控制台 API Key，保存在 .env，不写回 config/*.py",
+        "label": "SMSBower API 密钥", "help": "SMSBower 控制台 API Key，保存在 .env，不写回 config/*.py",
         "storage": "env", "secret": True,
     },
     {
         "key": "SMSBOWER_USE_V2", "file": "codex.py", "type": "bool", "group": "接码平台",
-        "label": "SMSBower 使用V2取号", "help": "官方客户端文档使用 getNumber；通常保持关闭。仅在确认账号支持 getNumberV2 时开启",
+        "label": "SMSBower 使用 V2 取号", "help": "优先使用 getNumberV2，失败时自动回退 getNumber",
+    },
+    {
+        "key": "TIGER_SMS_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Tiger SMS API 地址", "help": "默认 https://api.tiger-sms.com/stubs/handler_api.php",
+    },
+    {
+        "key": "TIGER_SMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Tiger SMS API 密钥", "help": "Tiger SMS API Key，保存在 .env，不写回 config/*.py",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "TIGER_SMS_USE_V2", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "Tiger SMS 使用 V2 取号", "help": "优先读取带价格的 JSON 响应，失败时自动回退 getNumber",
+    },
+    {
+        "key": "TIGER_SMS_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Tiger SMS 供应商筛选", "help": "可选，供应商 ID 用逗号分隔；留空由平台自动选择",
+    },
+    {
+        "key": "TIGER_SMS_EXCEPT_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Tiger SMS 排除供应商", "help": "可选，排除的供应商 ID 用逗号分隔",
     },
     {
         "key": "SMSBOWER_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -750,46 +786,8 @@ EDITABLE_FIELDS = [
         "label": "SMSBower 排除号码前缀", "help": "可选，号码前缀用逗号分隔；用于避开已知不可用号段",
     },
     {
-        "key": "SMSBOWER_USD_CNY_RATE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "SMSBower 美元兑人民币汇率", "help": "每 1 美元对应人民币金额；SMSBower 最低/最高价格按人民币填写并据此换算",
-    },
-    {
         "key": "SMSBOWER_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSBower 最低价格（元）", "help": "可选，按人民币填写；本地价格表筛选并换算为美元 minPrice",
-    },
-    {
-        "key": "SMSBOWER_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "SMSBower 最高价格（元）", "help": "可选，按人民币填写；本地价格表筛选并换算为美元 maxPrice",
-    },
-    {
-        "key": "H_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "H API 地址", "help": "H 取号服务基础地址，例如 http://localhost:8788",
-    },
-    {
-        "key": "H_ADMIN_AUTH_CODE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "H 授权码", "help": "保存在 .env（H_ADMIN_AUTH_CODE），不写回 config/*.py",
-        "storage": "env", "secret": True,
-    },
-    {
-        "key": "H_PHONE_PREFIX", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "H 号码前缀", "help": "H 返回号码不含国家码时填写，例如美国 10 位本地号填 1；留空则不补",
-    },
-    {
-        "key": "H_PHONE_ACQUIRE_MODE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "H 取号方式", "help": "reusable=优先复用历史可用号码；new=每次都取一个新号码",
-    },
-    {
-        "key": "L_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "L API 地址", "help": "L 取号服务基础地址，例如 http://localhost:8788",
-    },
-    {
-        "key": "L_ADMIN_AUTH_CODE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "L 授权码", "help": "保存在 .env（L_ADMIN_AUTH_CODE），不写回 config/*.py",
-        "storage": "env", "secret": True,
-    },
-    {
-        "key": "L_PHONE_PREFIX", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "L 号码前缀", "help": "L 返回号码不含国家码时填写，例如美国 10 位本地号填 1；留空则不补",
     },
 ]
 

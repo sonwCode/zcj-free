@@ -1379,7 +1379,7 @@ def _do_phone_verification_if_present(page) -> dict | None:
     except Exception:
         http.close()
         raise
-    max_retries = int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10) if hasattr(sms_provider, "_cfg") else 10
+    max_retries = max(1, int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10)) if hasattr(sms_provider, "_cfg") else 10
     last_error = ""
     for attempt in range(1, max_retries + 1):
         activation_id = None
@@ -1390,7 +1390,22 @@ def _do_phone_verification_if_present(page) -> dict | None:
             _t_phone_ready.done()
             logger.info("[Codex][BrowserUse] 需要手机验证，开始取号（%s/%s）", attempt, max_retries)
             activation_id, phone = sms_provider.acquire_number(http)
-            logger.info("[Codex][BrowserUse] 已取号：%s activation=%s", phone, activation_id)
+            snapshot = {}
+            try:
+                snapshot = sms_provider.get_activation_info(activation_id) or {}
+            except Exception:
+                snapshot = {}
+            price = " ".join(
+                part for part in (str(snapshot.get("price_amount") or ""), str(snapshot.get("price_currency") or "")) if part
+            ) or "unknown"
+            logger.info("[Codex][BrowserUse] 已取号：+%s activation=%s", phone, activation_id)
+            logger.info(
+                "[Codex][BrowserUse] 号码采购快照：region=%s provider_country=%s price=%s "
+                "price_limit_max=%s price_validated=%s",
+                snapshot.get("phone_country_name") or snapshot.get("phone_region") or "unknown",
+                snapshot.get("country") or "unknown", price,
+                snapshot.get("price_limit_max") or "unlimited", snapshot.get("price_validated", False),
+            )
             _t_phone_send = _StepTimer(f"填写并提交手机号 attempt={attempt}")
             phone_e164 = _fill_phone(page, phone)
             _bu_delay("form")

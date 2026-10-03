@@ -1,17 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-接码平台客户端。
+SMSBower 客户端。
 
 用于 Codex OAuth "全新 session" 流程过 OpenAI 的 /phone-verification 手机号验证：
-    1. acquire_number()       getNumber 取一个手机号（返回 激活ID + 号码）
+    1. acquire_number()       按价格/库存取一个手机号（返回激活 ID + 号码）
     2. wait_for_sms_code()    轮询 getStatus 直到拿到短信验证码
     3. complete() / cancel()  setStatus 标记完成(6) / 取消(8)
-
-当前支持：
-    - GrizzlySMS：GET 文本接口，文档 https://api.grizzlysms.com
-    - SMSBower：GET handler_api 兼容接口，文档 https://smsbower.app/cn/api?page=client
-    - L：本地 JSON 管理接口，文档 L_API.md
-    - H：本地 JSON 管理接口，文档 H_API.md
 
 价格相关：每取一个号、收到短信都会计费，所以：
     - 取号后若收不到短信，必须 cancel(8) 释放，避免白扣钱；
@@ -23,7 +17,7 @@ import random
 import threading
 import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
-from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 from curl_cffi.requests import Session as CurlSession
 
@@ -35,13 +29,6 @@ from core.stop_control import sleep as _stop_sleep
 
 logger = logging.getLogger(__name__)
 
-# GrizzlySMS 规则：号码取出后 2 分钟内不允许取消（防薅号）。
-# 这里留 5 秒缓冲，时间到了再发 setStatus=8。
-_MIN_CANCEL_DELAY = 125
-
-# 记录每个 activation_id 的取号时间，供 cancel() 判断是否要等。
-# 用模块级 dict 而不是改 acquire_number 返回值，保持向后兼容。
-_ACQUIRED_AT: dict[str, float] = {}
 _STATE_LOCK = threading.RLock()
 _ACTIVATION_STATE: dict[str, dict] = {}
 _CODE_HISTORY: dict[str, set[str]] = {}
@@ -49,6 +36,7 @@ _RECENT_REJECTED_NUMBERS: dict[str, float] = {}
 _TIER_FAILURES: dict[tuple[str, str, str, str], int] = {}
 _TIER_COOLDOWNS: dict[tuple[str, str, str, str], float] = {}
 _METRICS: dict[str, int] = {}
+_FX_RATE_CACHE: tuple[float, Decimal, str] | None = None
 
 
 class SmsProviderError(RuntimeError):
@@ -86,7 +74,18 @@ def _http() -> CurlSession:
 
 
 def _provider() -> str:
-    return str(getattr(_cfg, "SMS_PROVIDER", "grizzly") or "grizzly").strip().lower()
+    """返回受限的短信渠道；未知值回退到默认 SMSBower。"""
+    value = str(getattr(_cfg, "SMS_PROVIDER", "smsbower") or "smsbower").strip().lower()
+    if value in {"smsbower", "tiger"}:
+        return value
+    logger.warning("[SMS] 忽略不支持的短信渠道=%s，回退 SMSBower", value[:40])
+    return "smsbower"
+
+
+def _provider_for_activation(activation_id: str) -> str:
+    state = _activation_state(activation_id)
+    provider = str(state.get("provider") or "").strip().lower()
+    return provider if provider in {"smsbower", "tiger"} else _provider()
 
 
 def _setting_int(name: str, default: int, minimum: int = 0) -> int:
@@ -101,11 +100,113 @@ def _csv_values(value: object) -> set[str]:
     return {item.strip() for item in str(value or "").split(",") if item.strip()}
 
 
+def _cny_to_usd_rate() -> tuple[Decimal, str]:
+    """读取短期缓存的实时 CNY -> USD 汇率，失败时使用本地回退值。"""
+    global _FX_RATE_CACHE
+    now = time.monotonic()
+    ttl = _setting_int("SMS_FX_RATE_TTL", 900, 60)
+    with _STATE_LOCK:
+        cached = _FX_RATE_CACHE
+        if cached and now - cached[0] < ttl:
+            return cached[1], cached[2]
+
+    url = str(getattr(_cfg, "SMS_FX_RATE_URL", "") or "").strip()
+    if url:
+        try:
+            request = Request(url, headers={"Accept": "application/json", "User-Agent": "turb-gpt-register/1"})
+            timeout = min(max(_setting_int("SMS_REQUEST_TIMEOUT", 30, 1), 1), 10)
+            with urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            rate = Decimal(str((payload.get("rates") or {}).get("USD")))
+            if rate.is_finite() and rate > 0:
+                source = "live CNY/USD"
+                with _STATE_LOCK:
+                    _FX_RATE_CACHE = (now, rate, source)
+                logger.info("[SMS] 已刷新人民币兑美元汇率：source=%s rate=%s", source, rate)
+                return rate, source
+        except Exception as exc:
+            logger.error("[SMS] 实时汇率读取失败，停止新增号码采购：%s", exc)
+            raise SmsProviderConfigurationError("实时人民币兑美元汇率不可用；已停止取号以维持最高价限制") from exc
+        raise SmsProviderConfigurationError("实时人民币兑美元汇率响应缺少有效 USD 汇率；已停止取号")
+
+    raw = str(getattr(_cfg, "SMSBOWER_USD_CNY_RATE", "7.2") or "7.2").strip()
+    try:
+        usd_cny = Decimal(raw)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise SmsProviderConfigurationError(f"SMSBOWER_USD_CNY_RATE 必须是正数：{raw!r}") from exc
+    if not usd_cny.is_finite() or usd_cny <= 0:
+        raise SmsProviderConfigurationError(f"SMSBOWER_USD_CNY_RATE 必须是正数：{raw!r}")
+    rate = Decimal("1") / usd_cny
+    source = "fallback USD/CNY config"
+    return rate, source
+
+
 def _mask_phone(phone: str) -> str:
     digits = _normalize_phone_digits(phone)
     if len(digits) <= 4:
         return digits or "-"
     return "*" * max(len(digits) - 4, 2) + digits[-4:]
+
+
+def _phone_location_metadata(phone: str) -> dict:
+    """按号码本身解析国家/地区；供应商 country 可能只是内部国家 ID。"""
+    digits = _normalize_phone_digits(phone)
+    if not digits:
+        return {}
+    try:
+        import phonenumbers
+        from phonenumbers import geocoder
+
+        parsed = phonenumbers.parse(f"+{digits}", None)
+        if not phonenumbers.is_possible_number(parsed):
+            return {}
+        region = str(phonenumbers.region_code_for_number(parsed) or "").strip().upper()
+        if not region:
+            return {}
+        result = {
+            "phone_region": region,
+            "phone_dial_code": str(parsed.country_code),
+        }
+        country_name = str(geocoder.description_for_number(parsed, "en") or "").strip()
+        if country_name:
+            result["phone_country_name"] = country_name
+        return result
+    except Exception:
+        return {}
+
+
+def _price_limit_metadata(provider: str) -> dict:
+    """把人民币配置、实时换算后的 USD 边界和来源写入激活快照。"""
+    provider = str(provider or "").strip().lower()
+    result = {}
+    try:
+        if provider not in {"smsbower", "tiger"}:
+            return result
+        min_usd, max_usd = _provider_price_bounds_usd(provider)
+        if min_usd is not None:
+            result["price_limit_min"] = format(min_usd, "f")
+        if max_usd is not None:
+            result["price_limit_max"] = format(max_usd, "f")
+        if min_usd is None and max_usd is None:
+            return result
+        result["price_limit_currency"] = "USD"
+        result["price_limit_source"] = "SMS_MAX_PRICE CNY converted with " + _cny_to_usd_rate()[1]
+        _, configured_max = _configured_price_bounds_cny(provider)
+        if configured_max is not None:
+            result["price_limit_configured_max"] = format(configured_max, "f")
+            result["price_limit_configured_currency"] = "CNY"
+        result["price_limit_fx_rate"] = format(_cny_to_usd_rate()[0], "f")
+        result["price_limit_fx_source"] = _cny_to_usd_rate()[1]
+    except Exception as exc:
+        logger.warning("[SMS] 记录价格边界失败：provider=%s error=%s", provider, exc)
+    return result
+
+
+def _update_activation_state(activation_id: str, updates: dict) -> None:
+    with _STATE_LOCK:
+        state = _ACTIVATION_STATE.get(str(activation_id))
+        if state is not None:
+            state.update({key: value for key, value in updates.items() if value not in (None, "")})
 
 
 def _metric(event: str, state: dict | None = None) -> None:
@@ -144,7 +245,7 @@ def _tier_key(state: dict) -> tuple[str, str, str, str]:
 
 def _tier_cooldown_key(state: dict) -> tuple[str, str, str, str] | None:
     key = _tier_key(state)
-    if key[0] == "smsbower" and key[3].strip().lower() in ("", "default", "unknown"):
+    if key[0] in {"smsbower", "tiger"} and key[3].strip().lower() in ("", "default", "unknown"):
         return None
     return key
 
@@ -156,7 +257,7 @@ def _cooldown_provider_ids(service: str, country: str) -> set[str]:
         return {
             key[3]
             for key, expires_at in _TIER_COOLDOWNS.items()
-            if key[0] == "smsbower"
+            if key[0] in {"smsbower", "tiger"}
             and key[1] == str(service or "")
             and key[2] == str(country or "")
             and expires_at > now
@@ -183,14 +284,23 @@ def _remember_activation(activation_id: str, phone: str, metadata: dict | None =
         "country": str(metadata.pop("country", getattr(_cfg, "SMS_COUNTRY", "") or "")),
         **metadata,
     }
+    for key, value in _phone_location_metadata(phone).items():
+        state.setdefault(key, value)
+    for key, value in _price_limit_metadata(state["provider"]).items():
+        state.setdefault(key, value)
     with _STATE_LOCK:
         _ACTIVATION_STATE[str(activation_id)] = state
-        _ACQUIRED_AT[str(activation_id)] = time.time()
     _metric("acquired", state)
+    price = " ".join(
+        part for part in (str(state.get("price_amount") or ""), str(state.get("price_currency") or "")) if part
+    ) or "unknown"
+    limit = str(state.get("price_limit_max") or "unlimited")
     logger.info(
-        "[SMS] 激活登记：id=%s provider=%s country=%s tier=%s phone=%s",
-        activation_id, state["provider"], state["country"],
-        state.get("provider_id") or state.get("tier") or "default", _mask_phone(phone),
+        "[SMS] 激活登记：id=%s provider=%s service=%s provider_country=%s region=%s "
+        "phone=+%s price=%s price_limit_max=%s price_source=%s",
+        activation_id, state["provider"], state["service"], state["country"] or "-",
+        state.get("phone_country_name") or state.get("phone_region") or "unknown",
+        _normalize_phone_digits(phone), price, limit, state.get("price_source") or "unknown",
     )
     return str(activation_id), str(phone)
 
@@ -200,12 +310,16 @@ def _activation_state(activation_id: str) -> dict:
         return dict(_ACTIVATION_STATE.get(str(activation_id)) or {})
 
 
+def get_activation_info(activation_id: str) -> dict:
+    """返回当前激活的脱敏/可审计快照，供 Codex 日志和结果记录使用。"""
+    return _activation_state(activation_id)
+
+
 def _forget_activation(activation_id: str) -> None:
     activation_id = str(activation_id or "")
     with _STATE_LOCK:
         _ACTIVATION_STATE.pop(activation_id, None)
         _CODE_HISTORY.pop(activation_id, None)
-        _ACQUIRED_AT.pop(activation_id, None)
 
 
 def _remember_code(activation_id: str, code: str) -> bool:
@@ -348,9 +462,17 @@ def _report_failure_with_state(
         _metric(category, state)
     else:
         _metric(category, state)
+    price = " ".join(
+        part for part in (str(state.get("price_amount") or ""), str(state.get("price_currency") or "")) if part
+    ) or "unknown"
     logger.info(
-        "[SMS] 记录激活反馈：id=%s category=%s reason=%s",
-        activation_id, category, str(reason or "")[:180],
+        "[SMS] 记录激活反馈：id=%s category=%s phone=+%s region=%s provider_country=%s "
+        "price=%s price_limit_max=%s release=%s reason=%s",
+        activation_id, category, _normalize_phone_digits(str(state.get("phone_number") or "")),
+        state.get("phone_country_name") or state.get("phone_region") or "unknown",
+        state.get("country") or "unknown", price, state.get("price_limit_max") or "unlimited",
+        "requested",
+        str(reason or "")[:180],
     )
     return category
 
@@ -390,6 +512,7 @@ def get_sms_runtime_metrics() -> dict:
 
 
 def _reset_runtime_state_for_tests() -> None:
+    global _FX_RATE_CACHE
     with _STATE_LOCK:
         _ACTIVATION_STATE.clear()
         _CODE_HISTORY.clear()
@@ -397,51 +520,11 @@ def _reset_runtime_state_for_tests() -> None:
         _TIER_FAILURES.clear()
         _TIER_COOLDOWNS.clear()
         _METRICS.clear()
-        _ACQUIRED_AT.clear()
-
-
-def _request_grizzly(http: CurlSession, params: dict) -> str:
-    """
-    发一个 GrizzlySMS API 请求，返回去空白的响应文本。
-    统一识别公共错误码并抛对应异常。
-    """
-    if not str(getattr(_cfg, "SMS_API_KEY", "") or "").strip():
-        raise SmsProviderConfigurationError("SMS_API_KEY 不能为空")
-    base = str(getattr(_cfg, "SMS_API_BASE", "") or "").strip()
-    if not base:
-        raise SmsProviderConfigurationError("SMS_API_BASE 不能为空")
-    base_params = {"api_key": _cfg.SMS_API_KEY}
-    base_params.update(params)
-    resp = http.get(base, params=base_params)
-    if resp.status_code != 200:
-        raise SmsProviderError(
-            f"GrizzlySMS HTTP {resp.status_code}: {(resp.text or '')[:200]}"
-        )
-    text = (resp.text or "").strip()
-
-    # 公共错误码（任何 action 都可能返回）
-    if text == "BAD_KEY":
-        raise SmsProviderConfigurationError("接码平台 API key 无效（BAD_KEY）")
-    if text == "NO_BALANCE":
-        raise SmsNoBalanceError("接码平台余额不足（NO_BALANCE），请充值")
-    if text == "NO_NUMBERS":
-        raise SmsNoNumbersError("接码平台暂无可用号码（NO_NUMBERS）")
-    if text == "SERVICE_UNAVAILABLE_REGION":
-        raise SmsProviderError("接码平台地区受限（SERVICE_UNAVAILABLE_REGION），请换 IP")
-    if text == "BAD_SERVICE":
-        raise SmsProviderConfigurationError(f"接码平台服务代码无效：{text}")
-    if text in ("BAD_ACTION", "BAD_STATUS"):
-        raise SmsProviderError(f"接码平台请求参数错误：{text}")
-    if text == "NO_ACTIVATION":
-        raise SmsProviderError("激活 ID 不存在（NO_ACTIVATION）")
-    if text.startswith("The service is prohibited"):
-        raise SmsProviderError(f"该服务被平台禁售：{text}")
-
-    return text
+        _FX_RATE_CACHE = None
 
 
 def _request_smsbower(http: CurlSession, params: dict) -> str:
-    """发 SMSBower handler_api 请求，返回去空白的响应文本。"""
+    """发 SMSBower handler_api 请求，保留历史错误映射。"""
     api_key = str(getattr(_cfg, "SMSBOWER_API_KEY", "") or "").strip()
     if not api_key:
         raise SmsProviderConfigurationError("SMSBower API Key 不能为空")
@@ -450,13 +533,11 @@ def _request_smsbower(http: CurlSession, params: dict) -> str:
         raise SmsProviderConfigurationError("SMSBOWER_API_BASE 不能为空")
     resp = http.get(base, params={"api_key": api_key, **params})
     text = (resp.text or "").strip()
-    if resp.status_code in (401, 403):
-        raise SmsProviderConfigurationError(f"SMSBower HTTP {resp.status_code}: 授权失败")
+    if resp.status_code in (401, 403) or text == "BAD_KEY":
+        raise SmsProviderConfigurationError("SMSBower API key 无效（BAD_KEY）")
     if resp.status_code != 200:
         raise SmsProviderError(f"SMSBower HTTP {resp.status_code}: {text[:200]}")
-    if text in ("BAD_KEY", "BAD_ACTION", "BAD_SERVICE", "WRONG_SERVICE", "BAD_STATUS", "NO_ACTIVATION"):
-        if text == "BAD_KEY":
-            raise SmsProviderConfigurationError("SMSBower API key 无效（BAD_KEY）")
+    if text in ("BAD_ACTION", "BAD_SERVICE", "WRONG_SERVICE", "BAD_STATUS", "NO_ACTIVATION"):
         if text in ("BAD_SERVICE", "WRONG_SERVICE"):
             raise SmsProviderConfigurationError(f"SMSBower 服务代码无效（{text}），OpenAI/ChatGPT 请填写 dr")
         if text == "NO_ACTIVATION":
@@ -471,9 +552,47 @@ def _request_smsbower(http: CurlSession, params: dict) -> str:
     return text
 
 
+def _tiger_error_code(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return str(text or "").split(":", 1)[0].strip().upper()
+    if isinstance(payload, dict):
+        return str(payload.get("title") or payload.get("error") or "").strip().upper()
+    return ""
+
+
+def _request_tiger(http: CurlSession, params: dict) -> str:
+    """发 Tiger SMS handler_api 请求；Tiger key 永远只放在请求参数中。"""
+    api_key = str(getattr(_cfg, "TIGER_SMS_API_KEY", "") or "").strip()
+    if not api_key:
+        raise SmsProviderConfigurationError("Tiger SMS API Key 不能为空")
+    base = str(getattr(_cfg, "TIGER_SMS_API_BASE", "") or "").strip()
+    if not base:
+        raise SmsProviderConfigurationError("TIGER_SMS_API_BASE 不能为空")
+    resp = http.get(base, params={"api_key": api_key, **params})
+    text = (resp.text or "").strip()
+    if resp.status_code in (401, 403) or text == "BAD_KEY":
+        raise SmsProviderConfigurationError("Tiger SMS API key 无效（BAD_KEY）")
+    if resp.status_code == 402 or _tiger_error_code(text) == "NO_BALANCE":
+        raise SmsNoBalanceError("Tiger SMS 余额不足（NO_BALANCE），请充值")
+    if resp.status_code != 200 and resp.status_code != 400:
+        raise SmsProviderError(f"Tiger SMS HTTP {resp.status_code}: {text[:200]}")
+    code = _tiger_error_code(text)
+    if code in {"NO_NUMBERS", "NO_PROVIDERS", "WRONG_MAX_PRICE"}:
+        raise SmsNoNumbersError(f"Tiger SMS 当前价格/库存没有可用号码（{code}）")
+    if code in {"BAD_SERVICE", "BAD_COUNTRY", "BAD_VALUES", "BAD_MAX_PRICE", "BAD_MULTIPLE", "BAD_PROVIDER_IDS", "BAD_EXCEPT_PROVIDER_IDS", "BAD_ACTIVATION_TYPE", "BAD_FIXED_PRICE", "UNPROCESSABLE_ENTITY"}:
+        raise SmsProviderConfigurationError(f"Tiger SMS 请求参数错误（{code}）")
+    if code in {"BAD_ACTION", "BAD_STATUS", "NO_ACTIVATION"}:
+        raise SmsProviderError(f"Tiger SMS 请求失败（{code}）")
+    if text in {"NO_NUMBERS", "NO_PROVIDERS"}:
+        raise SmsNoNumbersError(f"Tiger SMS 当前没有可用号码（{text}）")
+    return text
+
+
 def _smsbower_price_bound(name: str) -> Decimal | None:
     value = str(getattr(_cfg, name, "") or "").strip()
-    if not value and name == "SMSBOWER_MAX_PRICE":
+    if name == "SMS_MAX_PRICE":
         value = str(getattr(_cfg, "SMS_MAX_PRICE", "") or "").strip()
     if not value:
         return None
@@ -488,24 +607,34 @@ def _smsbower_price_bound(name: str) -> Decimal | None:
     return parsed
 
 
-def _smsbower_price_bounds_usd() -> tuple[Decimal | None, Decimal | None]:
-    min_cny = _smsbower_price_bound("SMSBOWER_MIN_PRICE")
-    max_cny = _smsbower_price_bound("SMSBOWER_MAX_PRICE")
+def _configured_price_bounds_cny(provider: str) -> tuple[Decimal | None, Decimal | None]:
+    provider = str(provider or "").strip().lower()
+    if provider == "smsbower":
+        return _smsbower_price_bound("SMSBOWER_MIN_PRICE"), _smsbower_price_bound("SMS_MAX_PRICE")
+    if provider == "tiger":
+        return None, _smsbower_price_bound("SMS_MAX_PRICE")
+    return None, None
+
+
+def _provider_price_bounds_usd(provider: str) -> tuple[Decimal | None, Decimal | None]:
+    min_cny, max_cny = _configured_price_bounds_cny(provider)
     if min_cny is None and max_cny is None:
         return None, None
     if min_cny is not None and max_cny is not None and min_cny > max_cny:
-        raise SmsProviderConfigurationError("SMSBOWER_MIN_PRICE 不能大于 SMSBOWER_MAX_PRICE")
-    raw_rate = str(getattr(_cfg, "SMSBOWER_USD_CNY_RATE", "7.2") or "").strip()
-    try:
-        rate = Decimal(raw_rate)
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise SmsProviderConfigurationError(f"SMSBOWER_USD_CNY_RATE 必须是正数：{raw_rate!r}") from exc
-    if not rate.is_finite() or rate <= 0:
-        raise SmsProviderConfigurationError(f"SMSBOWER_USD_CNY_RATE 必须是正数：{raw_rate!r}")
+        raise SmsProviderConfigurationError("短信价格最低值不能大于通用人民币最高值")
+    cny_to_usd, _ = _cny_to_usd_rate()
     return (
-        min_cny / rate if min_cny is not None else None,
-        max_cny / rate if max_cny is not None else None,
+        min_cny * cny_to_usd if min_cny is not None else None,
+        max_cny * cny_to_usd if max_cny is not None else None,
     )
+
+
+def _smsbower_price_bounds_usd() -> tuple[Decimal | None, Decimal | None]:
+    return _provider_price_bounds_usd("smsbower")
+
+
+def _tiger_price_bounds_usd() -> tuple[Decimal | None, Decimal | None]:
+    return _provider_price_bounds_usd("tiger")
 
 
 def _smsbower_api_price(value: Decimal, rounding: str) -> str:
@@ -562,7 +691,7 @@ def _activation_price_metadata(
 
     def currency_code(value: object) -> str | None:
         text = str(value or "").strip().upper()
-        if text in ("USD", "US DOLLAR", "$"):
+        if text in ("USD", "US DOLLAR", "$", "840"):
             return "USD"
         if text in ("CNY", "RMB", "CNH", "¥", "￥"):
             return "CNY"
@@ -594,27 +723,87 @@ def _activation_price_metadata(
         }
 
     for source in sources:
-        for key, currency in (("price_usd", "USD"), ("cost_usd", "USD"), ("price_cny", "CNY"), ("cost_cny", "CNY")):
+        for key, currency in (("price_usd", "USD"), ("cost_usd", "USD"), ("activationCost", "USD"), ("activation_cost", "USD"), ("price_cny", "CNY"), ("cost_cny", "CNY")):
             value = source.get(key)
             if value is not None:
                 result = make_price(value, currency, f"{provider.upper()} 激活响应")
                 if result:
                     return result
         currency = next((source.get(key) for key in ("currency", "price_currency", "priceCurrency") if source.get(key)), None)
-        if currency is None and provider == "smsbower":
+        if currency is None and provider in {"smsbower", "tiger"}:
             currency = "USD"
-        for key in ("price", "cost"):
+        for key in ("price", "cost", "activationCost", "activation_cost"):
             value = source.get(key)
             if value is not None:
                 result = make_price(value, currency, f"{provider.upper()} 激活响应")
                 if result:
                     return result
 
-    if provider == "smsbower" and isinstance(price_quote, dict):
-        result = make_price(price_quote.get("cost"), "USD", "SMSBower getPrices 报价")
+    if provider in {"smsbower", "tiger"} and isinstance(price_quote, dict):
+        label = "SMSBower getPrices 报价" if provider == "smsbower" else "Tiger SMS getPrices 报价"
+        result = make_price(price_quote.get("cost"), "USD", label)
         if result:
             return result
     return {}
+
+
+def _validate_activation_price(activation_id: str) -> dict:
+    """硬校验取号价格，防止供应商忽略 maxPrice 后继续使用超价号码。"""
+    state = _activation_state(activation_id)
+    provider = str(state.get("provider") or _provider()).strip().lower()
+    raw_amount = str(state.get("price_amount") or "").strip()
+    currency = str(state.get("price_currency") or "").strip().upper()
+    amount = None
+    if raw_amount:
+        try:
+            amount = Decimal(raw_amount)
+        except (InvalidOperation, TypeError, ValueError):
+            amount = None
+
+    min_limit = max_limit = None
+    comparable_amount = amount
+    if provider == "smsbower":
+        min_limit, max_limit = _smsbower_price_bounds_usd()
+        if currency == "CNY" and amount is not None:
+            comparable_amount = amount * _cny_to_usd_rate()[0]
+        elif currency not in ("", "USD"):
+            comparable_amount = None
+    elif provider == "tiger":
+        min_limit, max_limit = _tiger_price_bounds_usd()
+        if currency not in ("", "USD"):
+            comparable_amount = None
+
+    if min_limit is None and max_limit is None:
+        _update_activation_state(activation_id, {"price_validated": True})
+        return state
+    if comparable_amount is None or not comparable_amount.is_finite():
+        if provider not in {"smsbower", "tiger"}:
+            logger.warning(
+                "[SMS] provider=%s 取号响应未返回价格，无法做本地价格硬校验；保留供应商请求限制",
+                provider,
+            )
+            _update_activation_state(activation_id, {
+                "price_validated": False,
+                "price_validation_reason": "provider_price_unavailable",
+            })
+            return _activation_state(activation_id)
+        raise SmsNumberRejectedError(
+            f"{provider} 取号响应缺少可核验价格，已拒绝号码以遵守价格上限"
+        )
+    if min_limit is not None and comparable_amount < min_limit:
+        raise SmsNumberRejectedError(
+            f"{provider} 号码价格低于最低范围：actual={comparable_amount} min={min_limit}"
+        )
+    if max_limit is not None and comparable_amount > max_limit:
+        raise SmsNumberRejectedError(
+            f"{provider} 号码价格超过最高范围：actual={comparable_amount} max={max_limit}"
+        )
+    _update_activation_state(activation_id, {
+        "price_validated": True,
+        "price_checked_amount": format(comparable_amount, "f"),
+        "price_checked_currency": "USD" if provider in {"smsbower", "tiger"} else currency or "provider",
+    })
+    return _activation_state(activation_id)
 
 
 def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list[dict]:
@@ -622,7 +811,7 @@ def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list
     if not bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)):
         return []
     min_price_cny = _smsbower_price_bound("SMSBOWER_MIN_PRICE")
-    max_price_cny = _smsbower_price_bound("SMSBOWER_MAX_PRICE")
+    max_price_cny = _smsbower_price_bound("SMS_MAX_PRICE")
     min_price_usd, max_price_usd = _smsbower_price_bounds_usd()
     if max_price_usd is None:
         logger.warning("[SMSBower] 未配置最高价格，继续使用固定国家 SMS_COUNTRY=%s", getattr(_cfg, "SMS_COUNTRY", ""))
@@ -646,91 +835,194 @@ def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list
     return candidates
 
 
+def _tiger_price_rows(http: CurlSession, service: str, country: str | None = None) -> list[dict]:
+    """读取 Tiger getPrices 的 country -> service -> cost/count 表。"""
+    params = {"action": "getPrices", "service": service}
+    if country is not None and str(country).strip():
+        params["country"] = str(country).strip()
+    try:
+        payload = json.loads(_request_tiger(http, params))
+    except json.JSONDecodeError as exc:
+        raise SmsProviderError("Tiger SMS getPrices 响应不是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise SmsProviderError("Tiger SMS getPrices 响应不是 JSON 对象")
+    rows: list[dict] = []
+    for country_id, services in payload.items():
+        if not isinstance(services, dict):
+            continue
+        row = services.get(service)
+        if not isinstance(row, dict):
+            continue
+        try:
+            cost = Decimal(str(row.get("cost") if row.get("cost") is not None else row.get("price")))
+            count = int(row.get("count") or 0)
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if count > 0 and cost.is_finite() and cost >= 0:
+            rows.append({"country": str(country_id), "cost": cost, "count": count})
+    return rows
+
+
+def _tiger_random_country_candidates(http: CurlSession, service: str) -> list[dict]:
+    if not bool(getattr(_cfg, "TIGER_SMS_RANDOM_COUNTRY", True)):
+        return []
+    min_price_usd, max_price_usd = _tiger_price_bounds_usd()
+    if max_price_usd is None:
+        return []
+    candidates = [
+        row for row in _tiger_price_rows(http, service)
+        if row["cost"] <= max_price_usd and (min_price_usd is None or row["cost"] >= min_price_usd)
+    ]
+    random.shuffle(candidates)
+    if not candidates:
+        raise SmsNoNumbersError("Tiger SMS 当前人民币最高价格范围内没有可用国家")
+    return candidates
+
+
+def _acquire_tiger_number(
+    http: CurlSession,
+    service: str | None = None,
+    country: str | None = None,
+) -> tuple[str, str]:
+    service_code = _sms_service_code(service)
+    attempts = _setting_int("SMS_NUMBER_ACQUIRE_RETRIES", 3, 1)
+    candidates: list[dict] = []
+    fixed_quote = None
+    if country is None:
+        candidates = _tiger_random_country_candidates(http, service_code)
+        if candidates:
+            attempts = min(max(1, _setting_int("TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS", 12, 1)), len(candidates))
+    if not candidates:
+        configured_country = str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
+        if not configured_country:
+            raise SmsProviderConfigurationError("Tiger SMS 需要 SMS_COUNTRY，或开启价格范围内的随机国家")
+        try:
+            fixed_quote = next(
+                (row for row in _tiger_price_rows(http, service_code, configured_country)
+                 if row["country"] == configured_country),
+                None,
+            )
+        except SmsNoNumbersError:
+            raise
+        except Exception as exc:
+            logger.warning("[Tiger SMS] 获取价格快照失败，不影响取号：%s", exc)
+    try:
+        for attempt in range(1, attempts + 1):
+            candidate = candidates[attempt - 1] if candidates else None
+            selected_country = candidate["country"] if candidate else str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
+            try:
+                activation_id, phone = _acquire_number_once(
+                    http, service=service_code, country=selected_country,
+                    price_quote=candidate or fixed_quote,
+                )
+            except SmsNoNumbersError:
+                if candidates and attempt < attempts:
+                    continue
+                raise
+            try:
+                state = _validate_activation_price(activation_id)
+            except SmsNumberRejectedError as exc:
+                try:
+                    cancel_and_report_failure(activation_id, http=http, reason=exc)
+                except Exception as release_exc:
+                    logger.warning("[Tiger SMS] 超价号码释放失败，继续换号：id=%s error=%s", activation_id, release_exc)
+                continue
+            if _number_is_recently_rejected(phone) or _tier_is_cooled(state):
+                _release_strategy_rejected(activation_id, http)
+                continue
+            return activation_id, phone
+        raise SmsNumberRejectedError(f"Tiger SMS 连续 {attempts} 次取号候选均被策略排除")
+    finally:
+        pass
+
+
+def _preflight_tiger(http: CurlSession, service: str, country: str | None) -> dict:
+    rows = _tiger_price_rows(http, service, country if country else None)
+    min_price_usd, max_price_usd = _tiger_price_bounds_usd()
+    candidates = [
+        row for row in rows
+        if (max_price_usd is None or row["cost"] <= max_price_usd)
+        and (min_price_usd is None or row["cost"] >= min_price_usd)
+    ]
+    if country is None and bool(getattr(_cfg, "TIGER_SMS_RANDOM_COUNTRY", True)) and max_price_usd is not None:
+        if not candidates:
+            raise SmsNoNumbersError("Tiger SMS 当前人民币价格范围内没有可用国家")
+        return {
+            "provider": "tiger", "service": service, "country": None,
+            "probe": "getPrices", "available": True,
+            "candidate_count": len(candidates), "countries": [row["country"] for row in candidates],
+        }
+    target = str(country if country is not None else getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
+    if not target:
+        raise SmsProviderConfigurationError("SMS_COUNTRY 不能为空")
+    if not candidates:
+        raise SmsNoNumbersError(f"Tiger SMS 国家 {target} 暂无符合价格/库存条件的号码")
+    return {
+        "provider": "tiger", "service": service, "country": target,
+        "probe": "getPrices", "available": True,
+        "candidate_count": len(candidates), "countries": [target],
+    }
+
+
 def preflight_sms_dependency(
     http: CurlSession | None = None,
     service: str | None = None,
     country: str | None = None,
 ) -> dict:
-    """在手机流程取号前检查短信依赖，绝不调用消费型取号接口。"""
-    provider = _provider()
+    """只查询 SMSBower 价格/库存，不申请消费型号码。"""
     service_code = _sms_service_code(service)
     country_code = str(country if country is not None else getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
-
-    if provider == "smsbower":
-        own_http = http is None
-        http = http or _http()
+    own_http = http is None
+    http = http or _http()
+    if _provider() == "tiger":
         try:
-            rows = _smsbower_price_rows(http, service_code)
-            min_price_cny = _smsbower_price_bound("SMSBOWER_MIN_PRICE")
-            max_price_cny = _smsbower_price_bound("SMSBOWER_MAX_PRICE")
-            min_price_usd, max_price_usd = _smsbower_price_bounds_usd()
-            random_mode = bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) and country is None and max_price_usd is not None
-            if random_mode:
-                candidates = [
-                    row for row in rows
-                    if row["cost"] <= max_price_usd and (min_price_usd is None or row["cost"] >= min_price_usd)
-                ]
-                if not candidates:
-                    raise SmsNoNumbersError(
-                        f"SMSBower 在人民币最高价格 ¥{max_price_cny}（约 USD {max_price_usd:.6f}）内没有可用国家"
-                    )
-                return {
-                    "provider": provider,
-                    "service": service_code,
-                    "country": None,
-                    "probe": "getPrices",
-                    "available": True,
-                    "candidate_count": len(candidates),
-                    "countries": [row["country"] for row in candidates],
-                }
-
-            if not country_code:
-                raise SmsProviderConfigurationError("SMS_COUNTRY 不能为空")
-            target = country_code.lstrip("+")
-            candidates = [
-                row for row in rows
-                if row["country"].lstrip("+") == target
-                and (max_price_usd is None or row["cost"] <= max_price_usd)
-                and (min_price_usd is None or row["cost"] >= min_price_usd)
-            ]
-            if not candidates:
-                raise SmsNoNumbersError(f"SMSBower 国家 {country_code} 暂无符合价格/库存条件的号码")
-            return {
-                "provider": provider,
-                "service": service_code,
-                "country": country_code,
-                "probe": "getPrices",
-                "available": True,
-                "candidate_count": len(candidates),
-                "countries": [country_code],
-            }
+            return _preflight_tiger(http, service_code, country)
         finally:
             if own_http:
                 http.close()
-
-    if provider == "l":
-        _l_url("/api/admin/l/take-phone")
-        _l_headers()
-    elif provider == "h":
-        _h_url("/api/admin/h/take-phone")
-        _h_headers()
-    elif provider == "grizzly":
-        if not str(getattr(_cfg, "SMS_API_KEY", "") or "").strip():
-            raise SmsProviderConfigurationError("SMS_API_KEY 不能为空")
-        if not str(getattr(_cfg, "SMS_API_BASE", "") or "").strip():
-            raise SmsProviderConfigurationError("SMS_API_BASE 不能为空")
-    else:
-        raise SmsProviderConfigurationError(f"未知 SMS_PROVIDER：{provider}")
-
-    if not country_code:
-        raise SmsProviderConfigurationError("SMS_COUNTRY 不能为空")
-    return {
-        "provider": provider,
-        "service": service_code,
-        "country": country_code,
-        "probe": "configuration_only",
-        "available": True,
-    }
+    try:
+        rows = _smsbower_price_rows(http, service_code)
+        min_price_usd, max_price_usd = _smsbower_price_bounds_usd()
+        if bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) and country is None and max_price_usd is not None:
+            candidates = [
+                row for row in rows
+                if row["cost"] <= max_price_usd
+                and (min_price_usd is None or row["cost"] >= min_price_usd)
+            ]
+            if not candidates:
+                raise SmsNoNumbersError("SMSBower 当前价格范围内没有可用国家")
+            return {
+                "provider": "smsbower",
+                "service": service_code,
+                "country": None,
+                "probe": "getPrices",
+                "available": True,
+                "candidate_count": len(candidates),
+                "countries": [row["country"] for row in candidates],
+            }
+        if not country_code:
+            raise SmsProviderConfigurationError("SMS_COUNTRY 不能为空")
+        target = country_code.lstrip("+")
+        candidates = [
+            row for row in rows
+            if row["country"].lstrip("+") == target
+            and (max_price_usd is None or row["cost"] <= max_price_usd)
+            and (min_price_usd is None or row["cost"] >= min_price_usd)
+        ]
+        if not candidates:
+            raise SmsNoNumbersError(f"SMSBower 国家 {country_code} 暂无符合价格/库存条件的号码")
+        return {
+            "provider": "smsbower",
+            "service": service_code,
+            "country": country_code,
+            "probe": "getPrices",
+            "available": True,
+            "candidate_count": len(candidates),
+            "countries": [country_code],
+        }
+    finally:
+        if own_http:
+            http.close()
 
 
 def classify_sms_exception(reason: object) -> dict:
@@ -760,9 +1052,7 @@ def classify_sms_exception(reason: object) -> dict:
 
 
 def _smsbower_number_params(service: str | None, country: str | None) -> dict:
-    service_code = str(service or _cfg.SMS_SERVICE or "").strip()
-    if service_code.lower() in ("openai", "chatgpt"):
-        service_code = "dr"
+    service_code = _sms_service_code(service)
     params = {
         "action": "getNumberV2" if bool(getattr(_cfg, "SMSBOWER_USE_V2", True)) else "getNumber",
         "service": service_code,
@@ -783,6 +1073,49 @@ def _smsbower_number_params(service: str | None, country: str | None) -> dict:
     if dynamic_excluded:
         params["exceptProviderIds"] = ",".join(sorted(_csv_values(params.get("exceptProviderIds")) | dynamic_excluded))
     return params
+
+
+def _tiger_number_params(service: str | None, country: str | None) -> dict:
+    service_code = _sms_service_code(service)
+    params = {
+        "action": "getNumberV2" if bool(getattr(_cfg, "TIGER_SMS_USE_V2", True)) else "getNumber",
+        "service": service_code,
+        "country": str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip(),
+        "activationType": "SMS",
+    }
+    _, max_price_usd = _tiger_price_bounds_usd()
+    for key, value in (
+        ("maxPrice", _smsbower_api_price(max_price_usd, ROUND_DOWN) if max_price_usd is not None else ""),
+        ("providerIds", getattr(_cfg, "TIGER_SMS_PROVIDER_IDS", "")),
+        ("exceptProviderIds", getattr(_cfg, "TIGER_SMS_EXCEPT_PROVIDER_IDS", "")),
+    ):
+        value = str(value or "").strip()
+        if value:
+            params[key] = value
+    dynamic_excluded = _cooldown_provider_ids(service_code, params.get("country", ""))
+    if dynamic_excluded:
+        params["exceptProviderIds"] = ",".join(sorted(_csv_values(params.get("exceptProviderIds")) | dynamic_excluded))
+    return params
+
+
+def _request_tiger_number(http: CurlSession, params: dict) -> tuple[dict, str]:
+    candidates = [dict(params)]
+    if params.get("action") == "getNumberV2":
+        candidates.append({**params, "action": "getNumber"})
+    unique = []
+    for candidate in candidates:
+        if candidate not in unique:
+            unique.append(candidate)
+    for index, candidate in enumerate(unique):
+        try:
+            return candidate, _request_tiger(http, candidate)
+        except SmsNoNumbersError:
+            raise
+        except SmsProviderError as exc:
+            if candidate.get("action") == "getNumberV2" and "BAD_ACTION" in str(exc) and index + 1 < len(unique):
+                continue
+            raise
+    raise SmsProviderError("Tiger SMS 没有可用的取号请求方案")
 
 
 def _request_smsbower_number(http: CurlSession, params: dict) -> tuple[dict, str]:
@@ -815,404 +1148,9 @@ def _request_smsbower_number(http: CurlSession, params: dict) -> tuple[dict, str
     raise SmsProviderError("SMSBower 没有可用的取号请求方案")
 
 
-def _l_url(path: str) -> str:
-    base = str(getattr(_cfg, "L_API_BASE", "") or "").strip()
-    if not base:
-        raise SmsProviderConfigurationError("L_API_BASE 不能为空")
-    return urljoin(base.rstrip("/") + "/", path.lstrip("/"))
-
-
-def _l_headers() -> dict:
-    token = str(getattr(_cfg, "L_ADMIN_AUTH_CODE", "") or "").strip()
-    if not token:
-        raise SmsProviderConfigurationError("L_ADMIN_AUTH_CODE 不能为空")
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-
-def _post_l_json(http: CurlSession, path: str, payload: dict) -> dict:
-    resp = http.post(_l_url(path), headers=_l_headers(), data=json.dumps(payload))
-    text = (resp.text or "").strip()
-    try:
-        data = resp.json()
-    except Exception:
-        data = {}
-
-    if resp.status_code in (401, 403):
-        raise SmsProviderConfigurationError(f"L HTTP {resp.status_code}: 管理授权失败")
-    if resp.status_code != 200:
-        msg = data.get("error") if isinstance(data, dict) else ""
-        raise SmsProviderError(f"L HTTP {resp.status_code}: {(msg or text)[:200]}")
-    if isinstance(data, dict) and data.get("error"):
-        error = str(data.get("error") or "")
-        raw = str(data.get("raw") or "")
-        combined = f"{error} {raw}".strip()
-        if "NO_BALANCE" in combined or "余额不足" in combined:
-            raise SmsNoBalanceError(f"L 余额不足：{combined}")
-        if "NO_NUMBERS" in combined or "暂无号码" in combined:
-            raise SmsNoNumbersError(f"L 暂无可用号码：{combined}")
-        raise SmsProviderError(f"L 请求失败：{combined}")
-    if not isinstance(data, dict):
-        raise SmsProviderError(f"L 响应不是 JSON 对象：{text[:200]}")
-    return data
-
-
-def _h_url(path: str) -> str:
-    base = str(getattr(_cfg, "H_API_BASE", "") or "").strip()
-    if not base:
-        raise SmsProviderConfigurationError("H_API_BASE 不能为空")
-    return urljoin(base.rstrip("/") + "/", path.lstrip("/"))
-
-
-def _h_headers() -> dict:
-    token = str(getattr(_cfg, "H_ADMIN_AUTH_CODE", "") or "").strip()
-    if not token:
-        raise SmsProviderConfigurationError("H_ADMIN_AUTH_CODE 不能为空")
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-
-def _post_h_json(http: CurlSession, path: str, payload: dict) -> dict:
-    resp = http.post(_h_url(path), headers=_h_headers(), data=json.dumps(payload))
-    text = (resp.text or "").strip()
-    try:
-        data = resp.json()
-    except Exception:
-        data = {}
-
-    if resp.status_code in (401, 403):
-        raise SmsProviderConfigurationError(f"H HTTP {resp.status_code}: 管理授权失败")
-    if resp.status_code != 200:
-        msg = data.get("error") if isinstance(data, dict) else ""
-        raise SmsProviderError(f"H HTTP {resp.status_code}: {(msg or text)[:200]}")
-    if isinstance(data, dict) and data.get("error"):
-        error = str(data.get("error") or "")
-        raw = str(data.get("raw") or "")
-        combined = f"{error} {raw}".strip()
-        if "NO_BALANCE" in combined or "余额不足" in combined:
-            raise SmsNoBalanceError(f"H 余额不足：{combined}")
-        if "NO_NUMBERS" in combined or "暂无号码" in combined:
-            raise SmsNoNumbersError(f"H 暂无可用号码：{combined}")
-        raise SmsProviderError(f"H 请求失败：{combined}")
-    if not isinstance(data, dict):
-        raise SmsProviderError(f"H 响应不是 JSON 对象：{text[:200]}")
-    return data
-
-
-def _release_h_number(activation_id: str, http: CurlSession | None = None) -> dict:
-    """调用 H_API /api/admin/h/release 释放单个号码。"""
-    activation_id = str(activation_id or "").strip()
-    if not activation_id:
-        raise SmsProviderError("H release 缺少 id")
-    own_http = http is None
-    http = http or _http()
-    try:
-        data = _post_h_json(http, "/api/admin/h/release", {"id": activation_id})
-        failed = data.get("failed") if isinstance(data, dict) else None
-        if isinstance(failed, list) and failed:
-            detail = json.dumps(failed, ensure_ascii=False)[:300]
-            raise SmsProviderError(f"H release 失败 id={activation_id}: {detail}")
-        released = data.get("released", data.get("updated", 0)) if isinstance(data, dict) else 0
-        logger.info(f"[SMS:H] 已释放号码 id={activation_id}, released={released}")
-        _forget_activation(activation_id)
-        return data
-    finally:
-        if own_http:
-            http.close()
-
-
-def release_h_numbers(ids: list[str], http: CurlSession | None = None) -> dict:
-    """批量释放 H 号码。"""
-    ids = [str(x or "").strip() for x in (ids or []) if str(x or "").strip()]
-    if not ids:
-        raise SmsProviderError("H release 缺少 ids")
-    own_http = http is None
-    http = http or _http()
-    try:
-        data = _post_h_json(http, "/api/admin/h/release", {"ids": ids})
-        released = data.get("released", data.get("updated", 0)) if isinstance(data, dict) else 0
-        failed = data.get("failed") if isinstance(data, dict) else []
-        logger.info(f"[SMS:H] 批量释放号码完成 released={released}, failed={len(failed) if isinstance(failed, list) else 0}")
-        for activation_id in ids:
-            _forget_activation(activation_id)
-        return data
-    finally:
-        if own_http:
-            http.close()
-
-
-def _release_l_number(activation_id: str, http: CurlSession | None = None) -> dict:
-    """调用 L_API /api/admin/l/release 释放单个号码。"""
-    activation_id = str(activation_id or "").strip()
-    if not activation_id:
-        raise SmsProviderError("L release 缺少 id")
-    own_http = http is None
-    http = http or _http()
-    try:
-        data = _post_l_json(http, "/api/admin/l/release", {"id": activation_id})
-        failed = data.get("failed") if isinstance(data, dict) else None
-        if isinstance(failed, list) and failed:
-            # 接口允许部分失败。单个释放时 failed 非空基本代表这个 id 释放失败。
-            detail = json.dumps(failed, ensure_ascii=False)[:300]
-            raise SmsProviderError(f"L release 失败 id={activation_id}: {detail}")
-        released = data.get("released", data.get("updated", 0)) if isinstance(data, dict) else 0
-        logger.info(f"[SMS:L] 已释放号码 id={activation_id}, released={released}")
-        _forget_activation(activation_id)
-        return data
-    finally:
-        if own_http:
-            http.close()
-
-
-def release_l_numbers(ids: list[str], http: CurlSession | None = None) -> dict:
-    """批量释放 L 号码，供工具/后续批处理复用。"""
-    ids = [str(x or "").strip() for x in (ids or []) if str(x or "").strip()]
-    if not ids:
-        raise SmsProviderError("L release 缺少 ids")
-    own_http = http is None
-    http = http or _http()
-    try:
-        data = _post_l_json(http, "/api/admin/l/release", {"ids": ids})
-        released = data.get("released", data.get("updated", 0)) if isinstance(data, dict) else 0
-        failed = data.get("failed") if isinstance(data, dict) else []
-        logger.info(f"[SMS:L] 批量释放号码完成 released={released}, failed={len(failed) if isinstance(failed, list) else 0}")
-        for activation_id in ids:
-            _forget_activation(activation_id)
-        return data
-    finally:
-        if own_http:
-            http.close()
-
-
 def _normalize_phone_digits(value: str) -> str:
-    """把平台返回/配置的号码片段规范化为纯数字，避免 +-849... 这类非法 E.164。"""
+    """把平台返回的号码规范化为纯数字，避免非法 E.164。"""
     return "".join(ch for ch in str(value or "").strip() if ch.isdigit())
-
-
-def _normalize_l_phone(phone: str) -> str:
-    phone = _normalize_phone_digits(phone)
-    prefix = _normalize_phone_digits(getattr(_cfg, "L_PHONE_PREFIX", ""))
-    if prefix and phone and not phone.startswith(prefix):
-        return f"{prefix}{phone}"
-    return phone
-
-
-def _normalize_h_phone(phone: str) -> str:
-    phone = _normalize_phone_digits(phone)
-    prefix = _normalize_phone_digits(getattr(_cfg, "H_PHONE_PREFIX", ""))
-    if prefix and phone and not phone.startswith(prefix):
-        return f"{prefix}{phone}"
-    return phone
-
-
-def _h_phone_acquire_mode() -> str:
-    """
-    H 取号模式：
-      - reusable/reuse/prefer_reuse：优先复用，调用 /api/admin/h/take-reusable-phone
-      - new/fresh/always_new：每次取新号，调用 /api/admin/h/take-phone
-    """
-    raw = str(getattr(_cfg, "H_PHONE_ACQUIRE_MODE", "reusable") or "reusable").strip().lower()
-    if raw in ("new", "fresh", "always_new", "take_phone", "take-phone", "每次取新号", "新号"):
-        return "new"
-    return "reusable"
-
-
-# ============================================================
-# 取号
-# ============================================================
-
-def _acquire_number_once(
-    http: CurlSession | None = None,
-    service: str | None = None,
-    country: str | None = None,
-    price_quote: dict | None = None,
-) -> tuple[str, str]:
-    """
-    取一个手机号（getNumber）。
-
-    Returns:
-        (activation_id, phone_number) —— phone_number 不带 + 前缀（如 16195366483）
-
-    Raises:
-        SmsNoNumbersError / SmsNoBalanceError / SmsProviderError
-    """
-    own_http = http is None
-    http = http or _http()
-    try:
-        if _provider() == "smsbower":
-            params, text = _request_smsbower_number(http, _smsbower_number_params(service, country))
-            if params["action"] == "getNumberV2":
-                try:
-                    data = json.loads(text)
-                except Exception:
-                    data = None
-                if isinstance(data, dict):
-                    activation_id = str(data.get("activationId") or data.get("id") or "").strip()
-                    phone = str(data.get("phoneNumber") or data.get("phone") or "").strip()
-                    if activation_id and phone:
-                        provider_id = str(
-                            data.get("providerId")
-                            or data.get("provider_id")
-                            or data.get("activationOperator")
-                            or data.get("operator")
-                            or ""
-                        ).strip()
-                        tier = str(
-                            data.get("activationOperator")
-                            or data.get("operator")
-                            or data.get("tier")
-                            or provider_id
-                            or "default"
-                        ).strip()
-                        metadata = {
-                            "provider": "smsbower",
-                            "service": str(service or getattr(_cfg, "SMS_SERVICE", "") or ""),
-                            "country": str(country or getattr(_cfg, "SMS_COUNTRY", "") or ""),
-                            "tier": tier,
-                            "acquire_mode": "getNumberV2",
-                        }
-                        if provider_id:
-                            metadata["provider_id"] = provider_id
-                        metadata.update(_activation_price_metadata(data, "smsbower", price_quote))
-                        return _remember_activation(activation_id, phone, metadata)
-                raise SmsProviderError(f"SMSBower getNumberV2 响应格式异常：{text[:200]}")
-            if not text.startswith("ACCESS_NUMBER:"):
-                raise SmsProviderError(f"SMSBower getNumber 非预期响应：{text[:200]}")
-            parts = text.split(":", 2)
-            if len(parts) < 3:
-                raise SmsProviderError(f"SMSBower getNumber 响应格式异常：{text[:200]}")
-            activation_id, phone = parts[1].strip(), parts[2].strip()
-            return _remember_activation(
-                activation_id,
-                phone,
-                {
-                    "provider": "smsbower",
-                    "service": str(service or getattr(_cfg, "SMS_SERVICE", "") or ""),
-                    "country": str(country or getattr(_cfg, "SMS_COUNTRY", "") or ""),
-                    "tier": "default",
-                    "acquire_mode": "getNumber",
-                    **_activation_price_metadata(None, "smsbower", price_quote),
-                },
-            )
-
-        if _provider() == "l":
-            payload = {
-                "service": service or _cfg.SMS_SERVICE,
-                "country": country or _cfg.SMS_COUNTRY,
-            }
-            if _cfg.SMS_MAX_PRICE:
-                payload["maxPrice"] = _cfg.SMS_MAX_PRICE
-
-            data = _post_l_json(http, "/api/admin/l/take-phone", payload)
-            item = data.get("item") or {}
-            activation_id = str(item.get("id") or "").strip()
-            raw_phone = str(item.get("phone") or "")
-            raw_prefix = str(getattr(_cfg, "L_PHONE_PREFIX", "") or "")
-            phone = _normalize_l_phone(raw_phone)
-            if raw_phone.strip() != phone or raw_prefix.strip():
-                logger.info(
-                    f"[SMS:L] 号码规范化：raw_phone={raw_phone!r}, "
-                    f"prefix={raw_prefix!r}, normalized=+{phone}"
-                )
-            if not activation_id or not phone:
-                raise SmsProviderError(f"L take-phone 响应缺少 item.id/item.phone：{str(data)[:200]}")
-            logger.info(f"[SMS:L] 取号成功：id={activation_id}, phone=+{phone}")
-            return _remember_activation(
-                activation_id,
-                phone,
-                {
-                    "provider": "l",
-                    "service": str(service or getattr(_cfg, "SMS_SERVICE", "") or ""),
-                    "country": str(country or getattr(_cfg, "SMS_COUNTRY", "") or ""),
-                    "tier": "default",
-                    "acquire_mode": "take-phone",
-                    **_activation_price_metadata(data, "l"),
-                },
-            )
-
-        if _provider() == "h":
-            # H_API 使用 projectId + country；统一复用 SMS_SERVICE / SMS_COUNTRY，
-            # 避免接码平台之间出现重复的“服务/国家”配置。
-            project_id = str(service or _cfg.SMS_SERVICE).strip()
-            h_country = str(country or _cfg.SMS_COUNTRY).strip()
-            if not project_id:
-                raise SmsProviderError("H projectId 不能为空：请填写 SMS_SERVICE")
-            if not h_country:
-                raise SmsProviderError("H country 不能为空：请填写 SMS_COUNTRY")
-            payload = {
-                "projectId": project_id,
-                "country": h_country,
-            }
-            mode = _h_phone_acquire_mode()
-            api_path = "/api/admin/h/take-phone" if mode == "new" else "/api/admin/h/take-reusable-phone"
-            data = _post_h_json(http, api_path, payload)
-            item = data.get("item") or {}
-            activation_id = str(item.get("id") or "").strip()
-            raw_phone = str(item.get("phone") or "")
-            raw_prefix = str(getattr(_cfg, "H_PHONE_PREFIX", "") or "")
-            phone = _normalize_h_phone(raw_phone)
-            if raw_phone.strip() != phone or raw_prefix.strip():
-                logger.info(
-                    f"[SMS:H] 号码规范化：raw_phone={raw_phone!r}, "
-                    f"prefix={raw_prefix!r}, normalized=+{phone}"
-                )
-            if not activation_id or not phone:
-                raise SmsProviderError(f"H {api_path.rsplit('/', 1)[-1]} 响应缺少 item.id/item.phone：{str(data)[:200]}")
-            logger.info(
-                f"[SMS:H] 取号成功：mode={mode}, api={api_path}, id={activation_id}, phone=+{phone}, "
-                f"reused={bool(data.get('reused'))}, duplicate={bool(data.get('duplicate'))}"
-            )
-            return _remember_activation(
-                activation_id,
-                phone,
-                {
-                    "provider": "h",
-                    "service": project_id,
-                    "country": h_country,
-                    "tier": "default",
-                    "acquire_mode": mode,
-                    "reused": bool(data.get("reused")),
-                    "duplicate": bool(data.get("duplicate")),
-                    **_activation_price_metadata(data, "h"),
-                },
-            )
-
-        params = {
-            "action": "getNumber",
-            "service": service or _cfg.SMS_SERVICE,
-            "country": country or _cfg.SMS_COUNTRY,
-        }
-        if _cfg.SMS_MAX_PRICE:
-            params["maxPrice"] = _cfg.SMS_MAX_PRICE
-
-        text = _request_grizzly(http, params)
-        # 成功格式：ACCESS_NUMBER:激活ID:号码
-        if not text.startswith("ACCESS_NUMBER:"):
-            raise SmsProviderError(f"getNumber 非预期响应：{text[:200]}")
-        parts = text.split(":")
-        if len(parts) < 3:
-            raise SmsProviderError(f"getNumber 响应格式异常：{text[:200]}")
-        activation_id = parts[1].strip()
-        phone = parts[2].strip()
-        logger.info(f"[SMS] 取号成功：activation_id={activation_id}, phone=+{phone}")
-        return _remember_activation(
-            activation_id,
-            phone,
-            {
-                "provider": "grizzly",
-                "service": str(service or getattr(_cfg, "SMS_SERVICE", "") or ""),
-                "country": str(country or getattr(_cfg, "SMS_COUNTRY", "") or ""),
-                "tier": "default",
-                "acquire_mode": "getNumber",
-            },
-        )
-    finally:
-        if own_http:
-            http.close()
 
 
 def _number_is_recently_rejected(phone: str) -> bool:
@@ -1225,12 +1163,93 @@ def _number_is_recently_rejected(phone: str) -> bool:
 
 
 def _release_strategy_rejected(activation_id: str, http: CurlSession) -> None:
-    provider = _provider()
     try:
-        cancel(activation_id, http=http, background=(provider == "grizzly"))
+        cancel(activation_id, http=http)
+    except Exception as exc:
+        logger.warning("[SMSBower] 策略排除号码释放请求失败：id=%s error=%s", activation_id, exc)
     finally:
-        if provider != "grizzly":
-            _forget_activation(activation_id)
+        _forget_activation(activation_id)
+
+
+# ============================================================
+# 取号
+# ============================================================
+
+def _acquire_number_once(
+    http: CurlSession | None = None,
+    service: str | None = None,
+    country: str | None = None,
+    price_quote: dict | None = None,
+) -> tuple[str, str]:
+    """向 SMSBower 申请一个号码并登记激活快照。"""
+    own_http = http is None
+    http = http or _http()
+    try:
+        service_code = _sms_service_code(service)
+        provider = _provider()
+        if provider == "tiger":
+            params, text = _request_tiger_number(http, _tiger_number_params(service_code, country))
+        else:
+            params, text = _request_smsbower_number(http, _smsbower_number_params(service_code, country))
+        if params["action"] == "getNumberV2":
+            try:
+                data = json.loads(text)
+            except Exception as exc:
+                raise SmsProviderError(f"SMSBower getNumberV2 响应不是 JSON：{text[:200]}") from exc
+            if not isinstance(data, dict):
+                raise SmsProviderError(f"SMSBower getNumberV2 响应格式异常：{text[:200]}")
+            activation_id = str(data.get("activationId") or data.get("id") or "").strip()
+            phone = str(data.get("phoneNumber") or data.get("phone") or "").strip()
+            if not activation_id or not phone:
+                raise SmsProviderError(f"SMSBower getNumberV2 响应缺少激活 ID/号码：{text[:200]}")
+            provider_id = str(
+                data.get("providerId")
+                or data.get("provider_id")
+                or data.get("activationOperator")
+                or data.get("operator")
+                or ""
+            ).strip()
+            tier = str(
+                data.get("activationOperator")
+                or data.get("operator")
+                or data.get("tier")
+                or provider_id
+                or "default"
+            ).strip()
+            metadata = {
+                "provider": provider,
+                "service": service_code,
+                "country": str(country or getattr(_cfg, "SMS_COUNTRY", "") or ""),
+                "tier": tier,
+                "acquire_mode": "getNumberV2",
+            }
+            if provider_id:
+                metadata["provider_id"] = provider_id
+            metadata.update(_activation_price_metadata(data, provider, price_quote))
+            return _remember_activation(activation_id, phone, metadata)
+        if not text.startswith("ACCESS_NUMBER:"):
+            raise SmsProviderError(f"SMSBower getNumber 非预期响应：{text[:200]}")
+        parts = text.split(":", 2)
+        if len(parts) < 3:
+            raise SmsProviderError(f"SMSBower getNumber 响应格式异常：{text[:200]}")
+        activation_id, phone = parts[1].strip(), parts[2].strip()
+        if not activation_id or not phone:
+            raise SmsProviderError(f"SMSBower getNumber 响应缺少激活 ID/号码：{text[:200]}")
+        return _remember_activation(
+            activation_id,
+            phone,
+            {
+                "provider": provider,
+                "service": service_code,
+                "country": str(country or getattr(_cfg, "SMS_COUNTRY", "") or ""),
+                "tier": "default",
+                "acquire_mode": "getNumber",
+                **_activation_price_metadata(None, provider, price_quote),
+            },
+        )
+    finally:
+        if own_http:
+            http.close()
 
 
 def acquire_number(
@@ -1238,27 +1257,35 @@ def acquire_number(
     service: str | None = None,
     country: str | None = None,
 ) -> tuple[str, str]:
-    """取号兼容入口；SMSBower 默认从最高价格内的有库存国家随机选择。"""
+    """按当前短信平台价格/库存策略取号，失败候选先释放再换号。"""
+    if _provider() == "tiger":
+        own_http = http is None
+        http = http or _http()
+        try:
+            return _acquire_tiger_number(http, service=service, country=country)
+        finally:
+            if own_http:
+                http.close()
     own_http = http is None
     http = http or _http()
     attempts = _setting_int("SMS_NUMBER_ACQUIRE_RETRIES", 3, 1)
-    service_code = str(service or getattr(_cfg, "SMS_SERVICE", "") or "").strip()
-    if service_code.lower() in ("openai", "chatgpt"):
-        service_code = "dr"
+    service_code = _sms_service_code(service)
     random_countries: list[dict] = []
     fixed_price_quote = None
-    if _provider() == "smsbower" and country is None:
+    if country is None:
         random_countries = _smsbower_random_country_candidates(http, service_code)
-        attempts = min(
-            max(1, _setting_int("SMSBOWER_RANDOM_COUNTRY_ATTEMPTS", 12, 1)),
-            max(1, len(random_countries)),
-        )
-    if _provider() == "smsbower" and not random_countries:
+        if random_countries:
+            attempts = min(
+                max(1, _setting_int("SMSBOWER_RANDOM_COUNTRY_ATTEMPTS", 12, 1)),
+                len(random_countries),
+            )
+    if not random_countries:
         configured_country = str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
         if configured_country:
             try:
                 fixed_price_quote = next(
-                    (row for row in _smsbower_price_rows(http, service_code) if row["country"] == configured_country),
+                    (row for row in _smsbower_price_rows(http, service_code)
+                     if row["country"] == configured_country),
                     None,
                 )
             except Exception as exc:
@@ -1269,40 +1296,49 @@ def acquire_number(
             selected_country = candidate["country"] if candidate else country
             try:
                 activation_id, phone = _acquire_number_once(
-                    http, service=service_code or service, country=selected_country,
+                    http,
+                    service=service_code,
+                    country=selected_country,
                     price_quote=candidate or fixed_price_quote,
                 )
             except SmsNoNumbersError:
                 if random_countries and attempt < attempts:
-                    candidate = random_countries[attempt - 1]
                     logger.info(
                         "[SMSBower] 随机国家无号，继续候选：attempt=%s/%s country=%s cost=%s",
                         attempt, attempts, candidate["country"], candidate["cost"],
                     )
                     continue
                 raise
-            state = _activation_state(activation_id)
-            if not state:
-                state = {
-                    "activation_id": activation_id,
-                    "phone_number": phone,
-                    "provider": _provider(),
-                    "service": service_code,
-                    "country": str(selected_country or getattr(_cfg, "SMS_COUNTRY", "") or ""),
-                }
-                _remember_activation(activation_id, phone, state)
+            try:
+                state = _validate_activation_price(activation_id)
+            except SmsNumberRejectedError as exc:
+                state = _activation_state(activation_id)
+                logger.warning(
+                    "[SMSBower] 号码不符合价格策略，释放并换号：attempt=%s/%s phone=+%s region=%s reason=%s",
+                    attempt, attempts, _normalize_phone_digits(phone),
+                    state.get("phone_country_name") or state.get("phone_region") or "unknown",
+                    str(exc)[:180],
+                )
+                try:
+                    cancel_and_report_failure(activation_id, http=http, reason=exc)
+                except Exception as release_exc:
+                    logger.warning("[SMSBower] 违规号码释放失败，继续换号：id=%s error=%s", activation_id, release_exc)
+                continue
             recently_rejected = _number_is_recently_rejected(phone)
             cooled = _tier_is_cooled(state)
             if recently_rejected or cooled:
                 reason = "recently_rejected_number" if recently_rejected else "cooled_tier"
                 _metric("candidate_skipped", state)
-                logger.info("[SMS] 跳过策略排除候选：attempt=%s/%s reason=%s phone=%s", attempt, attempts, reason, _mask_phone(phone))
+                logger.info(
+                    "[SMSBower] 跳过策略排除候选：attempt=%s/%s reason=%s phone=%s",
+                    attempt, attempts, reason, _mask_phone(phone),
+                )
                 _release_strategy_rejected(activation_id, http)
                 continue
             return activation_id, phone
         if random_countries:
             raise SmsNoNumbersError(f"随机尝试 {attempts} 个价格范围内国家后仍无可用号码")
-        raise SmsNumberRejectedError(f"连续 {attempts} 次取到的号码或 Provider tier 均被短信策略排除")
+        raise SmsNumberRejectedError(f"连续 {attempts} 次取到的号码或供应商层级均被策略排除")
     finally:
         if own_http:
             http.close()
@@ -1318,16 +1354,7 @@ def wait_for_sms_code(
     max_wait: int | None = None,
     poll_interval: int | None = None,
 ) -> str:
-    """
-    轮询 getStatus 直到拿到短信验证码。
-
-    Returns:
-        验证码字符串
-
-    Raises:
-        SmsCodeTimeout —— 超时没收到（上层可换号重试）
-        SmsProviderError —— 激活被取消等
-    """
+    """轮询 SMSBower getStatus，直到拿到当前激活的新验证码。"""
     own_http = http is None
     http = http or _http()
     total_wait = max_wait if max_wait is not None else _setting_int("SMS_CODE_WAIT", 120, 0)
@@ -1335,8 +1362,8 @@ def wait_for_sms_code(
     deadline = time.monotonic() + total_wait
     retry_status_sent = False
     try:
-        provider = _provider()
-        logger.info(f"[SMS] 等待短信验证码 activation_id={activation_id}，最长 {total_wait}s...")
+        provider_name = "Tiger SMS" if _provider_for_activation(activation_id) == "tiger" else "SMSBower"
+        logger.info("[%s] 等待短信验证码 activation_id=%s，最长 %ss", provider_name, activation_id, total_wait)
         round_no = 0
         while time.monotonic() < deadline:
             try:
@@ -1345,131 +1372,53 @@ def wait_for_sms_code(
             except ImportError:
                 pass
             round_no += 1
-            elapsed = max(0, int(total_wait - max(0, deadline - time.monotonic())))
-            remaining_before = max(0, int(deadline - time.monotonic()))
-            logger.info(
-                f"[SMS] 第 {round_no} 轮获取验证码 activation_id={activation_id}，"
-                f"已等 {elapsed}s，剩余约 {remaining_before}s"
-            )
-            if provider == "l":
-                data = _post_l_json(http, "/api/admin/l/fetch-code", {"id": activation_id})
-                code = str(data.get("code") or "").strip()
-                raw = str(data.get("raw") or "").strip()
-                status = str((data.get("item") or {}).get("status") or "").strip()
-                if code and _remember_code(activation_id, code):
-                    logger.info(f"[SMS:L] 第 {round_no} 轮收到验证码：{code}")
-                    return code
-                if code:
-                    logger.info(f"[SMS:L] 第 {round_no} 轮忽略历史验证码：{code}")
-                remaining = max(0, int(deadline - time.monotonic()))
-                logger.info(
-                    f"[SMS:L] 第 {round_no} 轮未收到验证码，状态={status or raw or 'WAIT'}，"
-                    f"{interval}s 后重试（剩余 {remaining}s）"
-                )
-                _stop_sleep(interval)
-                continue
-
-            if provider == "h":
-                data = _post_h_json(http, "/api/admin/h/fetch-code", {"id": activation_id})
-                code = str(data.get("code") or "").strip()
-                raw = str(data.get("raw") or "").strip()
-                status = str((data.get("item") or {}).get("status") or "").strip()
-                if code and _remember_code(activation_id, code):
-                    logger.info(f"[SMS:H] 第 {round_no} 轮收到验证码：{code}")
-                    return code
-                if code:
-                    logger.info(f"[SMS:H] 第 {round_no} 轮忽略历史验证码：{code}")
-                remaining = max(0, int(deadline - time.monotonic()))
-                logger.info(
-                    f"[SMS:H] 第 {round_no} 轮未收到验证码，状态={status or raw or 'WAIT'}，"
-                    f"{interval}s 后重试（剩余 {remaining}s）"
-                )
-                _stop_sleep(interval)
-                continue
-
-            if provider == "smsbower":
-                text = _request_smsbower(http, {"action": "getStatus", "id": activation_id})
-                if text.startswith("STATUS_OK:"):
-                    code = text.split(":", 1)[1].strip().strip("'")
-                    if _remember_code(activation_id, code):
-                        logger.info(f"[SMSBower] 第 {round_no} 轮收到验证码：{code}")
-                        return code
-                    logger.info(f"[SMSBower] 第 {round_no} 轮忽略历史验证码：{code}")
-                elif text == "STATUS_CANCEL":
-                    raise SmsProviderError("SMSBower 激活已被取消（STATUS_CANCEL）")
-                elif text.startswith("STATUS_WAIT_RETRY"):
-                    old_code = text.split(":", 1)[1].strip() if ":" in text else ""
-                    if old_code:
-                        if _remember_code(activation_id, old_code):
-                            logger.info(f"[SMSBower] 第 {round_no} 轮记录待重试旧验证码：{old_code}")
-                        else:
-                            logger.info(f"[SMSBower] 第 {round_no} 轮旧验证码已记录：{old_code}")
-                    if not retry_status_sent:
-                        retry_status_sent = True
-                        try:
-                            set_status(activation_id, 3, http=http)
-                        except Exception as exc:
-                            logger.warning(f"[SMSBower] 请求下一条短信失败（继续轮询）：{exc}")
-                _stop_sleep(interval)
-                continue
-
-            text = _request_grizzly(http, {"action": "getStatus", "id": activation_id})
-
+            provider = _provider_for_activation(activation_id)
+            request = _request_tiger if provider == "tiger" else _request_smsbower
+            text = request(http, {"action": "getStatus", "id": activation_id})
             if text.startswith("STATUS_OK:"):
-                code = text.split(":", 1)[1].strip()
+                code = text.split(":", 1)[1].strip().strip("'")
                 if _remember_code(activation_id, code):
-                    logger.info(f"[SMS] 第 {round_no} 轮收到验证码：{code}")
+                    logger.info("[%s] 第 %s 轮收到验证码：length=%s", provider_name, round_no, len(code))
                     return code
-                logger.info(f"[SMS] 第 {round_no} 轮忽略历史验证码：{code}")
-            elif text == "STATUS_CANCEL":
-                raise SmsProviderError("激活已被取消（STATUS_CANCEL）")
+                logger.info("[%s] 第 %s 轮忽略历史验证码：length=%s", provider_name, round_no, len(code))
+            elif text in {"STATUS_CANCEL", "ACCESS_CANCEL"}:
+                raise SmsProviderError(f"{provider_name} 激活已被取消（{text}）")
             elif text.startswith("STATUS_WAIT_RETRY"):
                 old_code = text.split(":", 1)[1].strip() if ":" in text else ""
                 if old_code:
-                    if _remember_code(activation_id, old_code):
-                        logger.info(f"[SMS] 第 {round_no} 轮记录待重试旧验证码：{old_code}")
-                    else:
-                        logger.info(f"[SMS] 第 {round_no} 轮旧验证码已记录：{old_code}")
+                    _remember_code(activation_id, old_code)
                 if not retry_status_sent:
                     retry_status_sent = True
                     try:
                         set_status(activation_id, 3, http=http)
                     except Exception as exc:
-                        logger.warning(f"[SMS] 请求下一条短信失败（继续轮询）：{exc}")
-            # STATUS_WAIT_CODE / STATUS_WAIT_RETRY:* / STATUS_WAIT_RESEND → 继续等
+                        logger.warning("[%s] 请求下一条短信失败（继续轮询）：%s", provider_name, exc)
             remaining = max(0, int(deadline - time.monotonic()))
-            logger.info(f"[SMS] 第 {round_no} 轮未收到验证码，状态={text}，{interval}s 后重试（剩余 {remaining}s）")
+            logger.info(
+                "[%s] 第 %s 轮未收到验证码，状态=%s，%ss 后重试（剩余 %ss）",
+                provider_name, round_no, text, interval, remaining,
+            )
             _stop_sleep(interval)
-
-        raise SmsCodeTimeout(f"等待短信超时（>{total_wait}s），activation_id={activation_id}")
+        raise SmsCodeTimeout(f"等待 {provider_name} 短信超时（>{total_wait}s），activation_id={activation_id}")
     finally:
         if own_http:
             http.close()
 
 
 # ============================================================
-# 改状态
+# 改状态、完成和释放
 # ============================================================
 
 def set_status(activation_id: str, status: int, http: CurlSession | None = None) -> str:
-    """
-    设置激活状态（setStatus）。
-        1 = 号码已就绪（短信已发出）
-        3 = 等下一条短信（重发）
-        6 = 完成激活
-        8 = 取消激活
-    """
+    """通过当前短信平台 setStatus 更新激活状态。"""
     own_http = http is None
     http = http or _http()
     try:
-        if _provider() == "l":
-            logger.debug(f"[SMS:L] 忽略状态设置 id={activation_id}, status={status}")
+        provider = _provider_for_activation(activation_id)
+        if int(status) == 1 and provider == "smsbower":
             return "OK"
-        if _provider() == "smsbower":
-            if int(status) == 1:
-                return "OK"
-            return _request_smsbower(http, {"action": "setStatus", "status": str(status), "id": activation_id})
-        return _request_grizzly(http, {"action": "setStatus", "status": str(status), "id": activation_id})
+        request = _request_tiger if provider == "tiger" else _request_smsbower
+        return request(http, {"action": "setStatus", "status": str(status), "id": activation_id})
     finally:
         if own_http:
             http.close()
@@ -1484,126 +1433,43 @@ def _completed_activation_info(activation_id: str) -> dict:
     country = str(state.get("country") or "").strip()
     if country:
         info["country"] = country
-    for key in ("price_amount", "price_currency", "price_source"):
-        value = str(state.get(key) or "").strip()
-        if value:
-            info[key] = value
+    for key in (
+        "provider", "phone_region", "phone_country_name", "phone_dial_code",
+        "price_amount", "price_currency", "price_source",
+        "price_limit_min", "price_limit_max", "price_limit_currency", "price_limit_source",
+        "price_limit_configured_max", "price_limit_configured_currency", "price_limit_fx_rate", "price_limit_fx_source",
+        "price_validated", "price_checked_amount", "price_checked_currency",
+    ):
+        value = state.get(key)
+        if isinstance(value, bool):
+            if value:
+                info[key] = value
+        else:
+            value = str(value or "").strip()
+            if value:
+                info[key] = value
     return info
 
 
 def complete(activation_id: str, http: CurlSession | None = None) -> dict:
-    """标记激活完成并返回可持久化的号码/价格快照。"""
+    """标记当前短信平台激活完成并返回号码/价格快照。"""
     info = _completed_activation_info(activation_id)
-    if _provider() == "l":
-        logger.info(f"[SMS:L] 已完成 id={activation_id}")
-        _forget_activation(activation_id)
-        return info
-    if _provider() == "h":
-        # H 成功 fetch-code 后后台会自动按多次收码策略重取；这里不 release。
-        logger.info(f"[SMS:H] 已完成 id={activation_id}")
-        _forget_activation(activation_id)
-        return info
-    if _provider() == "smsbower":
-        try:
-            set_status(activation_id, 6, http=http)
-        except Exception as exc:
-            logger.warning(f"[SMSBower] 标记完成失败（不影响结果）：{exc}")
-        finally:
-            _forget_activation(activation_id)
-        return info
     try:
         set_status(activation_id, 6, http=http)
-        logger.info(f"[SMS] 已标记完成 activation_id={activation_id}")
+        logger.info("[%s] 已标记完成 activation_id=%s", _provider_for_activation(activation_id), activation_id)
     except Exception as exc:
-        logger.warning(f"[SMS] 标记完成失败（不影响结果）：{exc}")
+        logger.warning("[%s] 标记完成失败（不影响结果）：%s", _provider_for_activation(activation_id), exc)
     finally:
         _forget_activation(activation_id)
     return info
 
 
-def _do_cancel_sync(activation_id: str, http_factory) -> None:
-    """实际的同步取消逻辑：等够 2 分钟限制 → 发请求 → 失败重试一次。"""
-    acquired_at = _ACQUIRED_AT.get(activation_id)
-    if acquired_at is not None:
-        elapsed = time.time() - acquired_at
-        if elapsed < _MIN_CANCEL_DELAY:
-            wait = _MIN_CANCEL_DELAY - elapsed
-            logger.info(
-                f"[SMS] 取消等待 GrizzlySMS 2 分钟限制：activation_id={activation_id}，"
-                f"还需等 {wait:.0f}s..."
-            )
-            _stop_sleep(wait)
-
-    # 后台线程不能复用外部 http session（curl_cffi 非线程安全），自己建一个
-    http = None
+def cancel(activation_id: str, http: CurlSession | None = None, background: bool = True) -> None:
+    """同步请求当前短信平台取消激活（status=8），并清理本地快照。"""
     try:
-        http = http_factory()
-        for attempt in range(1, 3):
-            try:
-                set_status(activation_id, 8, http=http)
-                logger.info(f"[SMS] 已取消 activation_id={activation_id}")
-                return
-            except Exception as exc:
-                if attempt == 1:
-                    logger.warning(f"[SMS] 取消失败（{exc}），5s 后重试...")
-                    _stop_sleep(5)
-                else:
-                    logger.warning(
-                        f"[SMS] 取消最终失败（不影响结果，需到平台手动取消）：activation_id={activation_id}, {exc}"
-                    )
+        set_status(activation_id, 8, http=http)
+        logger.info("[%s] 已取消 activation_id=%s", _provider_for_activation(activation_id), activation_id)
+    except Exception as exc:
+        logger.warning("[%s] 释放号码失败（不影响主流程）：%s", _provider_for_activation(activation_id), exc)
     finally:
         _forget_activation(activation_id)
-        if http is not None:
-            try:
-                http.close()
-            except Exception:
-                pass
-
-
-def cancel(activation_id: str, http: CurlSession | None = None, background: bool = True) -> None:
-    """
-    取消激活（status=8），释放号码避免白扣费。
-
-    GrizzlySMS 规则：号码取出后约 2 分钟内不允许取消。本函数默认 background=True，
-    把"等 2 分钟+取消"放到后台守护线程里执行，主流程立刻返回继续走（如换下一个号），
-    避免被这 2 分钟阻塞。
-
-    background=False 时同步等够时间再返回（少数场景需要确认取消完成时用）。
-
-    失败只告警不抛，不影响主流程。
-    """
-    if _provider() == "l":
-        try:
-            _release_l_number(activation_id, http=http)
-        except Exception as exc:
-            logger.warning(f"[SMS:L] 释放号码失败（不影响主流程）：id={activation_id}, {type(exc).__name__}: {exc}")
-            _forget_activation(activation_id)
-        return
-    if _provider() == "h":
-        try:
-            _release_h_number(activation_id, http=http)
-        except Exception as exc:
-            logger.warning(f"[SMS:H] 释放号码失败（不影响主流程）：id={activation_id}, {type(exc).__name__}: {exc}")
-            _forget_activation(activation_id)
-        return
-    if _provider() == "smsbower":
-        try:
-            set_status(activation_id, 8, http=http)
-        except Exception as exc:
-            logger.warning(f"[SMSBower] 释放号码失败（不影响主流程）：{exc}")
-        finally:
-            _forget_activation(activation_id)
-        return
-
-    if not background:
-        _do_cancel_sync(activation_id, _http)
-        return
-
-    t = threading.Thread(
-        target=_do_cancel_sync,
-        args=(activation_id, _http),
-        name=f"sms-cancel-{activation_id}",
-        daemon=True,
-    )
-    t.start()
-    logger.debug(f"[SMS] 取消任务已派后台：activation_id={activation_id}")

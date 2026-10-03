@@ -123,10 +123,16 @@ def _compact_codex_account_info(row: dict) -> dict:
     phone = str(activation.get("phone_number") or "").strip()
     if not phone:
         return {}
+    region_name = str(activation.get("phone_country_name") or "").strip()
+    region_code = str(activation.get("phone_region") or "").strip()
     info = {
         "phone_number": phone,
-        "region": _codex_phone_region(phone, str(activation.get("country") or "")),
+        "region": region_name or _codex_phone_region(phone, str(activation.get("country") or "")),
     }
+    if region_code:
+        info["region_code"] = region_code
+    if activation.get("phone_dial_code"):
+        info["dial_code"] = str(activation.get("phone_dial_code"))
     try:
         amount = Decimal(str(activation.get("price_amount")))
     except (InvalidOperation, TypeError, ValueError):
@@ -151,6 +157,10 @@ def _compact_codex_account_info(row: dict) -> dict:
     source = str(activation.get("price_source") or "").strip()
     if source:
         info["price_source"] = source
+    for key in ("provider", "price_limit_min", "price_limit_max", "price_limit_currency", "price_limit_source", "price_limit_configured_max", "price_limit_configured_currency", "price_limit_fx_rate", "price_limit_fx_source", "price_validated"):
+        value = activation.get(key)
+        if value not in (None, "", False):
+            info[key] = value
     return info
 
 

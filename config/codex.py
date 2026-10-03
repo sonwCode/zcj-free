@@ -41,7 +41,7 @@ CODEX_REQUEST_TIMEOUT: int = 30
 # 旧方案"复用注册的已登录 session"会撞 /choose-an-account 卡死；
 # 新方案用全新干净 session 从头登录，走 OpenAI 标准风控路径
 # （邮箱 OTP → 手机短信验证 → 选 workspace → 拿 code），
-# 手机验证靠接码平台 GrizzlySMS 自动收码。
+# 手机验证通过 SMSBower 或 Tiger SMS 自动取号和收码。
 # ============================================================
 
 # 注册成功后是否自动跑 Codex 授权（True=自动，False=跳过）
@@ -89,43 +89,50 @@ CPA_CALLBACK_SUBMIT_RETRY_DELAY: int = 6
 CPA_SAVE_CALLBACK_RECEIPT: bool = True
 
 # ============================================================
-# 接码平台（手机短信验证用）
-# SMS_PROVIDER:
-#   "grizzly" = GrizzlySMS，接口说明见 https://api.grizzlysms.com
-#   "smsbower"= SMSBower，接口说明见 https://smsbower.app/cn/api?page=client
-#   "l"       = 本地 L 取号服务，接口说明见 L_API.md
-#   "h"       = 本地 H 取号服务，接口说明见 H_API.md
+# 接码平台（SMSBower + Tiger SMS）
 # ============================================================
 
-SMS_PROVIDER: str = "l"
+# 运行时仅允许 smsbower 或 tiger；默认保持 SMSBower。
+SMS_PROVIDER: str = "smsbower"
 
-# 接码 API 基址（GET handler）
-SMS_API_BASE: str = "https://api.grizzlysms.com/stubs/handler_api.php"
-
-# 接码 API 密钥（在 GrizzlySMS 后台 → 设置 获取）
-# 留空时 Codex 授权的手机验证步会失败；如不需要 Codex 自动授权，把 ENABLE_CODEX_AUTO=False。
-SMS_API_KEY: str = env_str("SMS_API_KEY", "")
-
-# SMSBower 独立 API 配置（SMS_PROVIDER="smsbower" 时使用）
+# SMSBower handler_api 配置
 SMSBOWER_API_BASE: str = "https://smsbower.page/stubs/handler_api.php"
 SMSBOWER_API_KEY: str = env_str("SMSBOWER_API_KEY", "")
 SMSBOWER_USE_V2: bool = False
 SMSBOWER_PROVIDER_IDS: str = ""
 SMSBOWER_EXCEPT_PROVIDER_IDS: str = ""
 SMSBOWER_PHONE_EXCEPTION: str = ""
-# SMSBower 报价/接口使用 USD；SMSBOWER_MIN/MAX_PRICE 在本项目按 CNY 配置。
+# 兼容旧配置：实时汇率不可用时，按 1 USD = 7.2 CNY 回退。
 SMSBOWER_USD_CNY_RATE: str = "7.2"
 SMSBOWER_MIN_PRICE: str = ""
-SMSBOWER_MAX_PRICE: str = ""
+
+# Tiger SMS handler_api 配置（价格接口和 maxPrice 均使用 USD）
+TIGER_SMS_API_BASE: str = "https://api.tiger-sms.com/stubs/handler_api.php"
+TIGER_SMS_API_KEY: str = env_str("TIGER_SMS_API_KEY", "")
+TIGER_SMS_USE_V2: bool = True
+TIGER_SMS_PROVIDER_IDS: str = ""
+TIGER_SMS_EXCEPT_PROVIDER_IDS: str = ""
+TIGER_SMS_RANDOM_COUNTRY: bool = True
+TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS: int = 12
 
 # 服务代码：OpenAI (ChatGPT) = "dr"
 SMS_SERVICE: str = "dr"
 
-# 国家代码：葡萄牙 = "117" / 美国 = "187"
+# 两个平台均使用外部平台国家代码；留空时按价格/库存候选随机选择。
 SMS_COUNTRY: str = "10"
 
-# SMSBower 优先使用 SMSBOWER_MAX_PRICE；未配置时使用此项并按人民币换算。其他通道沿用平台原生币种。
+# 通用人民币价格上限；程序实时读取 CNY -> USD 汇率后发送给两个平台。
 SMS_MAX_PRICE: str = ""
+SMS_FX_RATE_URL: str = "https://api.frankfurter.app/latest?from=CNY&to=USD"
+SMS_FX_RATE_TTL: int = 900
+
+# SMSBower 随机国家与号码质量策略
+SMSBOWER_RANDOM_COUNTRY: bool = True
+SMSBOWER_RANDOM_COUNTRY_ATTEMPTS: int = 12
+SMS_NUMBER_ACQUIRE_RETRIES: int = 3
+SMS_NUMBER_REJECT_TTL: int = 1800
+SMS_TIER_FAILURE_THRESHOLD: int = 2
+SMS_TIER_COOLDOWN_SECONDS: int = 2700
 
 # 一个号收不到短信/被拒时，换号重试的最大次数
 SMS_MAX_RETRIES: int = 10
@@ -139,39 +146,5 @@ SMS_POLL_INTERVAL: int = 5
 # 接码平台 HTTP 请求超时（秒）
 SMS_REQUEST_TIMEOUT: int = 30
 
-
-# ============================================================
-# H 取号服务（SMS_PROVIDER="h" 时使用）
-# ============================================================
-
-# H API 基址，例如本地后台：http://localhost:8788
-H_API_BASE: str = "http://localhost:8788"
-
-# H 后台授权码，对应 H_API.md 里的 Authorization: Bearer <ADMIN_AUTH_CODE>
-H_ADMIN_AUTH_CODE: str = env_str("H_ADMIN_AUTH_CODE", "")
-
-# H 返回的号码如果不含国家码，可在这里补前缀；留空则直接使用 H 返回的 item.phone。
-H_PHONE_PREFIX: str = ""
-
-# H 取号方式：
-#   "reusable" = 优先复用号码，调用 /api/admin/h/take-reusable-phone（默认）
-#   "new"      = 每次取新号，调用 /api/admin/h/take-phone
-H_PHONE_ACQUIRE_MODE: str = "reusable"
-
-
-# ============================================================
-# L 取号服务（SMS_PROVIDER="l" 时使用）
-# ============================================================
-
-# L API 基址，例如本地后台：http://localhost:8788
-L_API_BASE: str = "http://localhost:8788"
-
-# L 后台授权码，对应 L_API.md 里的 Authorization: Bearer <ADMIN_AUTH_CODE>
-L_ADMIN_AUTH_CODE: str = env_str("L_ADMIN_AUTH_CODE", "")
-
-# L 返回的号码如果不含国家码，可在这里补前缀；例如美国本地 10 位号填 "1"。
-# 留空则直接使用 L 返回的 item.phone。
-L_PHONE_PREFIX: str = ""
-
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_API_KEY': 'str', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_MAX_PRICE': 'str', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int'})

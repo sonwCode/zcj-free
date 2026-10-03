@@ -519,28 +519,57 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             )
             _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500")
             continue
-        used_codes.add(str(code))
-        logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", code)
+        code = str(code).strip()
+        if len(code) != 6 or not code.isdigit():
+            logger.warning("[Codex][Browser] 取到的邮箱 OTP 格式异常，忽略本轮：length=%s", len(code))
+            if otp_attempt >= max_otp_attempts:
+                raise RuntimeError("邮箱验证码格式异常，已达到最大重试次数")
+            _restart_email_otp_flow("取码结果不是 6 位数字")
+            continue
+        used_codes.add(code)
+        logger.info("[Codex][Browser] 邮箱 OTP 收到：length=%s", len(code))
         _wait_for_otp_input(driver, timeout=30)
+        _install_email_otp_validate_hook(driver)
+        validate_before = _email_otp_validate_snapshot(driver)
         _clear_otp_inputs(driver)
         _type_otp(driver, code)
-        logger.info("[Codex][Browser] 已填写邮箱 OTP")
+        input_state = _codex_otp_input_state(driver)
+        logger.info("[Codex][Browser][OTP] 输入后状态：%s", _codex_otp_state_summary(input_state))
+        submitted = _codex_auto_submit_started(driver, validate_before.get("count", 0))
+        if not submitted and _is_email_verification_page(driver) and not _codex_otp_input_complete(input_state, code):
+            repaired = _set_codex_otp_dom_value(driver, code)
+            input_state = _codex_otp_input_state(driver)
+            logger.warning(
+                "[Codex][Browser][OTP] 输入长度校验未通过，执行 DOM setter 修复：repair=%s state=%s",
+                repaired,
+                _codex_otp_state_summary(input_state),
+            )
+            submitted = _codex_auto_submit_started(driver, validate_before.get("count", 0))
+        if not submitted and _is_email_verification_page(driver) and not _codex_otp_input_complete(input_state, code):
+            raise RuntimeError(
+                f"OTP 输入框状态校验失败：expected_length={len(code)} state={_codex_otp_state_summary(input_state)}"
+            )
         human_delay("otp_input")
-        _install_email_otp_validate_hook(driver)
-        clicked = _click_if_present(driver, [
-            "button[type='submit']",
-            "//button[contains(., 'Continue')]",
-            "//button[contains(., '继续')]",
-            "//button[contains(., 'Verify')]",
-            "//button[contains(., '验证')]",
-        ], timeout=8)
+        submitted = submitted or _wait_for_codex_auto_submit(driver, validate_before.get("count", 0), timeout=2.5)
+        clicked = False
+        if not submitted:
+            clicked = _click_if_present(driver, [
+                "button[type='submit']",
+                "//button[contains(., 'Continue')]",
+                "//button[contains(., '继续')]",
+                "//button[contains(., 'Verify')]",
+                "//button[contains(., '验证')]",
+            ], timeout=8)
         if clicked:
             logger.info("[Codex][Browser] 已提交邮箱 OTP，等待后续授权/手机号页面")
+        elif submitted:
+            logger.info("[Codex][Browser] 检测到邮箱 OTP 已自动提交，跳过显式按钮点击")
         else:
             logger.info("[Codex][Browser] 未找到显式提交按钮，继续等待页面状态")
 
         outcome = _wait_after_email_otp_submit(driver, timeout=45)
         logger.info("[Codex][Browser] 邮箱 OTP 提交后状态：%s", outcome)
+        logger.info("[Codex][Browser][OTP] validate 响应摘要：%s", _email_otp_validate_snapshot(driver))
         if _is_mfa_challenge_page(driver):
             _fill_mfa_challenge_if_present(driver, email, timeout=15)
             return
@@ -578,10 +607,12 @@ def _wait_for_fresh_email_otp(otp_provider, email: str, after_ts: float, used_co
         last_code = code or last_code
         remaining = int(end - time.time())
         if remaining <= 0:
-            raise RuntimeError(f"等待新的邮箱验证码超时，取码接口仍返回已失败验证码：{last_code or '-'}")
+            raise RuntimeError(
+                f"等待新的邮箱验证码超时，取码接口仍返回已失败验证码：length={len(last_code) if last_code else 0}"
+            )
         logger.warning(
-            "[Codex][Browser] 取码接口仍返回已提交过的旧 OTP=%s，继续等待最新验证码（剩余 %ss）",
-            last_code or "-",
+            "[Codex][Browser] 取码接口仍返回已提交过的旧 OTP，继续等待最新验证码（length=%s，剩余 %ss）",
+            len(last_code) if last_code else 0,
             remaining,
         )
         _stop_sleep(min(5, max(1, remaining)))
@@ -597,6 +628,7 @@ def _install_email_otp_validate_hook(driver) -> None:
     script = r"""
     (() => {
       window.__codexEmailOtpValidateResponses = [];
+      window.__codexEmailOtpValidatePending = 0;
       if (window.__codexEmailOtpValidateHooked) return true;
       window.__codexEmailOtpValidateHooked = true;
       const hit = (url) => String(url || '').includes('/api/accounts/email-otp/validate');
@@ -613,15 +645,23 @@ def _install_email_otp_validate_hook(driver) -> None:
       };
       const origFetch = window.fetch;
       if (origFetch) {
-        window.fetch = async function(input, init) {
-          const resp = await origFetch.apply(this, arguments);
-          try {
-            const url = (typeof input === 'string') ? input : (input && input.url);
-            if (hit(url)) {
-              resp.clone().text().then(t => save(url, resp.status, t)).catch(() => {});
-            }
-          } catch (e) {}
-          return resp;
+        window.fetch = function(input, init) {
+          const url = (typeof input === 'string') ? input : (input && input.url);
+          const tracked = hit(url);
+          if (tracked) {
+            window.__codexEmailOtpValidatePending = Number(window.__codexEmailOtpValidatePending || 0) + 1;
+          }
+          const request = origFetch.apply(this, arguments);
+          if (!tracked) return request;
+          return request.then(resp => {
+            resp.clone().text().then(t => save(url, resp.status, t)).catch(() => {}).finally(() => {
+              window.__codexEmailOtpValidatePending = Math.max(0, Number(window.__codexEmailOtpValidatePending || 1) - 1);
+            });
+            return resp;
+          }, error => {
+            window.__codexEmailOtpValidatePending = Math.max(0, Number(window.__codexEmailOtpValidatePending || 1) - 1);
+            throw error;
+          });
         };
       }
       const origOpen = XMLHttpRequest.prototype.open;
@@ -632,10 +672,16 @@ def _install_email_otp_validate_hook(driver) -> None:
       };
       XMLHttpRequest.prototype.send = function() {
         try {
+          if (hit(this.__codexOtpValidateUrl)) {
+            window.__codexEmailOtpValidatePending = Number(window.__codexEmailOtpValidatePending || 0) + 1;
+          }
           this.addEventListener('loadend', function() {
             try {
               if (hit(this.__codexOtpValidateUrl)) save(this.__codexOtpValidateUrl, this.status, this.responseText);
             } catch (e) {}
+            if (hit(this.__codexOtpValidateUrl)) {
+              window.__codexEmailOtpValidatePending = Math.max(0, Number(window.__codexEmailOtpValidatePending || 1) - 1);
+            }
           });
         } catch (e) {}
         return origSend.apply(this, arguments);
@@ -647,6 +693,174 @@ def _install_email_otp_validate_hook(driver) -> None:
         driver.execute_script(script)
     except Exception as exc:
         logger.debug("[Codex][Browser] 注入 email-otp/validate 响应 hook 失败：%s", exc)
+
+
+def _email_otp_validate_snapshot(driver) -> dict:
+    """读取 validate 请求的脱敏计数和响应元数据。"""
+    try:
+        rows = driver.execute_script("return window.__codexEmailOtpValidateResponses || [];") or []
+        pending = driver.execute_script("return Number(window.__codexEmailOtpValidatePending || 0);") or 0
+    except Exception:
+        return {"count": 0, "pending": 0, "last": {}}
+    if not isinstance(rows, list):
+        rows = []
+    last = rows[-1] if rows and isinstance(rows[-1], dict) else {}
+    body = str(last.get("body") or "")
+    json_keys: list[str] = []
+    error_keys: list[str] = []
+    try:
+        payload = json.loads(body)
+        if isinstance(payload, dict):
+            json_keys = sorted(str(key) for key in payload.keys())[:20]
+            error = payload.get("error")
+            if isinstance(error, dict):
+                error_keys = sorted(str(key) for key in error.keys())[:20]
+    except Exception:
+        pass
+    return {
+        "count": len(rows),
+        "pending": max(0, int(pending)),
+        "last": {
+            "status": int(last.get("status") or 0),
+            "body_length": len(body),
+            "json_keys": json_keys,
+            "error_keys": error_keys,
+        },
+    }
+
+
+def _codex_otp_input_state(driver) -> dict:
+    """读取 OTP 输入框结构，只返回长度和属性，不返回验证码内容。"""
+    try:
+        return driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const all = [...document.querySelectorAll('input')].filter(visible);
+        const isOtp = el => /one-time|otp|code|numeric|tel/.test([
+          el.type, el.name, el.id, el.autocomplete, el.inputMode, el.getAttribute('aria-label') || ''
+        ].join(' ').toLowerCase());
+        const inputs = all.slice(0, 40).map((el, index) => ({
+          index,
+          otp: isOtp(el),
+          type: el.getAttribute('type') || '',
+          name: el.getAttribute('name') || '',
+          id: el.id || '',
+          autocomplete: el.getAttribute('autocomplete') || '',
+          inputmode: el.getAttribute('inputmode') || '',
+          maxlength: Number.isFinite(el.maxLength) ? el.maxLength : null,
+          value_length: String(el.value || '').length,
+          aria_invalid: el.getAttribute('aria-invalid') || '',
+          disabled: !!el.disabled,
+          focused: document.activeElement === el,
+        }));
+        const forms = [...new Set(all.map(el => el.closest('form')).filter(Boolean))].slice(0, 10).map(form => ({
+          action: (() => { try { return new URL(form.getAttribute('action') || location.href, location.href).pathname; } catch (_) { return ''; } })(),
+          method: form.getAttribute('method') || '',
+          submit_count: [...form.querySelectorAll('button[type="submit"],input[type="submit"],button')].filter(visible).length,
+        }));
+        const buttons = [...document.querySelectorAll('button[type="submit"],input[type="submit"],button')]
+          .filter(visible).slice(0, 20).map(el => ({
+            type: el.getAttribute('type') || '',
+            action: el.getAttribute('data-dd-action-name') || '',
+            disabled: !!el.disabled || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true',
+          }));
+        return {url: location.href, visible_input_count: all.length, inputs, forms, buttons};
+        """) or {}
+    except Exception as exc:
+        return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _codex_otp_state_summary(state: dict) -> dict:
+    """将页面输入状态压缩成可安全写入日志的摘要。"""
+    if not isinstance(state, dict):
+        return {"state": "invalid"}
+    url = str(state.get("url") or "")
+    try:
+        url = urlparse(url).path
+    except Exception:
+        url = ""
+    return {
+        "url": url,
+        "visible_input_count": state.get("visible_input_count", 0),
+        "otp_inputs": [
+            {
+                key: item.get(key)
+                for key in ("index", "type", "name", "id", "autocomplete", "inputmode", "maxlength", "value_length", "aria_invalid", "disabled", "focused")
+            }
+            for item in (state.get("inputs") or [])
+            if isinstance(item, dict) and item.get("otp")
+        ],
+        "forms": state.get("forms") or [],
+        "buttons": state.get("buttons") or [],
+        "error": state.get("error", ""),
+    }
+
+
+def _codex_otp_input_complete(state: dict, code: str) -> bool:
+    if not isinstance(state, dict) or state.get("error"):
+        return False
+    expected = len(str(code or ""))
+    otp_inputs = [item for item in (state.get("inputs") or []) if isinstance(item, dict) and item.get("otp")]
+    lengths = [int(item.get("value_length") or 0) for item in otp_inputs]
+    if len(otp_inputs) == 1:
+        return lengths[0] == expected
+    return bool(otp_inputs) and sum(lengths) == expected and all(length == 1 for length in lengths[:expected])
+
+
+def _set_codex_otp_dom_value(driver, code: str) -> dict:
+    """用原生 value setter 同步 React OTP 状态，作为键盘输入失败的兜底。"""
+    try:
+        return driver.execute_script(r"""
+        const code = String(arguments[0] || '');
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const isOtp = el => /one-time|otp|code|numeric|tel/.test([
+          el.type, el.name, el.id, el.autocomplete, el.inputMode, el.getAttribute('aria-label') || ''
+        ].join(' ').toLowerCase());
+        const inputs = [...document.querySelectorAll('input')].filter(el => visible(el) && isOtp(el));
+        if (!inputs.length) return {ok:false, reason:'missing_otp_inputs'};
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const emit = (el, value) => {
+          if (setter) setter.call(el, value); else el.value = value;
+          try { el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:value})); }
+          catch (_) { el.dispatchEvent(new Event('input', {bubbles:true})); }
+          el.dispatchEvent(new Event('change', {bubbles:true}));
+        };
+        const aggregate = inputs.find(el => Number(el.maxLength) >= code.length || el.name === 'code' || el.id === 'code');
+        if (inputs.length === 1 || (aggregate && Number(aggregate.maxLength || -1) !== 1)) {
+          const target = aggregate || inputs[0];
+          emit(target, code);
+          target.focus();
+          return {ok:true, mode:'single', count:inputs.length, lengths:inputs.map(el => String(el.value || '').length)};
+        }
+        const boxes = inputs.slice(0, code.length);
+        if (boxes.length < code.length) return {ok:false, reason:'insufficient_otp_inputs', count:boxes.length};
+        boxes.forEach((el, index) => emit(el, code[index] || ''));
+        boxes[boxes.length - 1].focus();
+        return {ok:true, mode:'multi', count:boxes.length, lengths:boxes.map(el => String(el.value || '').length)};
+        """, str(code or "")) or {}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _codex_auto_submit_started(driver, baseline_count: int) -> bool:
+    snapshot = _email_otp_validate_snapshot(driver)
+    if snapshot.get("count", 0) > int(baseline_count or 0) or snapshot.get("pending", 0) > 0:
+        return True
+    try:
+        url = str(driver.current_url or "").lower()
+    except Exception:
+        url = ""
+    return bool(url and "email-verification" not in url and not _is_email_verification_page(driver))
+
+
+def _wait_for_codex_auto_submit(driver, baseline_count: int, timeout: float = 2.5) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if _codex_auto_submit_started(driver, baseline_count):
+            return True
+        _stop_sleep(0.2)
+    return _codex_auto_submit_started(driver, baseline_count)
 
 
 def _read_email_otp_validate_dead_code(driver) -> str:
@@ -1111,7 +1325,8 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
                 f"target={country_aliases} dial={expected_dial_code} state={_phone_page_state(driver)}"
             )
 
-    _stop_sleep(0.35)
+    sleep_fn = globals().get("_stop_sleep") or time.sleep
+    sleep_fn(0.35)
     confirmed = driver.execute_script(r"""
     const expectedCode = String(arguments[0] || '').replace(/\D+/g, '');
     const aliases = Array.isArray(arguments[1]) ? arguments[1].map(String).filter(Boolean) : [];
@@ -1613,9 +1828,9 @@ def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "
 
 def _do_phone_verification_if_present(driver) -> dict | None:
     """如果页面要求手机号验证，则用当前 sms_provider 自动完成。"""
-    provider = str(getattr(sms_provider._cfg, "SMS_PROVIDER", "") or "").strip().lower() if hasattr(sms_provider, "_cfg") else ""
+    provider = sms_provider._provider()
     http = sms_provider._http()
-    max_retries = int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10) if hasattr(sms_provider, "_cfg") else 10
+    max_retries = max(1, int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10)) if hasattr(sms_provider, "_cfg") else 10
     # 预检阶段可能直接抛出短信依赖错误；异常清理路径也会读取该变量。
     activation_id = None
     try:
@@ -1639,7 +1854,25 @@ def _do_phone_verification_if_present(driver) -> dict | None:
             activation_id = None
             try:
                 activation_id, phone = sms_provider.acquire_number(http)
-                logger.info("[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=+%s", attempt, max_retries, provider, phone)
+                snapshot = {}
+                try:
+                    snapshot = sms_provider.get_activation_info(activation_id) or {}
+                except Exception:
+                    snapshot = {}
+                price = " ".join(
+                    part for part in (str(snapshot.get("price_amount") or ""), str(snapshot.get("price_currency") or "")) if part
+                ) or "unknown"
+                logger.info(
+                    "[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=+%s",
+                    attempt, max_retries, provider, phone,
+                )
+                logger.info(
+                    "[Codex][Browser] 号码采购快照：activation=%s region=%s provider_country=%s "
+                    "price=%s price_limit_max=%s price_validated=%s",
+                    activation_id, snapshot.get("phone_country_name") or snapshot.get("phone_region") or "unknown",
+                    snapshot.get("country") or "unknown", price,
+                    snapshot.get("price_limit_max") or "unlimited", snapshot.get("price_validated", False),
+                )
                 logger.info("[Codex][Browser] 准备手机号输入页，重新设置新手机号")
                 _ensure_add_phone_input(driver, reason=f"attempt-{attempt}")
                 phone_fill = _set_phone_value(driver, f"+{phone}", timeout=10)
@@ -1728,25 +1961,19 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     "phone_country_sync_failed", "phone_country_mismatch",
                     "phone_value_write_failed", "phone_value_mismatch", "phone_number_required",
                 )):
-                    raise RuntimeError(
-                        f"手机号页面国家/表单状态异常，已停止继续换号止损：{err_text[:180]}"
-                    ) from exc
-                # 如果已经离开手机号/验证码相关页面，认为通过或不再需要；
-                # 如果仍在 phone-verification，则下一轮必须回 add-phone 重新填新号码再提交。
-                try:
-                    if _is_phone_code_page(driver):
-                        logger.info("[Codex][Browser] 当前仍在手机验证码页，下一轮将返回 add-phone 重新设置新号码")
-                    else:
-                        _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=2)
-                except Exception:
-                    if _is_add_phone_page(driver) or _is_phone_code_page(driver):
-                        logger.info("[Codex][Browser] 仍处于手机号流程，继续换号重试")
-                    else:
-                        logger.info("[Codex][Browser] 手机输入页已消失，继续后续流程")
-                        return
+                    logger.info(
+                        "[Codex][Browser] 手机号国家/表单反馈可重试：attempt=%s/%s reason=%s",
+                        attempt, max_retries, err_text[:180],
+                    )
                 if attempt < max_retries:
-                    _refresh_add_phone_for_retry(driver, reason=str(exc)[:120])
-                _sleep_before_phone_retry(attempt, max_retries)
+                    try:
+                        _refresh_add_phone_for_retry(driver, reason=str(exc)[:120])
+                    except Exception as refresh_exc:
+                        logger.warning(
+                            "[Codex][Browser] 换号前刷新手机号页面失败，下一轮继续尝试恢复：%s",
+                            str(refresh_exc)[:180],
+                        )
+                    _sleep_before_phone_retry(attempt, max_retries)
         raise RuntimeError(f"Roxy 手机验证重试 {max_retries} 次仍失败，最后错误：{last_err}")
     finally:
         try:

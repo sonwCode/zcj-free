@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import ast
+from io import BytesIO
 import importlib.util
 import inspect
 import json
@@ -69,13 +70,21 @@ def _load_staged_provider():
             SMS_SERVICE="dr",
             SMS_COUNTRY="1",
             SMS_REQUEST_TIMEOUT=5,
+            SMS_FX_RATE_URL="",
+            SMS_FX_RATE_TTL=900,
+            TIGER_SMS_API_KEY="tiger-key",
+            TIGER_SMS_API_BASE="http://tiger.test/stubs/handler_api.php",
+            TIGER_SMS_USE_V2=True,
+            TIGER_SMS_PROVIDER_IDS="",
+            TIGER_SMS_EXCEPT_PROVIDER_IDS="",
+            TIGER_SMS_RANDOM_COUNTRY=True,
+            TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS=12,
             SMS_CODE_WAIT=2,
             SMS_POLL_INTERVAL=0,
             SMS_MAX_PRICE="",
             SMSBOWER_API_KEY="test-key",
             SMSBOWER_API_BASE="http://sms.test/handler_api",
             SMSBOWER_USE_V2=True,
-            SMSBOWER_MAX_PRICE="",
             SMSBOWER_MIN_PRICE="",
             SMSBOWER_USD_CNY_RATE="7.2",
             SMSBOWER_PROVIDER_IDS="",
@@ -87,11 +96,6 @@ def _load_staged_provider():
             SMS_NUMBER_REJECT_TTL=1800,
             SMS_TIER_FAILURE_THRESHOLD=2,
             SMS_TIER_COOLDOWN_SECONDS=2700,
-            L_API_BASE="http://l.test",
-            L_ADMIN_AUTH_CODE="test-admin",
-            H_API_BASE="http://h.test",
-            H_ADMIN_AUTH_CODE="test-admin",
-            H_PHONE_ACQUIRE_MODE="reusable",
         )
         config = types.ModuleType("config")
         config.codex = codex
@@ -132,11 +136,21 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.SMS_PROVIDER = "smsbower"
         codex_config.SMS_SERVICE = "dr"
         codex_config.SMS_COUNTRY = "1"
+        codex_config.SMS_FX_RATE_URL = ""
         codex_config.SMSBOWER_USE_V2 = True
+        codex_config.TIGER_SMS_USE_V2 = True
+        codex_config.TIGER_SMS_PROVIDER_IDS = ""
+        codex_config.TIGER_SMS_EXCEPT_PROVIDER_IDS = ""
+        codex_config.TIGER_SMS_RANDOM_COUNTRY = True
+        codex_config.TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS = 12
         codex_config.SMS_MAX_PRICE = ""
         codex_config.SMSBOWER_MIN_PRICE = ""
-        codex_config.SMSBOWER_MAX_PRICE = ""
         codex_config.SMSBOWER_USD_CNY_RATE = "7.2"
+        codex_config.TIGER_SMS_API_KEY = "tiger-key"
+        codex_config.TIGER_SMS_API_BASE = "http://tiger.test/stubs/handler_api.php"
+        codex_config.TIGER_SMS_USE_V2 = True
+        codex_config.TIGER_SMS_RANDOM_COUNTRY = True
+        codex_config.TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS = 12
         codex_config.SMSBOWER_RANDOM_COUNTRY = True
         codex_config.SMSBOWER_RANDOM_COUNTRY_ATTEMPTS = 12
         codex_config.SMSBOWER_EXCEPT_PROVIDER_IDS = ""
@@ -145,7 +159,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
     def test_random_country_candidates_filter_price_stock_and_shuffle(self):
         codex_config.SMSBOWER_MIN_PRICE = "0.10"
-        codex_config.SMSBOWER_MAX_PRICE = "0.25"
+        codex_config.SMS_MAX_PRICE = "0.25"
         http = _Http([_Response(json.dumps({
             "10": {"dr": {"cost": 0.31, "count": 10}},
             "12": {"dr": {"cost": 0.05, "count": 0}},
@@ -186,14 +200,116 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual([call["params"].get("action") for call in http.calls], ["getPrices"])
         self.assertNotIn("getNumber", [call["params"].get("action") for call in http.calls])
 
-    def test_preflight_l_and_h_are_configuration_only(self):
-        for provider in ("l", "h"):
-            with self.subTest(provider=provider):
-                codex_config.SMS_PROVIDER = provider
-                http = _Http([])
-                result = sms_provider.preflight_sms_dependency(http=http)
-                self.assertEqual(result["probe"], "configuration_only")
-                self.assertEqual(http.calls, [])
+
+    def test_unsupported_legacy_provider_falls_back_to_smsbower(self):
+        codex_config.SMS_PROVIDER = "h"
+        self.assertEqual(sms_provider._provider(), "smsbower")
+
+    def test_tiger_provider_selection_and_number_params_use_common_cny_ceiling(self):
+        codex_config.SMS_PROVIDER = "tiger"
+        codex_config.SMS_MAX_PRICE = "7.20"
+        params = sms_provider._tiger_number_params("dr", "6")
+        self.assertEqual(params["action"], "getNumberV2")
+        self.assertEqual(params["activationType"], "SMS")
+        self.assertEqual(params["maxPrice"], "1.000000")
+        self.assertNotIn("minPrice", params)
+        self.assertNotIn("phoneException", params)
+        self.assertEqual(sms_provider._provider(), "tiger")
+
+    def test_tiger_acquire_parses_v2_price_and_uses_tiger_endpoint(self):
+        codex_config.SMS_PROVIDER = "tiger"
+        codex_config.SMS_MAX_PRICE = "1.44"
+        http = _Http([
+            _Response(json.dumps({"6": {"dr": {"cost": "0.1200", "count": 3}}})),
+            _Response(json.dumps({
+                "activationId": "tiger-a1",
+                "phoneNumber": "15550001111",
+                "activationCost": 0.11,
+                "currency": 840,
+                "countryCode": 6,
+                "activationOperator": "any",
+            })),
+        ])
+        activation_id, phone = sms_provider.acquire_number(http=http, country="6")
+        self.assertEqual((activation_id, phone), ("tiger-a1", "15550001111"))
+        self.assertEqual([call["params"].get("action") for call in http.calls], ["getPrices", "getNumberV2"])
+        self.assertTrue(all(call["url"] == "http://tiger.test/stubs/handler_api.php" for call in http.calls))
+        self.assertTrue(all(call["params"]["api_key"] == "tiger-key" for call in http.calls))
+        self.assertNotIn("minPrice", http.calls[-1]["params"])
+        self.assertNotIn("phoneException", http.calls[-1]["params"])
+        state = sms_provider.get_activation_info(activation_id)
+        self.assertEqual(state["provider"], "tiger")
+        self.assertEqual(state["price_amount"], "0.11")
+        self.assertEqual(state["price_currency"], "USD")
+        self.assertTrue(state["price_validated"])
+        self.assertEqual(state["price_limit_configured_currency"], "CNY")
+
+    def test_tiger_status_poll_complete_and_cancel_use_tiger_endpoint(self):
+        codex_config.SMS_PROVIDER = "tiger"
+        sms_provider._remember_activation("tiger-a2", "15550002222", {
+            "provider": "tiger", "service": "dr", "country": "6",
+        })
+        http = _Http([_Response("STATUS_WAIT_CODE"), _Response("STATUS_OK:987654")])
+        with patch.object(sms_provider, "_stop_sleep", side_effect=lambda seconds, quantum=0.25: None):
+            self.assertEqual(sms_provider.wait_for_sms_code("tiger-a2", http=http, max_wait=2, poll_interval=0), "987654")
+        self.assertTrue(all(call["url"] == "http://tiger.test/stubs/handler_api.php" for call in http.calls))
+        sms_provider._remember_activation("tiger-ready", "15550003000", {"provider": "tiger", "country": "6"})
+        ready_http = _Http([_Response("ACCESS_READY")])
+        self.assertEqual(sms_provider.set_status("tiger-ready", 1, http=ready_http), "ACCESS_READY")
+        self.assertEqual(ready_http.calls[0]["params"]["status"], "1")
+        sms_provider._remember_activation("tiger-a3", "15550003333", {"provider": "tiger", "country": "6"})
+        complete_http = _Http([_Response("ACCESS_ACTIVATION")])
+        sms_provider.complete("tiger-a3", http=complete_http)
+        self.assertEqual(complete_http.calls[0]["params"]["status"], "6")
+        sms_provider._remember_activation("tiger-a4", "15550004444", {"provider": "tiger", "country": "6"})
+        cancel_http = _Http([_Response("ACCESS_CANCEL")])
+        sms_provider.cancel("tiger-a4", http=cancel_http, background=False)
+        self.assertEqual(cancel_http.calls[0]["params"]["status"], "8")
+
+    def test_tiger_access_cancel_status_is_terminal(self):
+        codex_config.SMS_PROVIDER = "tiger"
+        sms_provider._remember_activation("tiger-cancelled", "15550005555", {"provider": "tiger"})
+        http = _Http([_Response("ACCESS_CANCEL")])
+        with self.assertRaises(sms_provider.SmsProviderError):
+            sms_provider.wait_for_sms_code("tiger-cancelled", http=http, max_wait=2, poll_interval=0)
+        self.assertEqual(len(http.calls), 1)
+
+    def test_tiger_over_price_activation_is_released_before_retry(self):
+        codex_config.SMS_PROVIDER = "tiger"
+        codex_config.SMS_MAX_PRICE = "1.44"
+        http = _Http([
+            _Response(json.dumps({"6": {"dr": {"cost": "0.1800", "count": 5}}})),
+            _Response(json.dumps({"activationId": "tiger-too-high", "phoneNumber": "15550006666", "activationCost": 0.21, "currency": 840})),
+            _Response("ACCESS_CANCEL"),
+            _Response(json.dumps({"activationId": "tiger-in-range", "phoneNumber": "15550007777", "activationCost": 0.19, "currency": 840})),
+        ])
+        activation_id, phone = sms_provider.acquire_number(http=http, country="6")
+        self.assertEqual((activation_id, phone), ("tiger-in-range", "15550007777"))
+        self.assertEqual([call["params"].get("action") for call in http.calls], ["getPrices", "getNumberV2", "setStatus", "getNumberV2"])
+        self.assertEqual(http.calls[2]["params"]["status"], "8")
+        self.assertEqual(sms_provider.get_activation_info(activation_id)["price_validated"], True)
+
+    def test_tiger_get_number_v2_falls_back_only_for_bad_action(self):
+        http = _Http([_Response("BAD_ACTION"), _Response("ACCESS_NUMBER:tiger-v1:15550008888")])
+        params, response = sms_provider._request_tiger_number(http, {
+            "action": "getNumberV2", "service": "dr", "country": "6",
+        })
+        self.assertEqual(params["action"], "getNumber")
+        self.assertEqual(response, "ACCESS_NUMBER:tiger-v1:15550008888")
+        self.assertEqual(len(http.calls), 2)
+
+    def test_tiger_no_numbers_does_not_repeat_v1_purchase(self):
+        http = _Http([_Response(json.dumps({"title": "NO_NUMBERS", "details": "No stock"}))])
+        with self.assertRaises(sms_provider.SmsNoNumbersError):
+            sms_provider._request_tiger_number(http, {"action": "getNumberV2", "service": "dr", "country": "6"})
+        self.assertEqual(len(http.calls), 1)
+
+    def test_tiger_errors_map_balance_and_inventory(self):
+        codex_config.SMS_PROVIDER = "tiger"
+        with self.assertRaises(sms_provider.SmsNoBalanceError):
+            sms_provider._request_tiger(_Http([_Response(json.dumps({"title": "NO_BALANCE", "details": "Insufficient balance"}), 402)]), {"action": "getNumberV2"})
+        with self.assertRaises(sms_provider.SmsNoNumbersError):
+            sms_provider._request_tiger(_Http([_Response(json.dumps({"title": "NO_NUMBERS", "details": "No numbers"}))]), {"action": "getNumberV2"})
 
     def test_sms_exception_classification_distinguishes_blocked_and_retryable(self):
         blocked = sms_provider.classify_sms_exception(sms_provider.SmsNoBalanceError("NO_BALANCE"))
@@ -205,7 +321,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual((retryable["status"], retryable["error_code"], retryable["retryable"]), ("failed", "sms_no_numbers", True))
 
     def test_acquire_number_uses_random_country_and_falls_back_on_no_numbers(self):
-        codex_config.SMSBOWER_MAX_PRICE = "0.25"
+        codex_config.SMS_MAX_PRICE = "0.25"
         codex_config.SMS_NUMBER_ACQUIRE_RETRIES = 3
         http = _Http([
             _Response(json.dumps({
@@ -233,7 +349,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(state["country"], "35")
 
     def test_explicit_country_bypasses_random_country_pool(self):
-        codex_config.SMSBOWER_MAX_PRICE = "0.25"
+        codex_config.SMS_MAX_PRICE = "0.25"
         http = _Http([
             _Response(json.dumps({"10": {"dr": {"cost": 0.03, "count": 12}}})),
             _Response(json.dumps({
@@ -252,7 +368,6 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(number_calls[0]["params"]["maxPrice"], "0.034722")
 
     def test_random_country_without_max_price_uses_configured_country(self):
-        codex_config.SMSBOWER_MAX_PRICE = ""
         codex_config.SMS_MAX_PRICE = ""
         http = _Http([
             _Response(json.dumps({"1": {"dr": {"cost": 0.03, "count": 12}}})),
@@ -291,7 +406,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
     def test_smsbower_price_range_is_forwarded(self):
         codex_config.SMSBOWER_MIN_PRICE = "0.10"
-        codex_config.SMSBOWER_MAX_PRICE = "0.25"
+        codex_config.SMS_MAX_PRICE = "0.25"
 
         params = sms_provider._smsbower_number_params("dr", "1")
 
@@ -301,12 +416,27 @@ class SmsProviderStrategyTests(unittest.TestCase):
     def test_codex_config_loads_smsbower_max_price_from_env(self):
         source = STAGED_CODEX.read_text(encoding="utf-8")
 
-        self.assertIn('SMSBOWER_MAX_PRICE: str = ""', source)
-        self.assertIn("'SMSBOWER_MAX_PRICE': 'str'", source)
+        self.assertIn('SMS_MAX_PRICE: str = ""', source)
+        self.assertIn("'SMS_MAX_PRICE': 'str'", source)
         self.assertIn("'SMSBOWER_USD_CNY_RATE': 'str'", source)
 
+    def test_live_cny_usd_rate_is_used_and_failure_stops_price_limited_purchase(self):
+        codex_config.SMS_FX_RATE_URL = "https://fx.test/latest?from=CNY&to=USD"
+        body = json.dumps({"base": "CNY", "rates": {"USD": 0.14}}).encode("utf-8")
+        with patch.object(sms_provider, "urlopen", return_value=BytesIO(body)) as open_url:
+            rate, source = sms_provider._cny_to_usd_rate()
+        self.assertEqual(str(rate), "0.14")
+        self.assertEqual(source, "live CNY/USD")
+        self.assertEqual(open_url.call_args.args[0].full_url, codex_config.SMS_FX_RATE_URL)
+
+        sms_provider._reset_runtime_state_for_tests()
+        with patch.object(sms_provider, "urlopen", side_effect=OSError("offline")):
+            with self.assertRaises(sms_provider.SmsProviderConfigurationError):
+                sms_provider._cny_to_usd_rate()
+
     def test_price_bounds_validate_fx_rate_and_order(self):
-        codex_config.SMSBOWER_MAX_PRICE = "0.25"
+        codex_config.SMS_FX_RATE_URL = ""
+        codex_config.SMS_MAX_PRICE = "0.25"
         for rate in ("0", "NaN", "Infinity", "bad"):
             with self.subTest(rate=rate):
                 codex_config.SMSBOWER_USD_CNY_RATE = rate
@@ -425,6 +555,44 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(sms_provider._activation_state("b-failed"), {})
         self.assertEqual(sms_provider._cooldown_provider_ids("dr", "1"), {"p9"})
 
+    def test_actual_price_above_max_is_released_and_next_candidate_is_used(self):
+        codex_config.SMS_MAX_PRICE = "0.25"
+        codex_config.SMSBOWER_RANDOM_COUNTRY_ATTEMPTS = 2
+        http = _Http([
+            _Response(json.dumps({
+                "36": {"dr": {"cost": 0.03, "count": 10}},
+                "35": {"dr": {"cost": 0.03, "count": 10}},
+            })),
+            _Response(json.dumps({
+                "activationId": "too-expensive",
+                "phoneNumber": "351910000001",
+                "price": "0.05",
+                "currency": "USD",
+            })),
+            _Response("OK"),
+            _Response(json.dumps({
+                "activationId": "within-budget",
+                "phoneNumber": "351910000002",
+                "price": "0.03",
+                "currency": "USD",
+            })),
+        ])
+
+        with patch.object(sms_provider.random, "shuffle", side_effect=lambda rows: None):
+            activation_id, phone = sms_provider.acquire_number(http=http)
+
+        self.assertEqual((activation_id, phone), ("within-budget", "351910000002"))
+        self.assertEqual(
+            [call["params"].get("status") for call in http.calls if call["params"].get("action") == "setStatus"],
+            ["8"],
+        )
+        state = sms_provider.get_activation_info(activation_id)
+        self.assertEqual(state["price_amount"], "0.03")
+        self.assertEqual(state["price_currency"], "USD")
+        self.assertTrue(state["price_validated"])
+        self.assertLess(float(state["price_limit_max"]), 0.035)
+
+
     def test_activation_price_uses_explicit_currency_and_quote_fallback(self):
         self.assertEqual(sms_provider._activation_price_metadata(
             {"price": "0.031", "currency": "USD"}, "smsbower", {"cost": "0.04"}
@@ -435,35 +603,28 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(sms_provider._activation_price_metadata(None, "smsbower", {"cost": "0.04"}), {
             "price_amount": "0.04", "price_currency": "USD", "price_source": "SMSBower getPrices 报价"
         })
-        self.assertEqual(sms_provider._activation_price_metadata({"price": "0.18", "currency": "CNY"}, "h"), {
-            "price_amount": "0.18", "price_currency": "CNY", "price_source": "H 激活响应"
-        })
-        self.assertEqual(sms_provider._activation_price_metadata({"price": "0.18"}, "l"), {})
 
     def test_complete_returns_phone_and_price_snapshot_before_forgetting_state(self):
-        codex_config.SMS_PROVIDER = "l"
-        sms_provider._remember_activation("l1", "15550002", {
-            "provider": "l", "country": "1", "price_amount": "0.02", "price_currency": "USD",
+        sms_provider._remember_activation("b1", "15550002", {
+            "provider": "smsbower", "country": "1", "price_amount": "0.02", "price_currency": "USD",
         })
-        snapshot = sms_provider.complete("l1")
+        snapshot = sms_provider.complete("b1", http=_Http([_Response("OK")]))
         self.assertEqual(snapshot, {
-            "phone_number": "+15550002", "country": "1",
+            "phone_number": "+15550002", "country": "1", "provider": "smsbower",
             "price_amount": "0.02", "price_currency": "USD",
         })
-        self.assertEqual(sms_provider._activation_state("l1"), {})
-    def test_complete_and_cancel_forget_activation_state(self):
-        codex_config.SMS_PROVIDER = "l"
-        sms_provider._remember_activation("l1", "15550002", {"provider": "l"})
-        sms_provider.complete("l1")
-        self.assertEqual(sms_provider._activation_state("l1"), {})
-        self.assertNotIn("l1", sms_provider._CODE_HISTORY)
-
-        codex_config.SMS_PROVIDER = "smsbower"
-        sms_provider._remember_activation("b1", "15550003", {"provider": "smsbower"})
-        http = _Http([_Response("OK")])
-        sms_provider.cancel("b1", http=http, background=False)
         self.assertEqual(sms_provider._activation_state("b1"), {})
-        self.assertNotIn("b1", sms_provider._ACQUIRED_AT)
+
+    def test_complete_and_cancel_forget_activation_state(self):
+        sms_provider._remember_activation("b1", "15550003", {"provider": "smsbower"})
+        sms_provider.complete("b1", http=_Http([_Response("OK")]))
+        self.assertEqual(sms_provider._activation_state("b1"), {})
+        self.assertNotIn("b1", sms_provider._CODE_HISTORY)
+
+        sms_provider._remember_activation("b2", "15550004", {"provider": "smsbower"})
+        http = _Http([_Response("OK")])
+        sms_provider.cancel("b2", http=http, background=False)
+        self.assertEqual(sms_provider._activation_state("b2"), {})
 
     def test_roxy_feedback_hooks_release_before_failure_feedback(self):
         source = ROXY_SOURCE.read_text(encoding="utf-8")
