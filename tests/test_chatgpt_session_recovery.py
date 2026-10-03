@@ -31,6 +31,13 @@ class ChatGPTSessionRecoveryTests(unittest.TestCase):
         self.assertIn("login_recovery_attempted = True", source)
         self.assertIn("and not login_recovery_attempted", source)
 
+    def test_remail_and_legacy_provider_compatibility_is_present(self):
+        remail = (ROOT / "core" / "remail_client.py").read_text(encoding="utf-8")
+        provider = (ROOT / "core" / "email_provider.py").read_text(encoding="utf-8")
+        self.assertIn("exclude_codes: set[str] | None = None", remail)
+        self.assertIn("code not in excluded_codes", remail)
+        self.assertIn("legacy_kwargs.pop(\"exclude_codes\", None)", provider)
+
 
 if __name__ == "__main__":
     unittest.main()
