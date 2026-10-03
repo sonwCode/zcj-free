@@ -316,7 +316,16 @@ def wait_for_otp(
 
     def _fetch(fetcher):
         _check_stop_requested()
-        result = fetcher(email, after_ts=after_ts, **extra_kwargs)
+        try:
+            result = fetcher(email, after_ts=after_ts, **extra_kwargs)
+        except TypeError as exc:
+            # 兼容尚未升级的第三方邮箱 provider；已升级的实现仍负责过滤旧 OTP。
+            if "exclude_codes" not in extra_kwargs or "exclude_codes" not in str(exc):
+                raise
+            legacy_kwargs = dict(extra_kwargs)
+            legacy_kwargs.pop("exclude_codes", None)
+            logger.warning("[EmailProvider] provider 尚未支持 exclude_codes，降级调用：%s", getattr(fetcher, "__module__", fetcher))
+            result = fetcher(email, after_ts=after_ts, **legacy_kwargs)
         _check_stop_requested()
         return result
 

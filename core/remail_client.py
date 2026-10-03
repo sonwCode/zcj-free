@@ -633,9 +633,11 @@ def fetch_latest_otp(
     max_wait: int | None = None,
     poll_interval: int | None = None,
     settle_seconds: int | None = None,
+    exclude_codes: set[str] | None = None,
 ) -> str:
-    """轮询 Remail pickup，返回领取时间之后最新的六位验证码。"""
+    """轮询 Remail pickup，返回领取时间之后最新且未使用的六位验证码。"""
     target = str(email or "").strip()
+    excluded_codes = {str(code).strip() for code in (exclude_codes or set()) if str(code).strip()}
     if not target:
         raise RemailError("Remail 取码缺少邮箱地址")
     account = get_account_context(target) or restore_account_context(target)
@@ -684,7 +686,7 @@ def fetch_latest_otp(
                 if after_ts is not None and timestamp is not None and timestamp < after_ts - 30:
                     continue
                 code = _message_code(message)
-                if code:
+                if code and code not in excluded_codes:
                     messages.append((timestamp, code))
 
             messages.sort(
