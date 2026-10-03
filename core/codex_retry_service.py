@@ -169,6 +169,7 @@ def run_worker(
     batch_label: str | None = None,
     clear_log: bool = True,
     target_log_path: str | Path | None = None,
+    driver: str | None = None,
 ) -> dict:
     """执行一次 Codex 补跑。调用前必须先 reserve，结束时会自动 release。"""
     fh: logging.FileHandler | None = None
@@ -203,8 +204,10 @@ def run_worker(
             config_pkg.reload_all()
             from config import codex as codex_cfg
             from config import roxybrowser as roxy_cfg
+            selected_driver = str(driver or getattr(codex_cfg, "CODEX_OAUTH_DRIVER", "") or "").strip().lower()
             logger.info(
-                "[Codex 补跑] 已热加载配置：CODEX_OAUTH_DRIVER=%s ROXY_OPEN_HEADLESS=%s ROXY_KEEP_BROWSER_OPEN=%s",
+                "[Codex 补跑] 已热加载配置：driver=%s CODEX_OAUTH_DRIVER=%s ROXY_OPEN_HEADLESS=%s ROXY_KEEP_BROWSER_OPEN=%s",
+                selected_driver,
                 getattr(codex_cfg, "CODEX_OAUTH_DRIVER", ""),
                 getattr(roxy_cfg, "ROXY_OPEN_HEADLESS", ""),
                 getattr(roxy_cfg, "ROXY_KEEP_BROWSER_OPEN", ""),
@@ -217,7 +220,10 @@ def run_worker(
         logger.info("[Codex 补跑] 开始：%s", email)
         logger.info("[Codex 补跑] 阶段说明：获取授权地址 → 登录邮箱 → 邮箱 OTP → 手机验证 → 捕获 callback → 提交/保存凭证")
         check_stop_requested(email)
-        result = run_codex_oauth(email, force=True)
+        if driver is None:
+            result = run_codex_oauth(email, force=True)
+        else:
+            result = run_codex_oauth(email, force=True, driver=driver)
         check_stop_requested(email)
         logger.info(
             "[Codex 补跑] 结果：status=%s ok=%s file=%s callback=%s",

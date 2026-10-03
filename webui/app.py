@@ -2380,9 +2380,22 @@ def create_app(auth_code: str | None = None) -> Flask:
     def _release_codex_retry(email: str) -> None:
         codex_retry_service.release(email)
 
-    def _run_codex_retry_worker(email: str, *, batch_label: str | None = None, clear_log: bool = True) -> None:
+    _CODEX_RETRY_DRIVERS = {
+        "protocol", "roxy", "cloak", "browser_use", "skyvern"
+    }
+
+    def _normalize_codex_retry_driver(value: object) -> str | None:
+        """校验任务级驱动；空值保留全局 CODEX_OAUTH_DRIVER 回退语义。"""
+        value = str(value or "").strip().lower()
+        if not value:
+            return None
+        aliases = {"browseruse": "browser_use", "browser-use": "browser_use", "bu": "browser_use", "sv": "skyvern"}
+        value = aliases.get(value, value)
+        return value if value in _CODEX_RETRY_DRIVERS else None
+
+    def _run_codex_retry_worker(email: str, *, batch_label: str | None = None, clear_log: bool = True, driver: str | None = None) -> None:
         """执行一个账号的 Codex 补跑。调用前必须已经 reserve。"""
-        codex_retry_service.run_worker(email, batch_label=batch_label, clear_log=clear_log)
+        codex_retry_service.run_worker(email, batch_label=batch_label, clear_log=clear_log, driver=driver)
 
 
     @app.post("/api/codex/stop")
@@ -2486,6 +2499,9 @@ def create_app(auth_code: str | None = None) -> Flask:
         """手动补跑某账号的 Codex 授权。Body {email}。"""
         data = request.get_json(silent=True) or {}
         email = (data.get("email") or "").strip()
+        driver = _normalize_codex_retry_driver(data.get("driver"))
+        if data.get("driver") and driver is None:
+            return jsonify({"ok": False, "error": "不支持的 Codex 驱动，可选 protocol/roxy/cloak/browser_use/skyvern"}), 400
         if not email:
             return jsonify({"ok": False, "error": "email 为空"}), 400
         acc = db.get_account_by_email(email)
@@ -2499,7 +2515,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         db.update_account_codex_status(email, "retrying", None)
         threading.Thread(
             target=_run_codex_retry_worker,
-            kwargs={"email": email, "clear_log": True},
+            kwargs={"email": email, "clear_log": True, "driver": driver},
             name=f"codex-retry-{email}",
             daemon=True,
         ).start()
@@ -2513,6 +2529,9 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         data = request.get_json(silent=True) or {}
         ids = data.get("account_ids") or data.get("ids") or []
+        driver = _normalize_codex_retry_driver(data.get("driver"))
+        if data.get("driver") and driver is None:
+            return jsonify({"ok": False, "error": "不支持的 Codex 驱动，可选 protocol/roxy/cloak/browser_use/skyvern"}), 400
         workers = data.get("workers", 1)
         if not isinstance(ids, list) or not ids:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
@@ -2561,14 +2580,14 @@ def create_app(auth_code: str | None = None) -> Flask:
             log_path = codex_retry_service.log_path(email)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(
-                f"{_dt.now().strftime('%H:%M:%S')} [INFO] [Codex 批量补跑] 已加入批量任务 batch={batch_id} workers={workers}，等待线程执行\n",
+                f"{_dt.now().strftime('%H:%M:%S')} [INFO] [Codex 批量补跑] 已加入批量任务 batch={batch_id} workers={workers} driver={driver or 'global'}，等待线程执行\n",
                 encoding="utf-8",
             )
 
-        def _bulk_runner(items: list[dict], max_workers: int, batch: str):
-            logger.info(f"[Codex 批量补跑] 启动 batch={batch} count={len(items)} workers={max_workers}")
+        def _bulk_runner(items: list[dict], max_workers: int, batch: str, selected_driver: str | None):
+            logger.info(f"[Codex 批量补跑] 启动 batch={batch} count={len(items)} workers={max_workers} driver={selected_driver or 'global'}")
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"codex-bulk-{batch}") as ex:
-                futures = [ex.submit(_run_codex_retry_worker, it["email"], batch_label=f"{batch} #{idx}/{len(items)}", clear_log=False) for idx, it in enumerate(items, 1)]
+                futures = [ex.submit(_run_codex_retry_worker, it["email"], batch_label=f"{batch} #{idx}/{len(items)}", clear_log=False, driver=selected_driver) for idx, it in enumerate(items, 1)]
                 for fut in as_completed(futures):
                     try:
                         fut.result()
@@ -2578,7 +2597,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         threading.Thread(
             target=_bulk_runner,
-            args=(selected, workers, batch_id),
+            args=(selected, workers, batch_id, driver),
             name=f"codex-bulk-dispatch-{batch_id}",
             daemon=True,
         ).start()

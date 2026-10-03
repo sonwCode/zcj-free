@@ -1922,6 +1922,7 @@ def run_codex_oauth(
     otp_provider=None,
     proxy: str | None = None,
     force: bool = False,
+    driver: str | None = None,
     _cpa_reauth_round: int = 1,
 ) -> dict:
     """
@@ -1935,6 +1936,7 @@ def run_codex_oauth(
         otp_provider: 邮箱 OTP 获取回调 fn(email, after_ts)->code，默认用 wait_for_otp
         proxy: 代理（不传从 PROXY_POOL 抽）
         force: True 时跳过 ENABLE_CODEX_AUTO 开关限制，供手动补跑使用
+        driver: 本次任务使用的 OAuth 驱动；留空时读取 CODEX_OAUTH_DRIVER
 
     Returns:
         结构化结果 dict。任何异常都被吞掉转 status=failed，不向上抛，不影响注册主流程。
@@ -1949,7 +1951,7 @@ def run_codex_oauth(
     try:
         from config import codex as _codex_cfg
         from config import roxybrowser as _roxy_cfg
-        oauth_driver = str(getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "protocol") or "protocol").strip().lower()
+        oauth_driver = str(driver or getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "protocol") or "protocol").strip().lower()
         if oauth_driver == "same_as_registration":
             oauth_driver = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
         if oauth_driver in ("roxy", "roxybrowser", "fingerprint", "browser"):
