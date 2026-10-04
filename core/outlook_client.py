@@ -1160,9 +1160,18 @@ def fetch_latest_otp(
     last_fetch_error: OutlookClientError | None = None
 
     while time.time() < deadline:
+        # 每轮请求必须受总 deadline 约束。Graph/IMAP 单次请求默认 30s，
+        # 如果不按剩余时间收紧，两个协议的超时会把 max_wait=90s 拉长到数分钟。
+        remaining_before_round = deadline - time.time()
+        if remaining_before_round <= 0:
+            break
+        session.timeout = max(1, min(30, int(remaining_before_round)))
         # 每轮都重新拉，因为可能有新邮件，也可能旧邮件因延迟才出现
         all_candidates: list[tuple[str, dict, float, str]] = []
         for protocol in ("graph", "imap"):
+            if deadline - time.time() <= 0:
+                break
+            session.timeout = max(1, min(30, int(deadline - time.time())))
             try:
                 emails = _fetch_via(session, protocol, account)
             except OutlookClientError as exc:
