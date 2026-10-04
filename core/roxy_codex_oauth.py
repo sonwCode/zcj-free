@@ -1061,13 +1061,15 @@ def _select_sms_channel_or_raise(driver) -> None:
     }
     return {ok:true, checked: !!sms.checked, value: String(sms.value || ''), url: location.href};
     """)
-    if not result:
-        raise RuntimeError(f"whatsapp_channel: 选择 SMS 通道失败 state={state}")
-    if not result.get("checked"):
-        # radio 未勾上说明页面仍可能停在 WhatsApp 通道，换号也无济于事，直接报出真实原因。
+    if not result or not result.get("checked"):
+        # SMS 选项存在但点不中，是页面/交互问题，与号码质量无关。这里必须用独立
+        # 标记：沿用 whatsapp_channel 会被接码平台侧归类成 number_rejected，
+        # 把一个完全正常的号码拉黑 30 分钟。
+        # 「页面只有 WhatsApp 通道」走的是上面的分支，那条确实可能与号码所属
+        # 地区的可用通道有关，保留原有归类。
         raise RuntimeError(
-            f"whatsapp_channel: SMS 通道未被勾选（页面可能只有 WhatsApp 通道或被风控锁定）"
-            f" detail={result} state={state}"
+            f"sms_channel_select_failed: SMS 通道未被勾选（SMS 选项存在但无法选中，"
+            f"与号码质量无关）detail={result} state={state}"
         )
     logger.info("[Codex][Browser] 已选择 SMS 短信通道：%s", result)
 
@@ -2071,6 +2073,7 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 if any(k in err_text for k in (
                     "phone_country_sync_failed", "phone_country_mismatch",
                     "phone_value_write_failed", "phone_value_mismatch", "phone_number_required",
+                    "sms_channel_select_failed",
                 )):
                     logger.info(
                         "[Codex][Browser] 手机号国家/表单反馈可重试：attempt=%s/%s reason=%s",
