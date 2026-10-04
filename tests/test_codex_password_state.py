@@ -91,6 +91,13 @@ class CodexPasswordStateTests(unittest.TestCase):
         body = _source("_fill_email_and_otp")
         self.assertIn("email_submit_stalled", body)
 
+    def test_human_click_unwraps_cloak_element(self):
+        registration_text = (ROOT / "core" / "roxy_registration.py").read_text(encoding="utf-8")
+        self.assertIn("def _unwrap_cloak_element", registration_text)
+        self.assertIn("target = _unwrap_cloak_element(el)", registration_text)
+        self.assertIn("driver.execute_script", registration_text)
+        self.assertIn(", target)", registration_text)
+
 
 if __name__ == "__main__":
     unittest.main()

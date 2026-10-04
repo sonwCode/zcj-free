@@ -302,19 +302,31 @@ def _apply_browser_automation_mask(driver) -> None:
         logger.debug("%s 注入自动化特征弱化脚本失败：%s", _log_prefix(driver), exc)
 
 
+def _unwrap_cloak_element(el):
+    """将 CloakElement 包装对象转换为可传入 page.evaluate 的真实句柄。"""
+    handle = getattr(el, "_handle", None)
+    if callable(handle):
+        try:
+            return handle()
+        except Exception:
+            return el
+    return el
+
+
 def _human_scroll_to(driver, el) -> None:
+    target = _unwrap_cloak_element(el)
     try:
         block = random.choice(["center", "nearest", "center"])
-        driver.execute_script("arguments[0].scrollIntoView({block: arguments[1], inline:'nearest'});", el, block)
+        driver.execute_script("arguments[0].scrollIntoView({block: arguments[1], inline:'nearest'});", target, block)
         if _browser_actions_enabled():
             _stop_aware_sleep(random.uniform(0.08, 0.35))
             # 轻微滚动抖动，避免每次都精准居中。
             driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(-90, 90))
             _stop_aware_sleep(random.uniform(0.05, 0.22))
-            driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'nearest'});", el)
+            driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'nearest'});", target)
     except Exception:
         try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", target)
         except Exception:
             pass
 
@@ -325,6 +337,7 @@ def _human_click(driver, el, *, label: str = "") -> None:
     之前用 ActionChains 在 Roxy/Chrome 150 上偶发卡住 1-2 分钟，导致邮箱提交很慢。
     这里改为 CDP 派发鼠标事件；没有 CDP 时再用 JS/原生 click 兜底。
     """
+    target = _unwrap_cloak_element(el)
     _human_scroll_to(driver, el)
     if not _browser_actions_enabled():
         _stop_aware_sleep(0.2)
@@ -338,7 +351,7 @@ def _human_click(driver, el, *, label: str = "") -> None:
         const x = r.left + r.width * (0.30 + Math.random() * 0.40);
         const y = r.top + r.height * (0.35 + Math.random() * 0.30);
         return {x, y, w:r.width, h:r.height};
-        """, el) or {}
+        """, target) or {}
         x = float(point.get("x") or 0)
         y = float(point.get("y") or 0)
         if hasattr(driver, "execute_cdp_cmd") and x > 0 and y > 0:
@@ -361,7 +374,7 @@ def _human_click(driver, el, *, label: str = "") -> None:
                 el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
                 el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
                 el.click();
-                """, el)
+                """, target)
         else:
             driver.execute_script(r"""
             const el = arguments[0];
@@ -369,12 +382,12 @@ def _human_click(driver, el, *, label: str = "") -> None:
             el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
             el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
             el.click();
-            """, el)
+            """, target)
     except Exception as exc:
         logger.debug("%s 人工化点击失败，回退 el.click label=%s err=%s", _log_prefix(driver), label, exc)
         _stop_aware_sleep(random.uniform(0.12, 0.45))
         try:
-            driver.execute_script("arguments[0].click();", el)
+            driver.execute_script("arguments[0].click();", target)
         except Exception:
             el.click()
 
