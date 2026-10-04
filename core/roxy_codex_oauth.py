@@ -32,6 +32,7 @@ from core.roxy_registration import (
     _type_any,
     _type_email_address,
     _submit_email_step,
+    _recover_email_submit_if_stuck,
     _click_email_entry_option,
     _type_otp,
     _clear_otp_inputs,
@@ -589,6 +590,11 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         _submit_email_step(driver)
         entry_state = _wait_for_codex_auth_entry_state(driver, timeout=12)
         logger.info("[Codex][Browser] 邮箱提交后认证页面状态：%s", entry_state)
+        if entry_state == "unknown" and "/log-in" in str(getattr(driver, "current_url", "") or "").lower():
+            recovery = _recover_email_submit_if_stuck(driver, email)
+            logger.warning("[Codex][Browser] 仍停留 /log-in，执行邮箱表单重提交：%s", recovery)
+            entry_state = _wait_for_codex_auth_entry_state(driver, timeout=12)
+            logger.info("[Codex][Browser] 邮箱重提交后认证页面状态：%s", entry_state)
         pw_result = _fill_login_password_if_present(driver, email, timeout=18)
         if pw_result == "next_step":
             if _is_mfa_challenge_page(driver):
