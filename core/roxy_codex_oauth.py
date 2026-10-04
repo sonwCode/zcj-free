@@ -509,6 +509,14 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
             if not _is_login_password_page(driver):
                 return "next_step"
             _stop_sleep(0.5)
+        # 不能把仍停留在 /log-in/password 当成登录完成；Job 72 的日志证明
+        # 这种误判会让上层跳过后续页面，最终只在 callback 超时才暴露问题。
+        if _is_login_password_page(driver):
+            logger.warning(
+                "[Codex][Browser] 密码已提交但仍停留登录密码页，拒绝标记为登录成功：email=%s",
+                email,
+            )
+            return None
         return "next_step"
     return None
 
