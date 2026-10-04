@@ -34,6 +34,22 @@ logger = logging.getLogger(__name__)
 # 对单个任务的影响只是取码轮次略慢，远小于持续失败重试的代价。
 _PICKUP_LOCK = threading.RLock()
 
+# 串行只解决“握手重叠”，不解决“瞬时速率”。实测同一出口在毫秒级连发时
+# 成功率仅 2/12，拉开到 0.15s 以上可升到 9/12。因此锁内还要强制最小间隔。
+_PICKUP_MIN_GAP_SECONDS = 0.35
+_PICKUP_LAST_TS = [0.0]
+
+
+def _pickup_throttle() -> None:
+    """在持有 _PICKUP_LOCK 的前提下，保证两次取码请求之间的最小间隔。"""
+    gap = float(getattr(_email_cfg, "GENERIC_API_PICKUP_MIN_GAP", _PICKUP_MIN_GAP_SECONDS) or 0.0)
+    if gap <= 0:
+        return
+    elapsed = time.monotonic() - _PICKUP_LAST_TS[0]
+    if elapsed < gap:
+        _stop_sleep(gap - elapsed)
+    _PICKUP_LAST_TS[0] = time.monotonic()
+
 # TLS/连接类错误需要退避：固定 3 秒重试会持续撞在限流窗口上。
 _PICKUP_TRANSIENT_MARKERS = (
     "sslerror", "ssl_error_syscall", "unexpected_eof", "eof occurred",
@@ -842,6 +858,7 @@ def _fetch_poll_payload(
     session 用后即关，避免连接与文件描述符随轮次累积。
     """
     with _PICKUP_LOCK:
+        _pickup_throttle()
         session = _new_http_session(proxy_url)
         try:
             yy_result = (

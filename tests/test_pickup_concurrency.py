@@ -51,6 +51,54 @@ class PickupTransientErrorTests(unittest.TestCase):
         self.assertFalse(fn(""))
 
 
+class PickupThrottleTests(unittest.TestCase):
+    """串行只防握手重叠，速率还要靠最小间隔限制。
+
+    实测同一出口毫秒级连发成功率仅 2/12，拉开到 0.15s 以上可升到 9/12。
+    """
+
+    def test_throttle_enforces_minimum_gap(self):
+        ns = _load({"_pickup_throttle", "_PICKUP_MIN_GAP_SECONDS", "_PICKUP_LAST_TS"})
+        throttle = ns["_pickup_throttle"]
+        sleeps = []
+        ns["_stop_sleep"] = lambda s: sleeps.append(s)
+        ns["_email_cfg"] = type("C", (), {"GENERIC_API_PICKUP_MIN_GAP": 0.35})()
+        ns["_PICKUP_LAST_TS"][0] = 0.0
+        ns["time"] = __import__("time")
+        # 第一次调用：距上次已远超间隔，不应 sleep
+        throttle()
+        self.assertEqual(sleeps, [])
+        # 紧接着再调用：必然小于间隔，应当 sleep
+        throttle()
+        self.assertTrue(sleeps, "连续调用必须触发节流 sleep")
+        self.assertGreater(sleeps[0], 0)
+
+    def test_throttle_can_be_disabled(self):
+        ns = _load({"_pickup_throttle", "_PICKUP_MIN_GAP_SECONDS", "_PICKUP_LAST_TS"})
+        throttle = ns["_pickup_throttle"]
+        sleeps = []
+        ns["_stop_sleep"] = lambda s: sleeps.append(s)
+        ns["_email_cfg"] = type("C", (), {"GENERIC_API_PICKUP_MIN_GAP": 0})()
+        throttle()
+        throttle()
+        self.assertEqual(sleeps, [])
+
+    def test_fetch_applies_throttle_inside_lock(self):
+        tree = ast.parse(TEXT, filename=str(SRC))
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "_fetch_poll_payload":
+                body = ast.get_source_segment(TEXT, node) or ""
+                self.assertIn("_pickup_throttle()", body)
+                self.assertLess(body.index("with _PICKUP_LOCK:"), body.index("_pickup_throttle()"))
+                return
+        self.fail("_fetch_poll_payload 未找到")
+
+    def test_gap_is_configurable(self):
+        cfg = (ROOT / "config" / "email.py").read_text(encoding="utf-8")
+        self.assertIn("GENERIC_API_PICKUP_MIN_GAP", cfg)
+        self.assertIn("'GENERIC_API_PICKUP_MIN_GAP': 'float'", cfg)
+
+
 class PickupSerializationTests(unittest.TestCase):
     """并发取码会被 Cloudflare 重置，必须全局串行。"""
 
