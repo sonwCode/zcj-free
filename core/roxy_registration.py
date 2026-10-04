@@ -449,6 +449,24 @@ def _page_warmup(driver, *, reason: str = "") -> None:
 
 _MISSING_PAGE_ELEMENT_REFRESH_RETRIES = 3
 
+# Chromium 在跨主机导航被网络错误或上游 5xx 截断时停留的合成 URL。
+# 命中后当前页面既不是登录页也不是密码页，任何 DOM 查询都会落空。
+_NAVIGATION_ERROR_URL_TOKENS = (
+    "chrome-error://",
+    "chrome-error://chromewebdata",
+    "edge-error://",
+    "about:neterror",
+    "about:error",
+)
+
+
+def _is_navigation_error_url(url: str) -> bool:
+    """判断当前 URL 是否为浏览器渲染的导航错误页（非真实站点页面）。"""
+    lowered = str(url or "").strip().lower()
+    if not lowered:
+        return False
+    return any(token in lowered for token in _NAVIGATION_ERROR_URL_TOKENS)
+
 
 def _refresh_after_missing_page_element(driver, step: str, retry_index: int) -> bool:
     """元素缺失时刷新当前页面，避免把页面迟渲染误判成流程失败。"""
@@ -2246,14 +2264,48 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             current_url = str(getattr(driver, "current_url", "") or "")
             raise RuntimeError(f"密码提交后仍停留在注册密码页: url={current_url} state={_password_page_state(driver)}")
         return password
-    # 如果已经请求切换到密码方式，不允许在导航竞态中静默进入 OTP 阶段。
-    # 最后再读取一次浏览器 URL；已抵达密码路由但 DOM 尚未就绪时明确报错，
-    # 避免后续在密码页连续刷新并查找 OTP 输入框。
+    # 一旦点击过“使用密码继续”，本次认证就已经确定要走注册密码路径。
+    # 这里不能再用 URL 子串判断是否“还在密码流程里”：跨主机跳转到
+    # auth.openai.com 时若上游返回 500，Chromium 会停在
+    # chrome-error://chromewebdata/，URL 里不含任何密码路由子串，旧判据会
+    # 直接把流程放行到 OTP 阶段，最终在错误的页面上刷新三次并报出
+    # “找不到 OTP 输入框”，掩盖真正的上游错误。
     current_url = str(getattr(driver, "current_url", "") or "")
-    if password_route_requested and any(x in current_url.lower() for x in (
-        "/create-account/password", "/u/signup/password", "/signup/password",
-    )):
-        raise RuntimeError(f"已进入注册密码页但密码表单在等待期限内未就绪: url={current_url} state={last}")
+    if password_route_requested:
+        # 导航被网络/上游错误中断时，整页重开一次登录入口重走流程；这是
+        # ERR_EMPTY_RESPONSE / HTTP 500 这类可恢复故障的标准处置。
+        if _is_navigation_error_url(current_url):
+            logger.warning(
+                "%s 已请求密码路径但页面停留在导航错误页，重开登录入口重试一次：url=%s last=%s",
+                _log_prefix(driver), current_url[:180], last,
+            )
+            try:
+                _safe_get(
+                    driver,
+                    "https://chatgpt.com/auth/login",
+                    timeout=45,
+                    attempts=2,
+                    accept_hosts=("chatgpt.com",),
+                )
+                _page_warmup(driver, reason="password_route_navigation_error")
+            except Exception as exc:
+                logger.warning("%s 导航错误页重开登录入口失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:180])
+            human_delay("api")
+            retry_state = _current_email_submit_next_state(driver)
+            _check_manual_stop()
+            if retry_state in ("password", "login_password"):
+                logger.info("%s 导航错误页重开后已回到密码路径：state=%s", _log_prefix(driver), retry_state)
+                return _fill_password_page_if_present(driver, email, timeout=timeout)
+            if retry_state == "otp":
+                logger.info("%s 导航错误页重开后进入邮箱验证码页，交给 OTP 阶段处理", _log_prefix(driver))
+                return None
+            if retry_state == "logged_in":
+                logger.info("%s 导航错误页重开后已检测到登录态", _log_prefix(driver))
+                return None
+        raise RuntimeError(
+            f"已请求注册密码路径但密码表单在等待期限内未就绪（导航可能被上游错误截断）: "
+            f"url={current_url} last={last}"
+        )
     logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
     return None
 
