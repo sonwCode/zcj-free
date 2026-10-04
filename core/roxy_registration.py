@@ -2001,33 +2001,35 @@ def _click_passwordless_signup_if_present(driver) -> dict:
         const btn = candidates.find(isPasswordlessOtp);
         if (!btn) return {ok:false, reason:'missing_passwordless_button'};
         btn.scrollIntoView({block:'center'});
-        // 同“使用密码继续”：页面内合成 click 不被 React 手势判定接受，
-        // 交给 Python 侧 _human_click 派发完整指针事件。
-        btn.setAttribute('data-cloak-passwordless-otp', '1');
+        // 同“使用密码继续”：页面内派发完整指针事件序列，不用裸 btn.click()。
+        const rect = btn.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const base = {bubbles:true, cancelable:true, composed:true, view:window,
+                      clientX:cx, clientY:cy, button:0, buttons:1};
+        try {
+          btn.dispatchEvent(new PointerEvent('pointerover', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          btn.dispatchEvent(new PointerEvent('pointerenter', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          btn.dispatchEvent(new MouseEvent('mouseover', {...base, buttons:0}));
+          btn.dispatchEvent(new MouseEvent('mouseenter', {...base, buttons:0}));
+          btn.dispatchEvent(new MouseEvent('mousemove', {...base, buttons:0}));
+          btn.dispatchEvent(new PointerEvent('pointerdown', {...base, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          btn.dispatchEvent(new MouseEvent('mousedown', base));
+          if (typeof btn.focus === 'function') btn.focus({preventScroll:true});
+          btn.dispatchEvent(new PointerEvent('pointerup', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          btn.dispatchEvent(new MouseEvent('mouseup', {...base, buttons:0}));
+          btn.click();
+        } catch (err) {
+          return {ok:false, reason:'dispatch_failed', error:String(err)};
+        }
         return {
           ok:true,
-          reason:'passwordless_send_otp_target',
+          reason:'clicked_passwordless_send_otp',
           name: btn.getAttribute('name') || '',
           value: btn.getAttribute('value') || '',
           text: (btn.textContent || '').trim().slice(0, 80)
         };
         """) or {"ok": False, "reason": "empty_result"}
-        if not result.get("ok"):
-            return result
-        from selenium.webdriver.common.by import By
-        try:
-            marked = driver.find_elements(By.CSS_SELECTOR, "[data-cloak-passwordless-otp='1']")
-            driver.execute_script(
-                "document.querySelectorAll(\"[data-cloak-passwordless-otp='1']\")"
-                ".forEach(el => el.removeAttribute('data-cloak-passwordless-otp'));"
-            )
-            target = next((el for el in marked if _visible(el)), None)
-        except Exception:
-            target = None
-        if target is None:
-            return {"ok": False, "reason": "passwordless_button_target_lost"}
-        _human_click(driver, target, label="passwordless_send_otp")
-        result["reason"] = "clicked_passwordless_send_otp"
         return result
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -2062,34 +2064,38 @@ def _click_continue_with_password_if_present(driver) -> dict:
         const btn = candidates.find(isPasswordCreate);
         if (!btn) return {ok:false, reason:'missing_continue_with_password'};
         btn.scrollIntoView({block:'center'});
-        // 只做定位与标记，不在页面内直接 click。ChatGPT/Auth0 的“使用密码继续”
-        // 入口绑定的是指针事件链，execute_script 内的合成 click 常常不被 React
-        // 手势判定接受，导航不会真正发起。这里把元素交给 Python 侧的 _human_click
-        // 派发完整鼠标事件序列。
-        btn.setAttribute('data-cloak-pw-continue', '1');
+        // 完整指针事件序列必须在页面内派发。Chromium 只对真实指针序列生成
+        // trusted click 并触发表单/链接导航；裸 btn.click() 只产生合成事件，
+        // React 手势判定不认，导航不会发起，而函数仍会报告点击成功。
+        // 这里按 pointerdown→mousedown→pointerup→mouseup→click 顺序补齐，
+        // 与 CDP 派发的序列在 DOM 侧等价。
+        const rect = btn.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const base = {bubbles:true, cancelable:true, composed:true, view:window,
+                      clientX:cx, clientY:cy, button:0, buttons:1};
+        try {
+          btn.dispatchEvent(new PointerEvent('pointerover', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          btn.dispatchEvent(new PointerEvent('pointerenter', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          btn.dispatchEvent(new MouseEvent('mouseover', {...base, buttons:0}));
+          btn.dispatchEvent(new MouseEvent('mouseenter', {...base, buttons:0}));
+          btn.dispatchEvent(new MouseEvent('mousemove', {...base, buttons:0}));
+          btn.dispatchEvent(new PointerEvent('pointerdown', {...base, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          btn.dispatchEvent(new MouseEvent('mousedown', base));
+          if (typeof btn.focus === 'function') btn.focus({preventScroll:true});
+          btn.dispatchEvent(new PointerEvent('pointerup', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          btn.dispatchEvent(new MouseEvent('mouseup', {...base, buttons:0}));
+          btn.click();
+        } catch (err) {
+          return {ok:false, reason:'dispatch_failed', error:String(err)};
+        }
         return {
           ok:true,
-          reason:'continue_with_password_target',
+          reason:'clicked_continue_with_password',
           href: btn.getAttribute('href') || '',
           text: (btn.textContent || '').trim().slice(0, 80)
         };
         """) or {"ok": False, "reason": "empty_result"}
-        if not result.get("ok"):
-            return result
-        from selenium.webdriver.common.by import By
-        try:
-            candidates_now = driver.find_elements(By.CSS_SELECTOR, "[data-cloak-pw-continue='1']")
-            driver.execute_script(
-                "document.querySelectorAll(\"[data-cloak-pw-continue='1']\")"
-                ".forEach(el => el.removeAttribute('data-cloak-pw-continue'));"
-            )
-            target = next((el for el in candidates_now if _visible(el)), None)
-        except Exception:
-            target = None
-        if target is None:
-            return {"ok": False, "reason": "continue_with_password_target_lost", **{k: v for k, v in result.items() if k != "ok"}}
-        _human_click(driver, target, label="continue_with_password")
-        result["reason"] = "clicked_continue_with_password"
         return result
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
