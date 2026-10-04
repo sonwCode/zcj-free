@@ -100,10 +100,10 @@ class _SmsProvider:
         return "123456"
 
 
-def _load_phone_function(provider, responses):
+def _load_phone_function(provider, responses, max_retries=1):
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_do_phone_verification"]
-    cfg = types.SimpleNamespace(SMS_MAX_RETRIES=1, SMS_CODE_WAIT=1, SMS_POLL_INTERVAL=0)
+    cfg = types.SimpleNamespace(SMS_MAX_RETRIES=max_retries, SMS_CODE_WAIT=1, SMS_POLL_INTERVAL=0)
     response_queue = list(responses)
 
     def post_json(session, url, payload, **kwargs):
@@ -187,6 +187,21 @@ class CodexPhoneFeedbackTests(unittest.TestCase):
         self.assertEqual(phone_activation["price_currency"], "USD")
         self.assertLess(provider.events.index(("success", "activation-1")), provider.events.index(("complete", "activation-1")))
         self.assertNotIn(("failure", "activation-1", "code_timeout"), provider.events)
+
+    def test_generic_phone_failure_uses_configured_retry_count(self):
+        provider = _SmsProvider("generic_error")
+        function = _load_phone_function(provider, [], max_retries=3)
+        with self.assertRaisesRegex(RuntimeError, "post failure"):
+            function(object())
+
+        self.assertEqual(
+            [event for event in provider.events if event[0] == "cancel"],
+            [("cancel", "activation-1")] * 3,
+        )
+        self.assertEqual(
+            [event for event in provider.events if event[0] == "failure"],
+            [("failure", "activation-1", "post failure")] * 3,
+        )
 
     def test_preflight_provider_error_preserves_original_exception(self):
         provider = _SmsProvider("preflight_error")
