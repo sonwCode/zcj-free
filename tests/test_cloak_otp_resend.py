@@ -34,12 +34,14 @@ class CloakOtpResendTests(unittest.TestCase):
     def test_obsolete_restart_helper_is_removed(self):
         self.assertNotIn("def _restart_cloak_email_otp", TEXT)
 
-    def test_new_code_deduplication_is_preserved(self):
+    def test_same_value_from_new_mail_is_allowed(self):
+        """OpenAI resend 可能发送新邮件但沿用同一个六码；只按 after_ts 判断新旧。"""
         body = _function_source("_run_cloak_registration_impl")
         otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
-        self.assertIn("used_otps: set[str] = set()", otp_loop)
-        self.assertIn("exclude_codes=used_otps", otp_loop)
-        self.assertIn("used_otps.add(current_otp)", otp_loop)
+        self.assertIn("wait_for_otp(email, after_ts=otp_after_ts)", otp_loop)
+        self.assertNotIn("used_otps", otp_loop)
+        self.assertNotIn("exclude_codes=", otp_loop)
+        self.assertNotIn("取码接口仍返回已提交的旧验证码", otp_loop)
 
     def test_log_describes_actual_resend_action(self):
         body = _function_source("_run_cloak_registration_impl")

@@ -145,15 +145,12 @@ def _run_cloak_registration_impl(
         _check_manual_stop()
 
         current_otp = otp_code
-        used_otps: set[str] = set()
         max_otp_attempts = 3
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
                 try:
-                    current_otp = wait_for_otp(email, after_ts=otp_after_ts, exclude_codes=used_otps)
-                    if current_otp in used_otps:
-                        raise RuntimeError("取码接口仍返回已提交的旧验证码")
+                    current_otp = wait_for_otp(email, after_ts=otp_after_ts)
                 except Exception as exc:
                     if otp_attempt >= max_otp_attempts:
                         raise
@@ -169,14 +166,6 @@ def _run_cloak_registration_impl(
                     human_delay("api")
                     current_otp = None
                     continue
-            current_otp = str(current_otp or "").strip()
-            if current_otp in used_otps:
-                if otp_attempt >= max_otp_attempts:
-                    raise RuntimeError("邮箱验证码重复返回，已达到最大重试次数")
-                otp_after_ts = time.time()
-                current_otp = None
-                continue
-            used_otps.add(current_otp)
             logger.info("[Cloak注册][OTP] 收到验证码：%s", current_otp)
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
