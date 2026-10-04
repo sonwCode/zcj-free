@@ -224,6 +224,32 @@ def _safe_get(driver, url: str, *, timeout: int = 45, attempts: int = 2, accept_
                 _stop_aware_sleep(1.5 * attempt)
                 continue
             raise
+        except Exception as exc:
+            # CloakBrowser 使用 Playwright page.goto，网络错误不会继承 Selenium
+            # WebDriverException，例如 ERR_EMPTY_RESPONSE/ERR_CONNECTION_RESET。
+            last_exc = exc
+            error_text = str(exc)
+            transient = any(token in error_text.upper() for token in (
+                "ERR_EMPTY_RESPONSE",
+                "ERR_CONNECTION_RESET",
+                "ERR_CONNECTION_CLOSED",
+                "ERR_NETWORK_CHANGED",
+                "ERR_FAILED",
+                "ERR_TIMED_OUT",
+                "TIMED OUT RECEIVING MESSAGE FROM RENDERER",
+            ))
+            if transient and attempt < attempts:
+                logger.warning(
+                    "%s 页面网络错误，准备重试：url=%s attempt=%s/%s error=%s",
+                    _log_prefix(driver), url, attempt, attempts, error_text.splitlines()[0][:240],
+                )
+                try:
+                    driver.get("about:blank")
+                except Exception:
+                    pass
+                _stop_aware_sleep(1.5 * attempt)
+                continue
+            raise
         finally:
             try:
                 driver.set_page_load_timeout(old_timeout)
