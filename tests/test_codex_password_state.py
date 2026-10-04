@@ -58,6 +58,13 @@ class CodexPasswordStateTests(unittest.TestCase):
         self.assertIn("按参考流程等待密码页或验证码页", body)
         self.assertNotIn("仍停留 /log-in，执行邮箱表单重提交", body)
 
+    def test_password_uses_selected_reference_button_handles(self):
+        body = _source("_fill_login_password_if_present")
+        self.assertIn("input, button:target", body)
+        self.assertIn('_human_type_text(driver, result.get("input")', body)
+        self.assertIn('_human_click(driver, result.get("button")', body)
+        self.assertIn("codex_password_submit", body)
+
 
 if __name__ == "__main__":
     unittest.main()

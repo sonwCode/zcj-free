@@ -494,24 +494,22 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
         const target = buttons[0].el;
         target.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets', text:(target.textContent || target.getAttribute('value') || '').trim().slice(0,80), type:target.getAttribute('type') || '', dd:target.getAttribute('data-dd-action-name') || '', ariaDisabled:target.getAttribute('aria-disabled') || ''};
+        return {ok:true, reason:'password_targets', input, button:target, text:(target.textContent || target.getAttribute('value') || '').trim().slice(0,80), type:target.getAttribute('type') || '', dd:target.getAttribute('data-dd-action-name') || '', ariaDisabled:target.getAttribute('aria-disabled') || ''};
         """) or {}
         if not result.get("ok"):
             logger.info("[Codex][Browser] 登录密码页未找到输入/提交按钮：%s", result)
             _stop_sleep(0.5)
             continue
-        _human_type_password_by_selector(driver, password)
-        human_delay("form", minimum=2.0, maximum=3.6)
-        submit_result = driver.execute_script(r"""
-        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
-        const input = [...document.querySelectorAll('input[type=\"password\"],input[name*=\"password\" i],input[autocomplete=\"current-password\"]')].find(visible);
-        const form = input?.closest('form');
-        const button = form && [...form.querySelectorAll('button[type=\"submit\"],input[type=\"submit\"]')].find(el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true');
-        if (!button) return {ok:false, reason:'missing_password_submit'};
-        button.scrollIntoView({block:'center'});
-        if (form && typeof form.requestSubmit === 'function') form.requestSubmit(button); else button.click();
-        return {ok:true, reason:'password_submitted'};
-        """) or {};
+        try:
+            _human_type_text(driver, result.get("input"), password, clear=True)
+            human_delay("form", minimum=2.0, maximum=3.6)
+            _human_click(driver, result.get("button"), label="codex_password_submit")
+            submit_result = {"ok": True, "reason": "human_click"}
+        except Exception as click_exc:
+            logger.warning("[Codex][Browser] 参考按钮句柄点击失败，回退选择器输入：%s: %s", type(click_exc).__name__, str(click_exc)[:160])
+            _human_type_password_by_selector(driver, password)
+            human_delay("form", minimum=2.0, maximum=3.6)
+            submit_result = driver.execute_script("document.querySelector('input[type=\"password\"]')?.closest('form')?.requestSubmit?.(); return {ok:true, reason:'selector_requestSubmit'};") or {}
         if not submit_result.get("ok"):
             logger.warning("[Codex][Browser] 登录密码提交按钮未找到：%s", submit_result)
             return None
