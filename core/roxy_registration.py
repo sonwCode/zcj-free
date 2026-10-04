@@ -2598,6 +2598,18 @@ def _accept_profile_consents(driver) -> int:
         return 0
 
 
+def _is_email_verified_page(snapshot: dict) -> bool:
+    """识别 OpenAI 验证完成但资料页尚未自动跳转的中间页。"""
+    if not isinstance(snapshot, dict):
+        return False
+    title = str(snapshot.get("title") or "").lower()
+    text = str(snapshot.get("text") or snapshot.get("bodyText") or "").lower()
+    url = str(snapshot.get("url") or "").lower()
+    return ("email verified" in title or "email verified" in text) and (
+        "already been verified" in text or "has been verified" in text or "email-verification" in url
+    )
+
+
 def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) -> bool:
     """等待并完成姓名/生日页；若已经登录成功则返回 False，不把它当失败。"""
     _check_manual_stop()
@@ -2607,6 +2619,7 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
     today = date.today()
     age = today.year - int(y) - ((today.month, today.day) < (int(m), int(d)))
     last_snapshot = {}
+    verified_recovery_done = False
     while time.time() < end:
         _stop_aware_sleep(1)
         if _has_access_token(driver):
@@ -2616,6 +2629,24 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
         snap = _page_snapshot(driver)
         _check_manual_stop()
         last_snapshot = snap
+        if _is_email_verified_page(snap):
+            if not verified_recovery_done:
+                verified_recovery_done = True
+                logger.warning(
+                    '%s 邮箱已验证但资料页未跳转，刷新当前认证页恢复：url=%s',
+                    _log_prefix(driver), snap.get('url'),
+                )
+                try:
+                    driver.refresh()
+                    _stop_aware_sleep(2)
+                except Exception as exc:
+                    logger.warning(
+                        '%s 刷新 Email verified 页面失败，继续等待资料页：%s: %s',
+                        _log_prefix(driver), type(exc).__name__, str(exc)[:160],
+                    )
+            else:
+                logger.info('%s Email verified 页面仍未跳转资料页，继续等待：url=%s', _log_prefix(driver), snap.get('url'))
+            continue
         if not _is_profile_like(snap):
             logger.info('%s 等待资料页中：url=%s', _log_prefix(driver), snap.get('url'))
             continue
@@ -2666,6 +2697,8 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
                 return True
             _stop_aware_sleep(1)
         logger.warning('%s 找不到可点击的资料页提交按钮 snapshot=%s', _log_prefix(driver), _page_snapshot(driver))
+    if _is_email_verified_page(last_snapshot):
+        raise RuntimeError(f'邮箱已验证但资料页导航停滞，最后页面：{last_snapshot}')
     raise RuntimeError(f'等待/填写资料页超时，最后页面：{last_snapshot}')
 
 
