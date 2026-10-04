@@ -1304,7 +1304,7 @@ def _submit_email_and_wait_next(
         _check_manual_stop()
         if advanced:
             if advanced == "login_password":
-                raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
+                raise EmailAlreadyRegistered(f"邮箱在 OpenAI 侧已存在账号（邮箱提交后进入登录密码页）: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
             logger.info("%s 重试填写邮箱前发现页面已进入下一步：%s", _log_prefix(driver), advanced)
             return advanced
         try:
@@ -1323,7 +1323,7 @@ def _submit_email_and_wait_next(
                 _check_manual_stop()
         except _EmailFlowAdvanced as exc:
             if exc.state == "login_password":
-                raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}") from exc
+                raise EmailAlreadyRegistered(f"邮箱在 OpenAI 侧已存在账号（邮箱提交后进入登录密码页）: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}") from exc
             logger.info("%s 等待邮箱输入框期间页面已进入下一步：%s", _log_prefix(driver), exc.state)
             return exc.state
         state = _email_input_value_state(driver)
@@ -1342,7 +1342,7 @@ def _submit_email_and_wait_next(
         state_name = _wait_email_submit_next_state(driver, current_email, timeout=20)
         _check_manual_stop()
         if state_name == "login_password":
-            raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
+            raise EmailAlreadyRegistered(f"邮箱在 OpenAI 侧已存在账号（邮箱提交后进入登录密码页）: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
         if state_name in ("password", "otp", "logged_in"):
             logger.info("%s 邮箱提交后已进入下一步：%s", _log_prefix(driver), state_name)
             return state_name
@@ -1354,7 +1354,7 @@ def _submit_email_and_wait_next(
         _check_manual_stop()
         if advanced:
             if advanced == "login_password":
-                raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
+                raise EmailAlreadyRegistered(f"邮箱在 OpenAI 侧已存在账号（邮箱提交后进入登录密码页）: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
             logger.info("%s 邮箱提交诊断期间页面已进入下一步：%s", _log_prefix(driver), advanced)
             return advanced
         logger.warning("%s 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", _log_prefix(driver), state_name, diagnostic_state)
@@ -2135,6 +2135,58 @@ def _click_continue_with_password_if_present(driver) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
+class EmailAlreadyRegistered(RuntimeError):
+    """邮箱在 OpenAI 侧已存在账号：本次不是注册而是登录，不能当新号继续。"""
+
+
+def _known_pool_password(email: str) -> str:
+    """读取注册阶段写回邮箱素材行的密码。"""
+    try:
+        from core import db as _db
+        return _db.get_pool_password(email)
+    except Exception:
+        return ""
+
+
+def _fill_login_password_on_page(driver, password: str, *, timeout: int = 12) -> dict:
+    """在 /log-in/password 上填入已知密码并提交。"""
+    end = time.time() + timeout
+    last: dict = {}
+    filled = False
+    while time.time() < end:
+        try:
+            result = driver.execute_script(r"""
+            const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+              && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+              && !el.disabled && !el.readOnly;
+            const input = [...document.querySelectorAll(
+              'input[type="password"],input[autocomplete="current-password"],input[name*="password" i]'
+            )].find(visible);
+            if (!input) return {ok:false, reason:'missing_password_input'};
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            if (setter) setter.call(input, String(arguments[0])); else input.value = String(arguments[0]);
+            input.dispatchEvent(new InputEvent('input', {bubbles:true, data:String(arguments[0])}));
+            input.dispatchEvent(new Event('change', {bubbles:true}));
+            input.blur();
+            return {ok:true, reason:'login_password_filled'};
+            """, str(password)) or {}
+        except Exception as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        if result.get("ok"):
+            filled = True
+            break
+        last = result
+        _stop_aware_sleep(0.5)
+    if not filled:
+        return last or {"ok": False, "reason": "missing_password_input"}
+    human_delay("form", minimum=2.0, maximum=3.6)
+    try:
+        _click_continue(driver)
+    except Exception as exc:
+        return {"ok": False, "reason": f"submit_failed: {type(exc).__name__}: {exc}"}
+    return {"ok": True, "reason": "login_password_submitted"}
+
+
 def _fill_password_page_if_present(
     driver, email: str, timeout: int = 25, _recovery_round: int = 0
 ) -> str | None:
@@ -2192,23 +2244,30 @@ def _fill_password_page_if_present(
         if not (is_signup_password or is_login_password):
             _stop_aware_sleep(0.5)
             continue
-        passwordless = _click_passwordless_signup_if_present(driver) if is_login_password else {"ok": False, "reason": "signup_password_prefers_password"}
-        if passwordless.get('ok'):
-            logger.info("%s 检测到 password 页，已点击一次性验证码入口：email=%s detail=%s", _log_prefix(driver), email, passwordless)
-            wait_end = time.time() + 20
-            while time.time() < wait_end:
-                if _is_email_verification_page(driver):
-                    logger.info("%s 一次性验证码入口已进入邮箱验证码页", _log_prefix(driver))
-                    return None
-                if _has_access_token(driver):
-                    logger.info("%s 一次性验证码入口后已检测到登录态", _log_prefix(driver))
-                    return None
-                _stop_aware_sleep(0.5)
-            logger.info("%s 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理", _log_prefix(driver))
-            return None
         if is_login_password:
-            logger.info("%s 当前是登录密码页但未找到一次性验证码入口，跳过密码填写并交给 OTP 阶段：state=%s", _log_prefix(driver), last)
-            return None
+            # 走到 /log-in/password 说明该邮箱在 OpenAI 侧已经有账号：这一次是登录，
+            # 不是注册。若注册阶段已把密码写回邮箱素材，就用它完成登录，保住密码路径
+            # （Codex 的密码登录依赖它）；否则按“已注册邮箱”处理——旧逻辑会点
+            # “使用一次性验证码登录”静默登录，产出无密码账号却记为注册成功。
+            known_password = _known_pool_password(email)
+            if known_password:
+                logger.info("%s 邮箱已注册且素材里存有密码，按登录密码页填写：%s", _log_prefix(driver), email)
+                login_fill = _fill_login_password_on_page(driver, known_password)
+                if login_fill.get("ok"):
+                    wait_end = time.time() + 20
+                    while time.time() < wait_end:
+                        if _has_access_token(driver):
+                            logger.info("%s 已用素材里保存的密码完成登录", _log_prefix(driver))
+                            return known_password
+                        if not _is_login_password_page(driver):
+                            return known_password
+                        _stop_aware_sleep(0.5)
+                    return known_password
+                logger.warning("%s 素材密码登录未成功，按已注册邮箱处理：%s", _log_prefix(driver), login_fill)
+            raise EmailAlreadyRegistered(
+                f"邮箱在 OpenAI 侧已存在账号（登录密码页，素材中"
+                f"{'有' if known_password else '无'}已保存密码）: {email}"
+            )
         password = _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
         result = driver.execute_script(r"""
@@ -2335,6 +2394,17 @@ def _fill_password_page_if_present(
             raise RuntimeError(f"密码页找不到可点击的 Continue 按钮：{submit_result} state={_password_page_state(driver)}")
         _check_manual_stop()
         logger.info("%s 已填写并点击密码页 Continue：detail=%s", _log_prefix(driver), {k: v for k, v in submit_result.items() if k != "button"})
+        # OpenAI 侧密码此刻已经生效，但本任务后续仍可能失败（例如邮箱验证码被拒），
+        # 失败时账号不会落库、密码就丢了。立即写回邮箱素材行，失败重试或复用到同一
+        # 邮箱时才能取回，避免产出"已注册但无密码"的账号。
+        try:
+            from core import db as _db
+            if _db.remember_pool_password(email, password, note="registration_password"):
+                logger.info("%s 已把本次注册密码写回邮箱素材：%s", _log_prefix(driver), email)
+            else:
+                logger.info("%s 邮箱素材中没有该邮箱，注册密码仅保留在本次运行内：%s", _log_prefix(driver), email)
+        except Exception as exc:
+            logger.warning("%s 写回注册密码失败（不影响注册流程）：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:160])
         # 高延迟代理下 Auth0 提交和导航可能明显超过 20 秒；过早进入 OTP 阶段
         # 会在 /create-account/password 上查找验证码框。这里给足提交/导航时间。
         wait_end = time.time() + 60
@@ -3249,7 +3319,11 @@ def run_roxy_registration(
         try:
             if email:
                 from core.email_provider import release_email
-                release_email(email, status="failed" if create_acknowledged else "available", note=f"Roxy注册失败: {str(exc)[:180]}")
+                if isinstance(exc, EmailAlreadyRegistered):
+                    # 邮箱已在 OpenAI 侧存在账号：停用它，避免反复复用产出无密码账号。
+                    release_email(email, status="failed", note=f"邮箱已注册: {str(exc)[:150]}")
+                else:
+                    release_email(email, status="failed" if create_acknowledged else "available", note=f"Roxy注册失败: {str(exc)[:180]}")
         except Exception:
             pass
         return {

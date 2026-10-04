@@ -796,6 +796,56 @@ def _save_generic_api_emails(rows: list[dict]) -> None:
     _save_collection("generic_api", rows)
 
 
+# 注册流程可能在中途失败（例如邮箱验证码被服务端拒绝），此时账号不会落库，
+# 但密码已经在 OpenAI 侧生效。把它写回邮箱素材行，后续失败重试或复用到同一
+# 邮箱时才能取回，否则会产出"已注册但无密码"的账号，Codex 只能退化到
+# 一次性验证码登录。邮箱池行按完整 JSON payload 保存，多写字段不影响
+# copy_line 导出（_generic_api_email_line 只取 email 与 code_url）。
+_PASSWORD_POOL_COLLECTIONS = ("generic_api", "outlook", "imap", "domain")
+
+
+def remember_pool_password(email: str, password: str, *, note: str = "") -> bool:
+    """把注册阶段设置成功的密码写回邮箱素材行；写成功返回 True。"""
+    target = str(email or "").strip()
+    secret = str(password or "").strip()
+    if not target or not secret:
+        return False
+    with _LOCK:
+        for collection in _PASSWORD_POOL_COLLECTIONS:
+            try:
+                rows = _load_collection(collection)
+            except Exception:
+                continue
+            row = _find_by_email(rows, target)
+            if row is None:
+                continue
+            row["registration_password"] = secret
+            row["registration_password_saved_at"] = _now()
+            if note:
+                row["registration_password_note"] = str(note)[:200]
+            _save_collection(collection, rows)
+            return True
+    return False
+
+
+def get_pool_password(email: str) -> str:
+    """读取邮箱素材行里保存的注册密码；不存在时返回空字符串。"""
+    target = str(email or "").strip()
+    if not target:
+        return ""
+    with _LOCK:
+        for collection in _PASSWORD_POOL_COLLECTIONS:
+            try:
+                rows = _load_collection(collection)
+            except Exception:
+                continue
+            row = _find_by_email(rows, target)
+            if row is None:
+                continue
+            return str(row.get("registration_password") or "").strip()
+    return ""
+
+
 def _load_imap_emails() -> list[dict]:
     return _load_collection("imap")
 

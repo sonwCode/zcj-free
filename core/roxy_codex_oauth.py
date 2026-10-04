@@ -346,7 +346,15 @@ def _account_password_for_email(email: str) -> str:
     if cached:
         return cached
     try:
-        return _codex_proto._account_registration_password(email)
+        stored = _codex_proto._account_registration_password(email)
+    except Exception:
+        stored = ""
+    if stored:
+        return stored
+    # 账号还没落库（任务中途失败）时查库必然为空；注册阶段已把密码写回邮箱素材行。
+    try:
+        from core import db as _db
+        return _db.get_pool_password(email)
     except Exception:
         return ""
 

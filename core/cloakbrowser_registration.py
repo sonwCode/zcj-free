@@ -299,7 +299,12 @@ def _run_cloak_registration_impl(
         try:
             if email:
                 from core.email_provider import release_email
-                release_email(email, status="failed" if create_acknowledged else "available", note=f"Cloak注册失败: {str(exc)[:180]}")
+                from core.roxy_registration import EmailAlreadyRegistered
+                if isinstance(exc, EmailAlreadyRegistered):
+                    # 邮箱已在 OpenAI 侧存在账号：停用它，避免反复复用产出无密码账号。
+                    release_email(email, status="failed", note=f"邮箱已注册: {str(exc)[:150]}")
+                else:
+                    release_email(email, status="failed" if create_acknowledged else "available", note=f"Cloak注册失败: {str(exc)[:180]}")
         except Exception:
             pass
         return {
