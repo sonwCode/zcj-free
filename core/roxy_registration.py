@@ -3075,12 +3075,16 @@ def run_roxy_registration(
             )
 
         current_otp = otp_code
+        used_otps: set[str] = set()
         max_otp_attempts = 3
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Roxy注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
                 try:
-                    current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                    candidate_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                    if candidate_otp and str(candidate_otp) in used_otps:
+                        raise RuntimeError("重复验证码，等待重新发送")
+                    current_otp = candidate_otp
                 except Exception as exc:
                     if otp_attempt >= max_otp_attempts:
                         raise
@@ -3097,6 +3101,8 @@ def run_roxy_registration(
                             "[Roxy注册][OTP] 取码接口超时但宽松取到最新验证码，直接重试提交：%s (fallback)",
                             fallback_otp,
                         )
+                        if str(fallback_otp) in used_otps:
+                            raise RuntimeError("重复验证码，等待重新发送")
                         current_otp = fallback_otp
                         continue
                     logger.warning(
@@ -3111,6 +3117,7 @@ def run_roxy_registration(
                     human_delay("api")
                     current_otp = None
                     continue
+            used_otps.add(str(current_otp))
             logger.info("[Roxy注册][OTP] 收到验证码：%s", current_otp)
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
