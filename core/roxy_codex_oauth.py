@@ -398,13 +398,15 @@ def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 15) -> boo
             const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
               && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
               && !el.disabled && !el.readOnly;
-            const form = [...document.querySelectorAll('form')].find(f => /\/mfa-challenge/i.test(f.getAttribute('action') || ''));
-            if (!form) return {ok:false, reason:'missing_form'};
-            const input = [...form.querySelectorAll('input[name="code"], input[autocomplete="one-time-code"], input[maxlength="6"]')].find(visible);
+            const inputs = [...document.querySelectorAll('input[name="code"], input[autocomplete="one-time-code"], input[maxlength="6"], input[inputmode="numeric"]')];
+            const input = inputs.find(visible);
             if (!input) return {ok:false, reason:'missing_code_input'};
-            const button = [...form.querySelectorAll('button[type="submit"], button[data-dd-action-name="Continue"], button')].find(visible);
+            const form = input.closest('form');
+            const scope = form || document;
+            const buttons = [...scope.querySelectorAll('button[type="submit"], input[type="submit"], button[data-dd-action-name="Continue"], button')];
+            const button = buttons.find(el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true');
             if (!button) return {ok:false, reason:'missing_submit'};
-            return {ok:true, input, button};
+            return {ok:true, input, button, hasForm:!!form};
             """) or {}
             if not result.get("ok"):
                 _stop_sleep(0.4)

@@ -37,6 +37,13 @@ class CodexOtpRoutingTests(unittest.TestCase):
         self.assertIn("_account_totp_code_for_email(email)", body)
         self.assertIn("codex_mfa_submit", body)
 
+    def test_mfa_form_does_not_require_action_attribute(self):
+        body = _source("_fill_mfa_challenge_if_present")
+        self.assertIn('input[inputmode=\"numeric\"]', body)
+        self.assertIn('const form = input.closest(\'form\');', body)
+        self.assertIn('const scope = form || document;', body)
+        self.assertNotIn('find(f => /\\/mfa-challenge/i.test(f.getAttribute(\'action\') || ''))', body)
+
     def test_password_and_mfa_errors_are_re_raised(self):
         body = _source("_fill_email_and_otp")
         self.assertGreaterEqual(body.count('message.startswith("Codex 密码提交后")'), 2)
