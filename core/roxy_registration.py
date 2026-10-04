@@ -1934,8 +1934,20 @@ def _resubmit_signup_password_form(driver) -> dict:
         const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
           .find(visible);
         const form = input?.closest('form');
-        const button = form ? [...form.querySelectorAll('button[type="submit"],input[type="submit"],button')]
-          .find(el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true') : null;
+        // requestSubmit() 只接受真正的提交按钮，传其它元素会抛
+        // "The specified element is not a submit button"。这里必须显式排除
+        // type="button"：密码页第一个按钮就是 type="button"（显示/隐藏密码），
+        // 旧选择器 'button[type=submit],input[type=submit],button' 是 OR 语义，
+        // 会把它选出来，导致这个兜底从上线起就从未生效。
+        const submitButtons = form ? [...form.querySelectorAll('button,input[type="submit"]')]
+          .filter(el => {
+            const type = String(el.getAttribute('type') || 'button').toLowerCase();
+            const tag = el.tagName.toLowerCase();
+            const isSubmit = tag === 'input' ? type === 'submit' : type === 'submit';
+            return isSubmit && visible(el) && !el.disabled
+              && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+          }) : [];
+        const button = submitButtons[0] || null;
         const errors = [...document.querySelectorAll('[role="alert"],[aria-live="assertive"],[aria-live="polite"],.react-aria-FieldError,[slot="errorMessage"],[class*="error"]')]
           .filter(visible).map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 10);
         if (!input || !form) return {ok:false, reason:'missing_password_form', url:location.href, errors};
@@ -2254,8 +2266,30 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         const target = scored[0]?.el;
         if (!target) return {ok:false, reason:'missing_enabled_submit'};
         target.scrollIntoView({block:'center'});
-        try { target.click(); }
-        catch (_) { target.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); }
+        // 密码页主提交按钮同样必须派发完整指针序列。Chromium 只对真实指针
+        // 序列生成 trusted click 并触发表单导航，裸 target.click() 只产生
+        // 合成事件，React 手势判定不认，导航不会发起，函数却会报告
+        // clicked_enabled_submit，形成“日志说点了、页面停在密码页”的假成功。
+        const rect = target.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const base = {bubbles:true, cancelable:true, composed:true, view:window,
+                      clientX:cx, clientY:cy, button:0, buttons:1};
+        try {
+          target.dispatchEvent(new PointerEvent('pointerover', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          target.dispatchEvent(new PointerEvent('pointerenter', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          target.dispatchEvent(new MouseEvent('mouseover', {...base, buttons:0}));
+          target.dispatchEvent(new MouseEvent('mouseenter', {...base, buttons:0}));
+          target.dispatchEvent(new MouseEvent('mousemove', {...base, buttons:0}));
+          target.dispatchEvent(new PointerEvent('pointerdown', {...base, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          target.dispatchEvent(new MouseEvent('mousedown', base));
+          if (typeof target.focus === 'function') target.focus({preventScroll:true});
+          target.dispatchEvent(new PointerEvent('pointerup', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          target.dispatchEvent(new MouseEvent('mouseup', {...base, buttons:0}));
+          target.click();
+        } catch (err) {
+          return {ok:false, reason:'dispatch_failed', error:String(err)};
+        }
         return {
           ok:true,
           reason:'clicked_enabled_submit',
