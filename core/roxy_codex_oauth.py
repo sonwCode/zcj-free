@@ -1859,6 +1859,115 @@ def _force_submit_add_phone_form(driver) -> dict:
         return {ok:false, reason:f'{type(exc).__name__}: {exc}', url:getattr(driver, 'current_url', '')}
 
 
+def _phone_state_digest(state: dict) -> str:
+    """把 add-phone 页的关键状态压成一行，便于在日志里完整看出卡点。
+
+    失败信息里的 state 会被截断到 240 字符，只能看到第一个 radio，
+    无法判断 SMS 到底有没有保住。这里单独输出通道勾选与号码字段状态。
+    """
+    if not isinstance(state, dict):
+        return "state=<invalid>"
+    channels = " ".join(
+        f"{str(item.get('value') or '-')}={'Y' if item.get('checked') else 'n'}"
+        for item in (state.get("radios") or [])
+    ) or "-"
+    fields = []
+    for item in (state.get("inputs") or []):
+        itype = str(item.get("type") or "").lower()
+        name = str(item.get("name") or "").lower()
+        if itype == "tel" or "phone" in name or str(item.get("autocomplete") or "").lower() == "tel":
+            fields.append(
+                f"{itype or 'tel'}({name or '-'}):len={len(str(item.get('value') or ''))}"
+                f":invalid={item.get('ariaInvalid') or '-'}"
+            )
+    return f"channels=[{channels}] fields=[{'; '.join(fields) or '-'}]"
+
+
+# 这些失败表示“页面没有推进”，多半是提交时序问题而不是号码被服务端拒绝。
+# 同一号码重新提交一次通常就能过去，比直接换号便宜得多（换号还会连带取消/消耗一个号码）。
+_PHONE_RESUBMIT_HINTS = (
+    "send_not_accepted",
+    "whatsapp_channel_reverted",
+    "phone_number_required",
+    "sms_channel_select_failed",
+)
+
+# 这些是明确的号码/账号/依赖问题，换号才有意义，不原地重试。
+_PHONE_SWITCH_HINTS = (
+    "invalid_phone",
+    "invalid_phone_code",
+    "delivery_refused",
+    "send_limited",
+    "phone_in_use",
+    "whatsapp_channel:",
+    "invalid_auth_step",
+)
+
+
+def _is_repeatable_phone_submit_error(exc: object) -> bool:
+    """判断这次失败值不值得用同一个号码再提交一次。
+
+    换号对“页面没推进”这类失败无效：下一个号码会以完全相同的方式卡住，
+    结果是烧掉一批号码却看不出真因。只有确认号码被拒/通道确实不可用才换号。
+    """
+    text = str(exc or "").lower()
+    if not text:
+        return False
+    if any(k in text for k in _PHONE_SWITCH_HINTS):
+        return False
+    return any(k in text for k in _PHONE_RESUBMIT_HINTS)
+
+
+def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict:
+    """在 add-phone 页填写号码、选择 SMS 通道并点击提交。
+
+    同一号码需要重复提交时复用同一套步骤，避免复制粘贴导致两处逻辑漂移。
+    """
+    logger.info("[Codex][Browser] 准备手机号输入页，重新设置新手机号%s", label)
+    _ensure_add_phone_input(driver, reason=f"add-phone{label}")
+    phone_fill = _set_phone_value(driver, e164, timeout=10)
+    logger.info(
+        "[Codex][Browser] 已重新设置手机号：e164=%s visible=%s hidden=%s dialCode=%s country=%s",
+        phone_fill.get("e164"), phone_fill.get("actualVisible"), phone_fill.get("hiddenValue") or "-",
+        phone_fill.get("dialCode") or "-",
+        (str(phone_fill.get("selectedText") or "-") + (" [changed]" if phone_fill.get("selectedChanged") else "")),
+    )
+    _blur_active_input_and_wait(driver, label="手机号输入完成")
+    dial_code = str(phone_fill.get("dialCode") or "")
+    phone_verify = _verify_add_phone_value_before_submit(driver, e164, dial_code)
+    logger.info(
+        "[Codex][Browser] 手机号提交前校验通过：visible=%s hidden=%s dialCode=%s country=%s",
+        phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-",
+        phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
+    )
+    logger.info("[Codex][Browser] 检查并选择 SMS 短信通道")
+    _select_sms_channel_or_raise(driver)
+    _blur_active_input_and_wait(driver, label="短信通道确认完成")
+    # 选择通道会让 add-phone 表单整体重新渲染，已填的手机号可能被 React 用组件
+    # 状态（空）覆盖回 DOM。提交前必须重新校验并按需重填。
+    try:
+        _verify_add_phone_value_before_submit(driver, e164, dial_code)
+    except RuntimeError as verify_exc:
+        logger.warning(
+            "[Codex][Browser] 选择短信通道后手机号已丢失，重新填写：%s",
+            str(verify_exc)[:200],
+        )
+        phone_fill = _set_phone_value(driver, e164, timeout=10)
+        _blur_active_input_and_wait(driver, label="手机号重填完成")
+        phone_verify = _verify_add_phone_value_before_submit(
+            driver, str(phone_fill.get("e164") or e164), str(phone_fill.get("dialCode") or dial_code),
+        )
+        logger.info(
+            "[Codex][Browser] 重填后校验通过：visible=%s hidden=%s dialCode=%s country=%s",
+            phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-",
+            phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
+        )
+    submit_info = _click_add_phone_continue_button(driver, timeout=10)
+    logger.info("[Codex][Browser] 已点击手机号 Continue/続行 按钮：%s，等待进入短信验证码页", submit_info)
+    _wait_page_settle_after_submit()
+    return submit_info
+
+
 def _wait_after_phone_send(driver, timeout: int = 12) -> str:
     end = time.time() + timeout
     last = {}
@@ -1873,6 +1982,10 @@ def _wait_after_phone_send(driver, timeout: int = 12) -> str:
         body = str(last.get('bodyText') or '')
         reason = _classify_phone_page_failure(last)
         if reason:
+            logger.warning(
+                "[Codex][Browser] 手机号页判定失败：reason=%s url=%s %s",
+                reason, str(last.get("url") or "-")[:120], _phone_state_digest(last),
+            )
             raise RuntimeError(f"{reason}: {body[:240]}")
         # 仍在 add-phone 且字段有 aria-invalid，认为号码被拒。
         if _is_add_phone_page(driver):
@@ -1888,6 +2001,10 @@ def _wait_after_phone_send(driver, timeout: int = 12) -> str:
     if _is_phone_code_state(last) or _is_phone_code_page(driver):
         return 'code_page'
     if _is_add_phone_page(driver):
+        logger.warning(
+            "[Codex][Browser] 手机号提交后仍停留在 add-phone：url=%s %s",
+            str(last.get("url") or "-")[:120], _phone_state_digest(last),
+        )
         raise RuntimeError(f"send_not_accepted: 提交后仍停留在 add-phone state={last}")
     return 'unknown'
 
@@ -1945,12 +2062,18 @@ def _phone_otp_outcome_accepted(outcome: str) -> bool:
 def _classify_phone_page_failure(state: dict) -> str:
     if _is_phone_code_state(state):
         return ''
-    # 页面会同时展示 SMS/WhatsApp 文案；只有实际勾选或仅存在 WhatsApp 选项时才归因到 WhatsApp。
+    # 页面会同时展示 SMS/WhatsApp 文案。这里必须区分两种完全不同的情况：
+    #   - 页面只提供 WhatsApp（没有 SMS 选项）：可能与该号码所属地区有关，换号有意义；
+    #   - 我们刚成功勾选 SMS，提交后 WhatsApp 又被勾上：是选择没保住的本机交互问题，
+    #     与号码无关，换号解决不了，只会继续烧号。
+    # 两者共用一个标记会让重试策略无从选择，因此拆开上报。
     radios = state.get('radios') or []
     radio_values = [str(r.get('value', '')).lower().replace(' ', '') for r in radios]
+    has_sms_option = any('sms' in value or 'text' in value for value in radio_values)
     if any('whatsapp' in value and radio.get('checked') for value, radio in zip(radio_values, radios)):
-        return 'whatsapp_channel'
-    if any('whatsapp' in value for value in radio_values) and not any('sms' in value for value in radio_values):
+        # SMS 选项存在却让 WhatsApp 保持勾选 → 通道选择回退，不是号码问题。
+        return 'whatsapp_channel_reverted' if has_sms_option else 'whatsapp_channel'
+    if any('whatsapp' in value for value in radio_values) and not has_sms_option:
         return 'whatsapp_channel'
     text = str(state.get('bodyText') or '').lower()
     if 'invalid_auth_step' in text or 'invalid auth step' in text:
@@ -2041,58 +2164,32 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     snapshot.get("country") or "unknown", price,
                     snapshot.get("price_limit_max") or "unlimited", snapshot.get("price_validated", False),
                 )
-                logger.info("[Codex][Browser] 准备手机号输入页，重新设置新手机号")
-                _ensure_add_phone_input(driver, reason=f"attempt-{attempt}")
-                phone_fill = _set_phone_value(driver, f"+{phone}", timeout=10)
-                logger.info(
-                    "[Codex][Browser] 已重新设置手机号：e164=%s visible=%s hidden=%s dialCode=%s country=%s",
-                    phone_fill.get("e164"), phone_fill.get("actualVisible"), phone_fill.get("hiddenValue") or "-",
-                    phone_fill.get("dialCode") or "-", (str(phone_fill.get("selectedText") or "-") + (" [changed]" if phone_fill.get("selectedChanged") else "")),
-                )
-                _blur_active_input_and_wait(driver, label="手机号输入完成")
-                phone_verify = _verify_add_phone_value_before_submit(
-                    driver,
-                    str(phone_fill.get("e164") or f"+{phone}"),
-                    str(phone_fill.get("dialCode") or ""),
-                )
-                logger.info(
-                    "[Codex][Browser] 手机号提交前校验通过：visible=%s hidden=%s dialCode=%s country=%s",
-                    phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-",
-                    phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
-                )
-                logger.info("[Codex][Browser] 检查并选择 SMS 短信通道")
-                _select_sms_channel_or_raise(driver)
-                _blur_active_input_and_wait(driver, label="短信通道确认完成")
-                # 选择通道会让 add-phone 表单整体重新渲染，已填的手机号可能被
-                # React 用组件状态（空）覆盖回 DOM。提交前必须重新校验并按需重填，
-                # 否则服务端只会回一条 "Phone number required"，白白消耗一个号码。
-                e164 = str(phone_fill.get("e164") or ("+" + str(phone)))
-                dial_code = str(phone_fill.get("dialCode") or "")
-                try:
-                    _verify_add_phone_value_before_submit(driver, e164, dial_code)
-                except RuntimeError as verify_exc:
-                    logger.warning(
-                        "[Codex][Browser] 选择短信通道后手机号已丢失，重新填写：%s",
-                        str(verify_exc)[:200],
+                e164 = f"+{phone}"
+                # 同一号码先原地重提交一次，再考虑换号。失败大多不是号码被拒，
+                # 而是提交时序问题；换号对这种情况无效，只会连着烧掉一批号码，
+                # 还让日志里每次失败都长成不同的样子，掩盖真正卡点。
+                sms_cfg = getattr(sms_provider, "_cfg", None)
+                submit_rounds = max(1, int(getattr(sms_cfg, "SMS_NUMBER_SUBMIT_ROUNDS", 2) or 2))
+                submit_error: Exception | None = None
+                for submit_round in range(1, submit_rounds + 1):
+                    if submit_round > 1:
+                        logger.warning(
+                            "[Codex][Browser] 号码未换，原地重新填写并再次提交（第 %s/%s 次）：%s",
+                            submit_round, submit_rounds, str(submit_error)[:160],
+                        )
+                    _prepare_and_submit_add_phone(
+                        driver, e164, label=f"-attempt-{attempt}-submit-{submit_round}",
                     )
-                    phone_fill = _set_phone_value(driver, e164, timeout=10)
-                    _blur_active_input_and_wait(driver, label="手机号重填完成")
-                    phone_verify = _verify_add_phone_value_before_submit(
-                        driver,
-                        str(phone_fill.get("e164") or e164),
-                        str(phone_fill.get("dialCode") or dial_code),
-                    )
-                    logger.info(
-                        "[Codex][Browser] 重填后校验通过：visible=%s hidden=%s dialCode=%s country=%s",
-                        phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-",
-                        phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
-                    )
-                submit_info = _click_add_phone_continue_button(driver, timeout=10)
-                logger.info("[Codex][Browser] 已点击手机号 Continue/続行 按钮：%s，等待进入短信验证码页", submit_info)
-                _wait_page_settle_after_submit()
-
-                # 等待页面进入 phone-verification；若号码无效/无法发送/WhatsApp 通道，立即换号。
-                _wait_after_phone_send(driver, timeout=15)
+                    try:
+                        _wait_after_phone_send(driver, timeout=15)
+                        submit_error = None
+                        break
+                    except Exception as send_exc:
+                        submit_error = send_exc
+                        if not _is_repeatable_phone_submit_error(send_exc):
+                            raise
+                if submit_error is not None:
+                    raise submit_error
                 logger.info("[Codex][Browser] 已进入手机验证码页")
 
                 sms_provider.set_status(activation_id, 1, http=http)
