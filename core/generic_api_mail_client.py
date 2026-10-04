@@ -11,6 +11,7 @@
 import json
 import logging
 import re
+import threading
 import time
 from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 import base64
@@ -26,6 +27,28 @@ from config import email as _email_cfg
 from core.otp_utils import extract_otp
 
 logger = logging.getLogger(__name__)
+
+# 公开取码服务（Remail / yangyang 等）通常挂在 Cloudflare 后面，对同一出口 IP
+# 的瞬时并发 TLS 连接有硬限制。多任务补跑时同时取码会被直接 RST 掉握手，
+# 表现为 SSLError: UNEXPECTED_EOF_WHILE_READING。串行化取码请求可彻底避免，
+# 对单个任务的影响只是取码轮次略慢，远小于持续失败重试的代价。
+_PICKUP_LOCK = threading.RLock()
+
+# TLS/连接类错误需要退避：固定 3 秒重试会持续撞在限流窗口上。
+_PICKUP_TRANSIENT_MARKERS = (
+    "sslerror", "ssl_error_syscall", "unexpected_eof", "eof occurred",
+    "connection reset", "connection aborted", "connection refused",
+    "remotedisconnected", "protocolerror", "badstatusline",
+    "max retries exceeded", "read timed out", "temporarily unavailable",
+)
+
+
+def _is_pickup_transient_error(exc: BaseException | str) -> bool:
+    """判断取码失败是否属于连接/TLS 类瞬时错误（应退避重试）。"""
+    text = str(exc or "").lower()
+    if not text:
+        return False
+    return any(marker in text for marker in _PICKUP_TRANSIENT_MARKERS)
 
 _CODE_REGEX = re.compile(r"\b(\d{6})\b")
 _CONTEXT_WORDS = ("code", "verify", "verification", "验证码", "代码", "确认码", "認証", "コード")
@@ -812,23 +835,35 @@ def _fetch_poll_payload(
     is_yangyang: bool,
     public_inbox_api_url: str | None,
 ):
-    """执行单次取码请求，网络路由由调用方指定。"""
-    session = _new_http_session(proxy_url)
-    yy_result = (
-        _fetch_yangyang_otp(session, poll_url, headers, after_ts=after_ts)
-        if is_yangyang else None
-    )
-    public_result = (
-        _fetch_public_inbox_page_otp(
-            session, poll_url, email, headers, after_ts=after_ts,
-        )
-        if public_inbox_api_url else None
-    )
-    page_result = yy_result or public_result
-    if page_result or is_yangyang or public_inbox_api_url:
-        return page_result, yy_result, None, ""
-    resp = session.get(poll_url, headers=headers, timeout=20, verify=False)
-    return None, None, resp, resp.text or ""
+    """执行单次取码请求，网络路由由调用方指定。
+
+    全局串行：同一时刻只允许一个取码请求在途。并发的 TLS 握手会被公开
+    取码服务前置的 Cloudflare 直接重置，串行化比"并发然后重试"更可靠。
+    session 用后即关，避免连接与文件描述符随轮次累积。
+    """
+    with _PICKUP_LOCK:
+        session = _new_http_session(proxy_url)
+        try:
+            yy_result = (
+                _fetch_yangyang_otp(session, poll_url, headers, after_ts=after_ts)
+                if is_yangyang else None
+            )
+            public_result = (
+                _fetch_public_inbox_page_otp(
+                    session, poll_url, email, headers, after_ts=after_ts,
+                )
+                if public_inbox_api_url else None
+            )
+            page_result = yy_result or public_result
+            if page_result or is_yangyang or public_inbox_api_url:
+                return page_result, yy_result, None, ""
+            resp = session.get(poll_url, headers=headers, timeout=20)
+            return None, None, resp, resp.text or ""
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 def fetch_latest_otp(
@@ -889,6 +924,7 @@ def fetch_latest_otp(
     )
 
     attempt = 0
+    transient_failures = 0
     while time.time() < deadline:
         attempt += 1
         try:
@@ -1055,6 +1091,10 @@ def fetch_latest_otp(
                 last_error = f"HTTP {resp.status_code}: {text[:160]}"
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
+            if _is_pickup_transient_error(exc):
+                transient_failures += 1
+        else:
+            transient_failures = 0
 
         now = time.time()
         if best_otp and settle_until is not None and now >= settle_until:
@@ -1075,7 +1115,17 @@ def fetch_latest_otp(
                 f"[GenericAPI] 暂未从取码接口拿到验证码，"
                 f"{interval}s 后重试（剩余 {remaining}s）..."
             )
-        _stop_sleep(interval)
+        if transient_failures:
+            # TLS/连接类失败按指数退避，避免固定间隔持续撞在限流窗口上。
+            backoff = min(interval * (2 ** min(transient_failures, 4)), 30)
+            if backoff > interval:
+                logger.warning(
+                    "[GenericAPI] 连续 %s 次连接类失败，退避到 %ss 后重试：%s",
+                    transient_failures, backoff, last_error[:160],
+                )
+            _stop_sleep(max(interval, backoff))
+        else:
+            _stop_sleep(interval)
 
     if best_otp:
         logger.warning("[GenericAPI] 总超时但已有候选，返回 OTP：length=%s", len(best_otp))
