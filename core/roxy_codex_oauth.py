@@ -35,6 +35,7 @@ from core.roxy_registration import (
     _click_email_entry_option,
     _type_otp,
     _clear_otp_inputs,
+    _visible,
     _email_otp_page_state,
     _is_email_verification_page,
     _is_login_password_page,
@@ -416,6 +417,33 @@ def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 15) -> boo
     return False
 
 
+def _human_type_password_by_selector(driver, password: str) -> None:
+    """在登录密码页定位密码框并逐字符输入。
+
+    参考实现直接使用 execute_script 返回的 input/button 元素句柄，但 Cloak 适配层
+    无法把对象里的元素句柄序列化回来（handle.json_value() 遇到元素会抛错），
+    因此这里按选择器重新定位元素，再交给 _human_type_text 输入。
+    """
+    for selector in (
+        "input[type='password']",
+        "input[name*='password']",
+        "input[autocomplete='current-password']",
+    ):
+        try:
+            elements = driver.find_elements("css selector", selector)
+        except Exception as exc:
+            logger.debug(
+                "%s 密码输入框定位失败 selector=%s：%s: %s",
+                _codex_prefix(), selector, type(exc).__name__, exc,
+            )
+            continue
+        for element in elements:
+            if _visible(element):
+                _human_type_text(driver, element, password, clear=True)
+                return
+    raise RuntimeError("missing_password_input: 登录密码页未找到可输入的密码框")
+
+
 def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> str | None:
     """Codex OAuth 若账号有密码，优先在登录密码页输入密码。返回 next_step / email_otp / None。"""
     password = _account_password_for_email(email)
@@ -458,9 +486,6 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
         if not result.get("ok"):
             logger.info("[Codex][Browser] 登录密码页未找到输入/提交按钮：%s", result)
             _stop_sleep(0.5)
-            continue
-        if not result.get("ok"):
-            logger.info("[Codex][Browser] 登录密码页目标未找到：%s", result)
             continue
         _human_type_password_by_selector(driver, password)
         human_delay("form", minimum=2.0, maximum=3.6)
@@ -508,7 +533,14 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         else:
             _maybe_click_passwordless_after_email(driver, email, timeout=18)
     except Exception as exc:
-        logger.info("[Codex][Browser] 未检测到邮箱输入框，可能已登录或进入下一步：%s", str(exc)[:120])
+        # 这里本意是“页面没有邮箱输入框 → 可能已登录或已进入下一步”。但宽泛捕获
+        # 会把真正的代码缺陷伪装成正常分支（历史上 _human_type_password_by_selector
+        # 未定义就是这样被吞掉的，导致 Codex 登录密码页从未填成功过）。
+        # 因此改为显式打出异常类型，便于定位。
+        logger.warning(
+            "[Codex][Browser] 邮箱/密码步骤异常，按已进入下一步继续：%s: %s",
+            type(exc).__name__, str(exc)[:180],
+        )
         return
 
     # 提交邮箱后不再执行任何全局“继续/授权/分支”兜底点击；后续只等待验证码页。
@@ -1745,9 +1777,35 @@ def _click_add_phone_continue_button(driver, *, timeout: int = 10) -> dict:
                 except Exception:
                     text = ''
                 try:
-                    btn.click()
+                    # 用完整指针序列而不是裸 btn.click()。React / React-Aria 的提交
+                    # 按钮只对真实指针序列触发表单提交，合成 click 常常只让按钮聚焦、
+                    # 表单根本没提交，页面停在原地；随后这个“没提交”会被页面固定文案
+                    # 误判成号码问题，白白换掉一个正常号码。
+                    driver.execute_script(r"""
+                    const btn = arguments[0];
+                    const rect = btn.getBoundingClientRect();
+                    const cx = rect.left + rect.width / 2;
+                    const cy = rect.top + rect.height / 2;
+                    const base = {bubbles:true, cancelable:true, composed:true, view:window,
+                                  clientX:cx, clientY:cy, button:0, buttons:1};
+                    try {
+                      btn.dispatchEvent(new PointerEvent('pointerover', Object.assign({}, base, {buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true})));
+                      btn.dispatchEvent(new PointerEvent('pointerenter', Object.assign({}, base, {buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true})));
+                      btn.dispatchEvent(new MouseEvent('mouseover', Object.assign({}, base, {buttons:0})));
+                      btn.dispatchEvent(new MouseEvent('mouseenter', Object.assign({}, base, {buttons:0})));
+                      btn.dispatchEvent(new MouseEvent('mousemove', Object.assign({}, base, {buttons:0})));
+                      btn.dispatchEvent(new PointerEvent('pointerdown', Object.assign({}, base, {pointerId:1, pointerType:'mouse', isPrimary:true})));
+                      btn.dispatchEvent(new MouseEvent('mousedown', base));
+                      if (typeof btn.focus === 'function') btn.focus({preventScroll:true});
+                      btn.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, base, {buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true})));
+                      btn.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, {buttons:0})));
+                      btn.click();
+                    } catch (err) {
+                      btn.click();
+                    }
+                    """, btn)
                     _wait_page_settle_after_submit()
-                    return {"ok": True, "method": "click", "text": text}
+                    return {"ok": True, "method": "pointer_sequence", "text": text}
                 except Exception as click_exc:
                     last = click_exc
                     submitted = driver.execute_script(r"""
@@ -1893,7 +1951,20 @@ def _classify_phone_page_failure(state: dict) -> str:
         'phone number required', 'phone number is required', 'please enter a phone number',
         '请输入手机号', '请输入手机号码', '手机号必填', '電話番号を入力',
     )):
-        return 'phone_number_required'
+        # 这段文案是 add-phone 页的固定说明（"Phone number required / Add your
+        # phone number to continue..."），输入框里明明有号码时它照样在。只有
+        # 号码确实为空才算真缺号码；否则会把“表单根本没提交成功”误报成号码问题，
+        # 掩盖真实原因并白换一个号码。
+        phone_filled = any(
+            str(item.get('value') or '').strip()
+            for item in (state.get('inputs') or [])
+            if str(item.get('type') or '').lower() == 'tel'
+            or 'phone' in str(item.get('name') or '').lower()
+            or str(item.get('autocomplete') or '').lower() == 'tel'
+        )
+        if not phone_filled:
+            return 'phone_number_required'
+        return ''
     if any(k in text for k in ('invalid phone', 'not a valid phone', 'phone number is not valid', '号码无效', '手机号无效')):
         return 'invalid_phone'
     if any(k in text for k in (
