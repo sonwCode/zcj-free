@@ -574,10 +574,12 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         else:
             _maybe_click_passwordless_after_email(driver, email, timeout=18)
     except Exception as exc:
-        # 这里本意是“页面没有邮箱输入框 → 可能已登录或已进入下一步”。但宽泛捕获
-        # 会把真正的代码缺陷伪装成正常分支（历史上 _human_type_password_by_selector
-        # 未定义就是这样被吞掉的，导致 Codex 登录密码页从未填成功过）。
-        # 因此改为显式打出异常类型，便于定位。
+        # 页面仍在密码页或 MFA 分支失败时必须向上抛出；否则外层会继续手机号和
+        # callback，制造一个看似进入下一步但最终只能超时的假状态。
+        message = str(exc)
+        if message.startswith("Codex 密码提交后") or message.startswith("Codex MFA 页面"):
+            logger.error("[Codex][Browser] 邮箱/密码步骤终止：%s: %s", type(exc).__name__, message)
+            raise
         logger.warning(
             "[Codex][Browser] 邮箱/密码步骤异常，按已进入下一步继续：%s: %s",
             type(exc).__name__, str(exc)[:180],
@@ -623,9 +625,13 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             else:
                 _maybe_click_passwordless_after_email(driver, email, timeout=12)
         except Exception as exc:
+            message = str(exc)
+            if message.startswith("Codex 密码提交后") or message.startswith("Codex MFA 页面"):
+                logger.error("[Codex][Browser] 重新提交邮箱后流程终止：%s: %s", type(exc).__name__, message)
+                raise
             # 如果重进授权地址后已经停在验证码/下一步页面，就不要再强行提交。
             if not _is_email_verification_page(driver):
-                logger.warning("[Codex][Browser] 重新提交邮箱失败，继续按当前页面轮询：%s", str(exc)[:180])
+                logger.warning("[Codex][Browser] 重新提交邮箱失败，继续按当前页面轮询：%s", message[:180])
             else:
                 logger.info("[Codex][Browser] 重开授权后已在邮箱 OTP 页面")
         human_delay("api")

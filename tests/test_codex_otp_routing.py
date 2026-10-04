@@ -37,6 +37,12 @@ class CodexOtpRoutingTests(unittest.TestCase):
         self.assertIn("_account_totp_code_for_email(email)", body)
         self.assertIn("codex_mfa_submit", body)
 
+    def test_password_and_mfa_errors_are_re_raised(self):
+        body = _source("_fill_email_and_otp")
+        self.assertGreaterEqual(body.count('message.startswith("Codex 密码提交后")'), 2)
+        self.assertGreaterEqual(body.count('message.startswith("Codex MFA 页面")'), 2)
+        self.assertGreaterEqual(body.count("raise\n"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
