@@ -96,6 +96,8 @@ class CodexPasswordStateTests(unittest.TestCase):
         self.assertIn("def _unwrap_cloak_element", registration_text)
         self.assertIn("return el", registration_text)
         self.assertIn("target = _unwrap_cloak_element(el)", registration_text)
+        self.assertIn('if callable(getattr(el, "_eval", None))', registration_text)
+        self.assertIn("el.click()", registration_text)
         self.assertIn("driver.execute_script", registration_text)
         self.assertIn(", target)", registration_text)
 

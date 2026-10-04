@@ -311,6 +311,15 @@ def _unwrap_cloak_element(el):
 
 
 def _human_scroll_to(driver, el) -> None:
+    # CloakElement 的 locator/handle 由适配层自己管理，直接把包装对象交给
+    # page.evaluate 会在 Playwright 层触发 scrollIntoView TypeError。
+    if callable(getattr(el, "_eval", None)):
+        try:
+            block = random.choice(["center", "nearest", "center"])
+            el._eval("(node, value) => node.scrollIntoView({block: value, inline: 'nearest'})", block)
+            return
+        except Exception:
+            pass
     target = _unwrap_cloak_element(el)
     try:
         block = random.choice(["center", "nearest", "center"])
@@ -336,6 +345,12 @@ def _human_click(driver, el, *, label: str = "") -> None:
     """
     target = _unwrap_cloak_element(el)
     _human_scroll_to(driver, el)
+    # CloakElement.click() 使用自己的 Playwright locator/handle；不要把包装对象
+    # 传进 execute_script/CDP 参数序列化。
+    if callable(getattr(el, "_eval", None)):
+        human_delay("click")
+        el.click()
+        return
     if not _browser_actions_enabled():
         _stop_aware_sleep(0.2)
         el.click()
