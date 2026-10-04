@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from core.cloakbrowser_driver import CloakElement
+from core.cloakbrowser_driver import CloakElement, CloakSeleniumDriver
 from core.stop_control import StopRequested
 
 
@@ -39,7 +39,44 @@ class _Page:
         self.keyboard = _Keyboard()
 
 
+class _ElementHandle:
+    def __init__(self, name):
+        self.name = name
+        self.disposed = False
+
+    def as_element(self):
+        return self
+
+    def dispose(self):
+        self.disposed = True
+
+
+class _ObjectHandle:
+    def __init__(self, properties):
+        self.properties = properties
+
+    def get_properties(self):
+        return self.properties
+
+    def as_element(self):
+        return None
+
+    def dispose(self):
+        pass
+
+
 class CloakElementCompatibilityTests(unittest.TestCase):
+    def test_nested_script_elements_remain_cloak_elements(self):
+        input_handle = _ElementHandle("input")
+        button_handle = _ElementHandle("button")
+        result = CloakSeleniumDriver._unwrap_js_result(
+            object(), _ObjectHandle({"input": input_handle, "button": button_handle})
+        )
+        self.assertIsInstance(result["input"], CloakElement)
+        self.assertIsInstance(result["button"], CloakElement)
+        self.assertIs(result["input"].handle, input_handle)
+        self.assertIs(result["button"].handle, button_handle)
+
     def test_text_reads_inner_text_from_locator(self):
         locator = _Locator(" Resend code ")
         element = CloakElement(page=object(), locator=locator)

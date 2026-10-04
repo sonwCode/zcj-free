@@ -299,6 +299,24 @@ class CloakSeleniumDriver:
 
     @staticmethod
     def _unwrap_js_result(page, handle: Any) -> Any:
+        # evaluate_handle 返回对象时，DOM 子项仍是独立 JSHandle；不能先
+        # json_value()，否则 {input, button} 会丢失元素语义。
+        try:
+            properties = handle.get_properties()
+        except Exception:
+            properties = None
+        if properties:
+            try:
+                keys = list(properties.keys())
+                if all(str(key).isdigit() for key in keys):
+                    return [CloakSeleniumDriver._unwrap_js_result(page, properties[key]) for key in sorted(keys, key=lambda key: int(key))]
+                return {str(key): CloakSeleniumDriver._unwrap_js_result(page, child) for key, child in properties.items()}
+            finally:
+                for child in properties.values():
+                    try:
+                        child.dispose()
+                    except Exception:
+                        pass
         try:
             element = handle.as_element()
         except Exception:
@@ -306,7 +324,8 @@ class CloakSeleniumDriver:
         if element is not None:
             return CloakElement(page, handle=element)
         try:
-            return handle.json_value()
+            value = handle.json_value()
+            return CloakSeleniumDriver._unwrap_result_value(page, value)
         except Exception as exc:
             msg = str(exc)
             if "Execution context was destroyed" in msg or "navigation" in msg.lower():
@@ -318,6 +337,14 @@ class CloakSeleniumDriver:
                 handle.dispose()
             except Exception:
                 pass
+
+    @staticmethod
+    def _unwrap_result_value(page: Any, value: Any) -> Any:
+        if isinstance(value, list):
+            return [CloakSeleniumDriver._unwrap_result_value(page, item) for item in value]
+        if isinstance(value, dict):
+            return {key: CloakSeleniumDriver._unwrap_result_value(page, item) for key, item in value.items()}
+        return value
 
     def _evaluate(self, script: str, args: tuple[Any, ...], async_mode: bool) -> Any:
         first_el, serial_args = self._serialize_args(args)
