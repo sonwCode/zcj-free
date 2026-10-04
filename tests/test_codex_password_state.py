@@ -82,5 +82,15 @@ class CodexPasswordStateTests(unittest.TestCase):
         self.assertIn("trace={trace}", registration_text)
 
 
+    def test_password_route_counts_as_post_email_progress(self):
+        registration_text = (ROOT / "core" / "roxy_registration.py").read_text(encoding="utf-8")
+        self.assertIn("/log-in/password", registration_text)
+        self.assertIn("/mfa-challenge", registration_text)
+
+    def test_email_submit_stall_is_propagated(self):
+        body = _source("_fill_email_and_otp")
+        self.assertIn("email_submit_stalled", body)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -612,7 +612,9 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         # 页面仍在密码页或 MFA 分支失败时必须向上抛出；否则外层会继续手机号和
         # callback，制造一个看似进入下一步但最终只能超时的假状态。
         message = str(exc)
-        if message.startswith("Codex 密码提交后") or message.startswith("Codex MFA 页面"):
+        if (message.startswith("Codex 密码提交后")
+                or message.startswith("Codex MFA 页面")
+                or message.startswith("email_submit_stalled")):
             logger.error("[Codex][Browser] 邮箱/密码步骤终止：%s: %s", type(exc).__name__, message)
             raise
         logger.warning(
@@ -661,7 +663,9 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
                 _maybe_click_passwordless_after_email(driver, email, timeout=12)
         except Exception as exc:
             message = str(exc)
-            if message.startswith("Codex 密码提交后") or message.startswith("Codex MFA 页面"):
+            if (message.startswith("Codex 密码提交后")
+                or message.startswith("Codex MFA 页面")
+                or message.startswith("email_submit_stalled")):
                 logger.error("[Codex][Browser] 重新提交邮箱后流程终止：%s: %s", type(exc).__name__, message)
                 raise
             # 如果重进授权地址后已经停在验证码/下一步页面，就不要再强行提交。

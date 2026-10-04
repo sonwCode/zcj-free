@@ -1077,7 +1077,8 @@ def _submit_email_step(driver, email: str | None = None) -> None:
         deadline = time.time() + 4
         while time.time() < deadline:
             current = str(getattr(driver, "current_url", "") or "").lower()
-            if "/log-in" not in current or "email-verification" in current:
+            if ("/log-in" not in current or "/log-in/password" in current
+                    or "/mfa-challenge" in current or "email-verification" in current):
                 return
             _stop_aware_sleep(0.4)
         recovery = _recover_email_submit_if_stuck(driver, email_value)
@@ -1085,7 +1086,8 @@ def _submit_email_step(driver, email: str | None = None) -> None:
         deadline = time.time() + 12
         while time.time() < deadline:
             current = str(getattr(driver, "current_url", "") or "").lower()
-            if "/log-in" not in current or "email-verification" in current:
+            if ("/log-in" not in current or "/log-in/password" in current
+                    or "/mfa-challenge" in current or "email-verification" in current):
                 return
             _stop_aware_sleep(0.4)
         try:
