@@ -1044,50 +1044,17 @@ def _select_sms_channel_or_raise(driver) -> None:
     if has_whatsapp and not has_sms:
         raise RuntimeError(f"whatsapp_channel: 页面仅提供 WhatsApp 通道 state={state}")
     # 选择 SMS/text radio。无 radio 时可能默认 SMS。
-    # 用完整指针序列而不是裸 radio.click()：React / React-Aria 的受控 radio 只对
-    # 真实指针序列更新组件状态，合成 click 常常只改 DOM 属性、组件状态仍是原值，
-    # 页面会继续停留在 WhatsApp（或默认通道），提交时被判为未选通道。
-    result = driver.execute_script(r"""
+    selected = driver.execute_script(r"""
     const radios = [...document.querySelectorAll('input[type=radio]')];
     const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
-    if (!sms) return {ok:false, reason:'missing_sms_radio'};
-    const fire = (el, type, Ctor, extra) => {
-      const rect = el.getBoundingClientRect();
-      el.dispatchEvent(new Ctor(type, Object.assign({
-        bubbles:true, cancelable:true, composed:true, view:window,
-        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
-        button:0,
-      }, extra || {})));
-    };
-    sms.scrollIntoView({block:'center'});
-    try {
-      fire(sms, 'pointerover', PointerEvent, {buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true});
-      fire(sms, 'pointerdown', PointerEvent, {buttons:1, pointerId:1, pointerType:'mouse', isPrimary:true});
-      fire(sms, 'mousedown', MouseEvent, {buttons:1});
-      if (typeof sms.focus === 'function') sms.focus({preventScroll:true});
-      fire(sms, 'pointerup', PointerEvent, {buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true});
-      fire(sms, 'mouseup', MouseEvent, {buttons:0});
-      sms.click();
-    } catch (_) {
-      try { sms.click(); } catch (__) {}
-    }
-    if (!sms.checked) {
-      const label = sms.closest('label');
-      if (label) { try { label.click(); } catch (__) {} }
-    }
-    return {ok:true, checked: !!sms.checked, value: String(sms.value || ''), url: location.href};
+    if (!sms) return false;
+    sms.click();
+    sms.dispatchEvent(new Event('input', {bubbles:true}));
+    sms.dispatchEvent(new Event('change', {bubbles:true}));
+    return true;
     """)
-    if not result or not result.get("checked"):
-        # SMS 选项存在但点不中，是页面/交互问题，与号码质量无关。这里必须用独立
-        # 标记：沿用 whatsapp_channel 会被接码平台侧归类成 number_rejected，
-        # 把一个完全正常的号码拉黑 30 分钟。
-        # 「页面只有 WhatsApp 通道」走的是上面的分支，那条确实可能与号码所属
-        # 地区的可用通道有关，保留原有归类。
-        raise RuntimeError(
-            f"sms_channel_select_failed: SMS 通道未被勾选（SMS 选项存在但无法选中，"
-            f"与号码质量无关）detail={result} state={state}"
-        )
-    logger.info("[Codex][Browser] 已选择 SMS 短信通道：%s", result)
+    if selected:
+        logger.info("[Codex][Browser] 已选择 SMS 短信通道")
 
 
 def _is_phone_code_state(state: dict) -> bool:
