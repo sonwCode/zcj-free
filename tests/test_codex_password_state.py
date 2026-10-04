@@ -36,6 +36,13 @@ class CodexPasswordStateTests(unittest.TestCase):
         # The stale password route must remain a guarded failure/None path.
         self.assertNotIn('if not _is_login_password_page(driver):\n                return "next_step"\n            _stop_sleep(0.5)\n        return "next_step"', body)
 
+    def test_password_stall_logs_page_diagnostics(self):
+        body = _source("_fill_login_password_if_present")
+        self.assertIn("密码页超时页面诊断", body)
+        self.assertIn("document.body?.innerText", body)
+        self.assertIn("inputs:", body)
+        self.assertIn("buttons:", body)
+
 
 if __name__ == "__main__":
     unittest.main()

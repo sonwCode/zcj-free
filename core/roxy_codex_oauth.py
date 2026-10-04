@@ -525,9 +525,24 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
             if not _is_login_password_page(driver):
                 return "next_step"
             _stop_sleep(0.5)
-        # 不能把仍停留在 /log-in/password 当成登录完成；Job 72 的日志证明
-        # 这种误判会让上层跳过后续页面，最终只在 callback 超时才暴露问题。
+        # 不能把仍停留在 /log-in/password 当成登录完成；记录完整页面摘要，
+        # 以区分密码错误、资源加载失败和 MFA 页面未跳转。
         if _is_login_password_page(driver):
+            try:
+                snapshot = driver.execute_script(r"""
+                const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                  && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+                const attrs = el => ({tag:el.tagName, type:el.getAttribute('type') || '', name:el.getAttribute('name') || '',
+                  auto:el.getAttribute('autocomplete') || '', aria:el.getAttribute('aria-label') || '',
+                  text:(el.innerText || el.value || '').trim().slice(0,120), disabled:!!el.disabled,
+                  ariaDisabled:el.getAttribute('aria-disabled') || ''});
+                return {url:location.href, title:document.title, text:(document.body?.innerText || '').trim().slice(0,1200),
+                  inputs:[...document.querySelectorAll('input')].filter(visible).map(attrs).slice(0,12),
+                  buttons:[...document.querySelectorAll('button,[role=button]')].filter(visible).map(attrs).slice(0,12)};
+                """) or {};
+                logger.warning("[Codex][Browser] 密码页超时页面诊断：%s", snapshot);
+            except Exception as snapshot_exc:
+                logger.warning("[Codex][Browser] 密码页超时页面诊断失败：%s: %s", type(snapshot_exc).__name__, str(snapshot_exc)[:160]);
             logger.warning(
                 "[Codex][Browser] 密码已提交但仍停留登录密码页，拒绝标记为登录成功：email=%s",
                 email,
