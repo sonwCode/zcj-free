@@ -303,13 +303,10 @@ def _apply_browser_automation_mask(driver) -> None:
 
 
 def _unwrap_cloak_element(el):
-    """将 CloakElement 包装对象转换为可传入 page.evaluate 的真实句柄。"""
-    handle = getattr(el, "_handle", None)
-    if callable(handle):
-        try:
-            return handle()
-        except Exception:
-            return el
+    """保留 CloakElement 包装，让 driver.execute_script 统一序列化句柄。"""
+    # CloakBrowserDriver._serialize_args 只会识别 CloakElement 并提取其真实
+    # ElementHandle；直接返回底层 handle 会绕过该边界，最终把包装对象传给
+    # page.evaluate，触发 el.scrollIntoView is not a function。
     return el
 
 
