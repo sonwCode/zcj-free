@@ -100,8 +100,90 @@ def _csv_values(value: object) -> set[str]:
     return {item.strip() for item in str(value or "").split(",") if item.strip()}
 
 
+def _fx_rate_sources() -> list[str]:
+    """返回按优先级排列的汇率源列表。
+
+    SMS_FX_RATE_URL 非空时视为显式指定，单独使用；否则用 SMS_FX_RATE_URLS
+    逗号分隔的级联列表。任一源成功即返回，避免单一第三方接口抖动就让价格
+    换算失真。
+    """
+    explicit = str(getattr(_cfg, "SMS_FX_RATE_URL", "") or "").strip()
+    if explicit:
+        return [explicit]
+    raw = str(getattr(_cfg, "SMS_FX_RATE_URLS", "") or "").strip()
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _parse_usd_rate_from_payload(payload: object) -> Decimal | None:
+    """从各汇率服务的响应里取出 CNY -> USD 汇率。
+
+    兼容三种常见结构：
+      - {"rates": {"USD": 0.14}}           frankfurter / er-api
+      - {"conversion_rates": {"USD": ...}} exchangerate-api
+      - {"data": {"USD": ...}}             部分聚合服务
+    以及 direct 形式的 {"USD": ...}。
+    """
+    if not isinstance(payload, dict):
+        return None
+    candidates: list[object] = []
+    for key in ("rates", "conversion_rates", "data", "quotes"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            candidates.append(value.get("USD"))
+    candidates.append(payload.get("USD"))
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            rate = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if rate.is_finite() and rate > 0:
+            return rate
+    return None
+
+
+def _fallback_usd_cny_rate() -> tuple[Decimal, str]:
+    """网络不可用时的回退汇率。
+
+    优先使用最近一次成功获取并写回配置的实时汇率，其次使用管理员显式配置的
+    SMSBOWER_USD_CNY_RATE。回退值表示 1 USD = N CNY，与实时汇率同向，
+    避免把价格边界钉死在一个陈旧常数上。
+    """
+    remembered = str(getattr(_cfg, "SMS_LAST_KNOWN_USD_CNY_RATE", "") or "").strip()
+    configured = str(getattr(_cfg, "SMSBOWER_USD_CNY_RATE", "") or "").strip()
+    for raw, source in (
+        (remembered, "last known USD/CNY"),
+        (configured, "configured USD/CNY"),
+    ):
+        if not raw:
+            continue
+        try:
+            usd_cny = Decimal(raw)
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if usd_cny.is_finite() and usd_cny > 0:
+            return Decimal("1") / usd_cny, f"fallback {source}={raw}"
+    raise SmsProviderConfigurationError(
+        "实时汇率不可用，且本地回退汇率无效（检查 SMS_LAST_KNOWN_USD_CNY_RATE / "
+        "SMSBOWER_USD_CNY_RATE 是否为正数）"
+    )
+
+
+def _remember_usd_cny_rate(usd_cny: Decimal) -> None:
+    """把本次实时 USD/CNY 写入配置模块，供后续回退使用。"""
+    try:
+        _cfg.SMS_LAST_KNOWN_USD_CNY_RATE = format(usd_cny, "f")
+    except Exception as exc:
+        logger.debug("[SMS] 记录最近汇率失败（不影响本次取号）：%s", exc)
+
+
 def _cny_to_usd_rate() -> tuple[Decimal, str]:
-    """读取短期缓存的实时 CNY -> USD 汇率，失败时使用本地回退值。"""
+    """读取短期缓存的实时 CNY -> USD 汇率。
+
+    按 SMS_FX_RATE_URLS 顺序级联尝试，全部失败时回退到最近一次已知汇率，
+    而不是中断取号。实时汇率只是价格边界的换算依据，不该成为硬依赖。
+    """
     global _FX_RATE_CACHE
     now = time.monotonic()
     ttl = _setting_int("SMS_FX_RATE_TTL", 900, 60)
@@ -110,35 +192,37 @@ def _cny_to_usd_rate() -> tuple[Decimal, str]:
         if cached and now - cached[0] < ttl:
             return cached[1], cached[2]
 
-    url = str(getattr(_cfg, "SMS_FX_RATE_URL", "") or "").strip()
-    if url:
+    timeout = min(max(_setting_int("SMS_REQUEST_TIMEOUT", 30, 1), 1), 10)
+    errors: list[str] = []
+    for url in _fx_rate_sources():
         try:
-            request = Request(url, headers={"Accept": "application/json", "User-Agent": "turb-gpt-register/1"})
-            timeout = min(max(_setting_int("SMS_REQUEST_TIMEOUT", 30, 1), 1), 10)
+            request = Request(
+                url,
+                headers={"Accept": "application/json", "User-Agent": "turb-gpt-register/1"},
+            )
             with urlopen(request, timeout=timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            rate = Decimal(str((payload.get("rates") or {}).get("USD")))
-            if rate.is_finite() and rate > 0:
-                source = "live CNY/USD"
-                with _STATE_LOCK:
-                    _FX_RATE_CACHE = (now, rate, source)
-                logger.info("[SMS] 已刷新人民币兑美元汇率：source=%s rate=%s", source, rate)
-                return rate, source
         except Exception as exc:
-            logger.error("[SMS] 实时汇率读取失败，停止新增号码采购：%s", exc)
-            raise SmsProviderConfigurationError("实时人民币兑美元汇率不可用；已停止取号以维持最高价限制") from exc
-        raise SmsProviderConfigurationError("实时人民币兑美元汇率响应缺少有效 USD 汇率；已停止取号")
+            errors.append(f"{url} -> {type(exc).__name__}: {str(exc)[:120]}")
+            continue
+        rate = _parse_usd_rate_from_payload(payload)
+        if rate is None:
+            errors.append(f"{url} -> 响应缺少有效 USD 汇率")
+            continue
+        source = f"live CNY/USD ({url})"
+        with _STATE_LOCK:
+            _FX_RATE_CACHE = (now, rate, source)
+        _remember_usd_cny_rate(Decimal("1") / rate)
+        logger.info("[SMS] 已刷新人民币兑美元汇率：source=%s rate=%s", source, rate)
+        return rate, source
 
-    raw = str(getattr(_cfg, "SMSBOWER_USD_CNY_RATE", "7.2") or "7.2").strip()
-    try:
-        usd_cny = Decimal(raw)
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise SmsProviderConfigurationError(f"SMSBOWER_USD_CNY_RATE 必须是正数：{raw!r}") from exc
-    if not usd_cny.is_finite() or usd_cny <= 0:
-        raise SmsProviderConfigurationError(f"SMSBOWER_USD_CNY_RATE 必须是正数：{raw!r}")
-    rate = Decimal("1") / usd_cny
-    source = "fallback USD/CNY config"
-    return rate, source
+    fallback_rate, fallback_source = _fallback_usd_cny_rate()
+    logger.warning(
+        "[SMS] 实时汇率源全部失败，使用回退汇率 %s：%s",
+        fallback_source,
+        "；".join(errors[:3]) or "无可用来源",
+    )
+    return fallback_rate, fallback_source
 
 
 def _mask_phone(phone: str) -> str:

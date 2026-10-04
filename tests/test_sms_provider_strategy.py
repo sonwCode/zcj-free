@@ -7,6 +7,7 @@ import json
 import sys
 import types
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -146,6 +147,9 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.SMS_MAX_PRICE = ""
         codex_config.SMSBOWER_MIN_PRICE = ""
         codex_config.SMSBOWER_USD_CNY_RATE = "7.2"
+        # 回退汇率优先读最近已知值，测试必须重置，否则用例之间会互相污染。
+        codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = ""
+        codex_config.SMS_FX_RATE_URLS = ""
         codex_config.TIGER_SMS_API_KEY = "tiger-key"
         codex_config.TIGER_SMS_API_BASE = "http://tiger.test/stubs/handler_api.php"
         codex_config.TIGER_SMS_USE_V2 = True
@@ -420,19 +424,33 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertIn("'SMS_MAX_PRICE': 'str'", source)
         self.assertIn("'SMSBOWER_USD_CNY_RATE': 'str'", source)
 
-    def test_live_cny_usd_rate_is_used_and_failure_stops_price_limited_purchase(self):
+    def test_live_cny_usd_rate_is_used(self):
         codex_config.SMS_FX_RATE_URL = "https://fx.test/latest?from=CNY&to=USD"
         body = json.dumps({"base": "CNY", "rates": {"USD": 0.14}}).encode("utf-8")
         with patch.object(sms_provider, "urlopen", return_value=BytesIO(body)) as open_url:
             rate, source = sms_provider._cny_to_usd_rate()
         self.assertEqual(str(rate), "0.14")
-        self.assertEqual(source, "live CNY/USD")
+        self.assertIn("live CNY/USD", source)
+        self.assertIn("fx.test", source)
         self.assertEqual(open_url.call_args.args[0].full_url, codex_config.SMS_FX_RATE_URL)
+        # 成功的实时汇率要写回配置，供后续网络失败时回退。
+        self.assertEqual(codex_config.SMS_LAST_KNOWN_USD_CNY_RATE, format(Decimal("1") / Decimal("0.14"), "f"))
 
-        sms_provider._reset_runtime_state_for_tests()
+    def test_failure_falls_back_to_last_known_rate_instead_of_aborting(self):
+        """实时汇率源全部失败时回退到最近已知汇率，不再中断取号。"""
+        codex_config.SMS_FX_RATE_URLS = "https://fx1.test/latest,https://fx2.test/latest"
+        codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = "6.70"
         with patch.object(sms_provider, "urlopen", side_effect=OSError("offline")):
-            with self.assertRaises(sms_provider.SmsProviderConfigurationError):
-                sms_provider._cny_to_usd_rate()
+            rate, source = sms_provider._cny_to_usd_rate()
+        self.assertIn("last known", source)
+        self.assertAlmostEqual(float(rate), 1 / 6.70, places=6)
+
+    def test_fallback_prefers_remembered_over_configured(self):
+        codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = "6.70"
+        codex_config.SMSBOWER_USD_CNY_RATE = "7.2"
+        rate, source = sms_provider._fallback_usd_cny_rate()
+        self.assertIn("last known", source)
+        self.assertAlmostEqual(float(rate), 1 / 6.70, places=6)
 
     def test_price_bounds_validate_fx_rate_and_order(self):
         codex_config.SMS_FX_RATE_URL = ""

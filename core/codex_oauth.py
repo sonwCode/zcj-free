@@ -316,8 +316,54 @@ def _cpa_management_key() -> str:
     return key
 
 
+# CPA 管理接口偶发 TLS 层瞬时失败（BoringSSL SSL_connect: Connection closed
+# abruptly / SSL_ERROR_SYSCALL）。这类错误发生在握手阶段，重连一次通常即可
+# 恢复，但旧实现没有重试，一次抖动就让整轮 Codex 授权直接失败。
+_CPA_TRANSIENT_ERROR_TOKENS = (
+    "sslerror",
+    "ssl_error_syscall",
+    "connection closed abruptly",
+    "connection reset",
+    "connection aborted",
+    "recv failure",
+    "send failure",
+    "timed out",
+    "temporarily unavailable",
+    "bad gateway",
+    "service unavailable",
+)
+
+
+def _is_cpa_transient_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return any(token in text for token in _CPA_TRANSIENT_ERROR_TOKENS)
+
+
 def _cpa_request_json(method: str, path: str, body: dict | None = None) -> dict:
-    """调用 CPA 管理接口，兼容 FlowPilot 的 /v0/management/* 协议。"""
+    """调用 CPA 管理接口，兼容 FlowPilot 的 /v0/management/* 协议。
+
+    传输层瞬时错误（TLS 握手中断、连接重置、超时）按固定间隔重试，
+    避免一次网络抖动就终止整轮 Codex 授权。
+    """
+    attempts = max(1, int(getattr(_cfg, "CPA_REQUEST_RETRIES", 3) or 3))
+    delay = max(0.5, float(getattr(_cfg, "CPA_REQUEST_RETRY_DELAY", 3) or 3))
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return _cpa_request_json_once(method, path, body)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts or not _is_cpa_transient_error(exc):
+                raise
+            logger.warning(
+                "[Codex][CPA] 管理接口瞬时失败，重试 %s/%s：%s: %s",
+                attempt + 1, attempts, type(exc).__name__, str(exc)[:200],
+            )
+            time.sleep(delay * attempt)
+    raise last_exc or RuntimeError(f"[Codex][CPA] 管理接口失败 {method} {path}")
+
+
+def _cpa_request_json_once(method: str, path: str, body: dict | None = None) -> dict:
     origin = _cpa_management_origin()
     key = _cpa_management_key()
     timeout = int(getattr(_cfg, "CPA_REQUEST_TIMEOUT", 30) or 30)

@@ -80,6 +80,12 @@ CPA_MANAGEMENT_KEY: str = env_str("CPA_MANAGEMENT_KEY", "")
 # CPA 管理接口请求超时（秒）
 CPA_REQUEST_TIMEOUT: int = 30
 
+# CPA 管理接口传输层瞬时失败（TLS 握手中断 / 连接重置 / 超时）的重试次数与基础间隔。
+# 这类错误发生在握手阶段，重连一次通常即可恢复；不重试会让一次网络抖动
+# 直接终止整轮 Codex 授权。
+CPA_REQUEST_RETRIES: int = 3
+CPA_REQUEST_RETRY_DELAY: int = 3
+
 # 提交 OAuth callback 给 CPA 的重试次数/基础间隔。
 # 遇到 409 Timeout waiting for OAuth callback、网络超时或 5xx 时，会按同一个 callback URL 重试。
 CPA_CALLBACK_SUBMIT_RETRIES: int = 5
@@ -123,8 +129,18 @@ SMS_COUNTRY: str = "10"
 
 # 通用人民币价格上限；程序实时读取 CNY -> USD 汇率后发送给两个平台。
 SMS_MAX_PRICE: str = ""
-SMS_FX_RATE_URL: str = "https://api.frankfurter.app/latest?from=CNY&to=USD"
+# 实时汇率源，按顺序级联尝试，任一成功即用。
+# 旧默认 api.frankfurter.app 已失效（返回 403/301），保留在末尾仅作兼容。
+SMS_FX_RATE_URLS: str = (
+    "https://open.er-api.com/v6/latest/CNY"
+    ",https://api.frankfurter.app/latest?from=CNY&to=USD"
+)
+# 单源兼容项：非空时优先于 SMS_FX_RATE_URLS（便于临时指定单一来源）。
+SMS_FX_RATE_URL: str = ""
 SMS_FX_RATE_TTL: int = 900
+# 最近一次成功获取的实时汇率（USD/CNY，即 1 USD = N CNY）。用于网络不可用时的
+# 回退，使价格边界仍贴近市价，而不是钉死在一个陈旧常数上。
+SMS_LAST_KNOWN_USD_CNY_RATE: str = "7.2"
 
 # SMSBower 随机国家与号码质量策略
 SMSBOWER_RANDOM_COUNTRY: bool = True
@@ -147,4 +163,4 @@ SMS_POLL_INTERVAL: int = 5
 SMS_REQUEST_TIMEOUT: int = 30
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_REQUEST_RETRIES': 'int', 'CPA_REQUEST_RETRY_DELAY': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_URLS': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_LAST_KNOWN_USD_CNY_RATE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int'})
