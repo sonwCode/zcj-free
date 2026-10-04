@@ -559,7 +559,18 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
             return
         if pw_result == "email_otp":
-            logger.info("[Codex][Browser] 密码登录后仍进入邮箱 OTP 页面")
+            logger.info("[Codex][Browser] 密码登录后进入邮箱 OTP 页面，使用邮箱一次性验证码")
+        elif pw_result is None:
+            # 密码页停滞不能盲目降级到邮箱 OTP；只有页面明确进入
+            # email-verification 或 mfa-challenge，才允许进入对应验证码流程。
+            if _is_mfa_challenge_page(driver):
+                logger.info("[Codex][Browser] 密码登录后进入 MFA challenge，使用账号 TOTP")
+                if not _fill_mfa_challenge_if_present(driver, email, timeout=15):
+                    raise RuntimeError("Codex MFA 页面未能提交账号 TOTP")
+            elif _is_email_verification_page(driver):
+                logger.info("[Codex][Browser] 密码登录后进入邮箱 OTP 页面，使用邮箱一次性验证码")
+            else:
+                raise RuntimeError("Codex 密码提交后未进入 MFA 或邮箱 OTP 页面")
         else:
             _maybe_click_passwordless_after_email(driver, email, timeout=18)
     except Exception as exc:
@@ -598,7 +609,18 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
                     _fill_mfa_challenge_if_present(driver, email, timeout=15)
                 logger.info("[Codex][Browser] 重新提交邮箱后已用密码完成登录，进入后续步骤")
                 return
-            if pw_result != "email_otp":
+            if pw_result == "email_otp":
+                logger.info("[Codex][Browser] 重新提交邮箱后进入邮箱 OTP 页面")
+            elif pw_result is None:
+                if _is_mfa_challenge_page(driver):
+                    logger.info("[Codex][Browser] 重新提交邮箱后进入 MFA challenge，使用账号 TOTP")
+                    if not _fill_mfa_challenge_if_present(driver, email, timeout=15):
+                        raise RuntimeError("Codex MFA 页面未能提交账号 TOTP")
+                elif _is_email_verification_page(driver):
+                    logger.info("[Codex][Browser] 重新提交邮箱后进入邮箱 OTP 页面")
+                else:
+                    raise RuntimeError("Codex 密码提交后未进入 MFA 或邮箱 OTP 页面")
+            else:
                 _maybe_click_passwordless_after_email(driver, email, timeout=12)
         except Exception as exc:
             # 如果重进授权地址后已经停在验证码/下一步页面，就不要再强行提交。
