@@ -2249,23 +2249,18 @@ def _fill_login_password_on_page(driver, password: str, *, timeout: int = 12) ->
     return {"ok": True, "reason": "login_password_submitted"}
 
 
-def _fill_password_page_if_present(
-    driver, email: str, timeout: int = 25, _recovery_round: int = 0
-) -> str | None:
+def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str | None:
     """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。"""
-    _check_manual_stop()
     end = time.time() + timeout
     verification_wait_end = min(end, time.time() + 10)
     last = {}
     missing_element_refreshes = 0
     password_route_requested = False
     while time.time() < end:
-        _check_manual_stop()
         if _is_email_verification_page(driver):
             result = {}
             for _ in range(8):
                 result = _click_continue_with_password_if_present(driver)
-                _check_manual_stop()
                 if result.get("ok"):
                     logger.info("%s 邮箱验证码页已点击“使用密码继续”：email=%s detail=%s", _log_prefix(driver), email, result)
                     # 点击后导航在高延迟代理下可能要十几秒。旧逻辑只等 0.8 秒便再次
@@ -2280,13 +2275,13 @@ def _fill_password_page_if_present(
                             break
                         if not _is_email_verification_page(driver):
                             break
-                        _stop_aware_sleep(0.5)
+                        time.sleep(0.5)
                     break
-                _stop_aware_sleep(0.5)
+                time.sleep(0.5)
             else:
                 if time.time() < verification_wait_end:
                     logger.info("%s 邮箱验证码页暂未找到“使用密码继续”，继续等待页面渲染：detail=%s", _log_prefix(driver), result)
-                    _stop_aware_sleep(0.5)
+                    time.sleep(0.5)
                     continue
                 if _refresh_after_missing_page_element(driver, "使用密码继续按钮", missing_element_refreshes):
                     missing_element_refreshes += 1
@@ -2297,20 +2292,28 @@ def _fill_password_page_if_present(
                 return None
             continue
         if _has_access_token(driver):
-            _check_manual_stop()
             return None
         last = _password_page_state(driver)
-        _check_manual_stop()
         is_signup_password = _is_signup_password_page(driver)
         is_login_password = _is_login_password_page(driver)
         if not (is_signup_password or is_login_password):
-            _stop_aware_sleep(0.5)
+            time.sleep(0.5)
             continue
+        passwordless = _click_passwordless_signup_if_present(driver) if is_login_password else {"ok": False, "reason": "signup_password_prefers_password"}
+        if passwordless.get('ok'):
+            logger.info("%s 检测到 password 页，已点击一次性验证码入口：email=%s detail=%s", _log_prefix(driver), email, passwordless)
+            wait_end = time.time() + 20
+            while time.time() < wait_end:
+                if _is_email_verification_page(driver):
+                    logger.info("%s 一次性验证码入口已进入邮箱验证码页", _log_prefix(driver))
+                    return None
+                if _has_access_token(driver):
+                    logger.info("%s 一次性验证码入口后已检测到登录态", _log_prefix(driver))
+                    return None
+                time.sleep(0.5)
+            logger.info("%s 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理", _log_prefix(driver))
+            return None
         if is_login_password:
-            # 走到 /log-in/password 说明该邮箱在 OpenAI 侧已经有账号：这一次是登录，
-            # 不是注册。若注册阶段已把密码写回邮箱素材，就用它完成登录，保住密码路径
-            # （Codex 的密码登录依赖它）；否则按“已注册邮箱”处理——旧逻辑会点
-            # “使用一次性验证码登录”静默登录，产出无密码账号却记为注册成功。
             known_password = _known_pool_password(email)
             if known_password:
                 logger.info("%s 邮箱已注册且素材里存有密码，按登录密码页填写：%s", _log_prefix(driver), email)
@@ -2319,16 +2322,13 @@ def _fill_password_page_if_present(
                     wait_end = time.time() + 20
                     while time.time() < wait_end:
                         if _has_access_token(driver):
-                            logger.info("%s 已用素材里保存的密码完成登录", _log_prefix(driver))
                             return known_password
                         if not _is_login_password_page(driver):
                             return known_password
                         _stop_aware_sleep(0.5)
                     return known_password
-                logger.warning("%s 素材密码登录未成功，按已注册邮箱处理：%s", _log_prefix(driver), login_fill)
             raise EmailAlreadyRegistered(
-                f"邮箱在 OpenAI 侧已存在账号（登录密码页，素材中"
-                f"{'有' if known_password else '无'}已保存密码）: {email}"
+                f"邮箱在 OpenAI 侧已存在账号（登录密码页，素材中{'有' if known_password else '无'}已保存密码）: {email}"
             )
         password = _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
@@ -2352,9 +2352,8 @@ def _fill_password_page_if_present(
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
         buttons[0].el.scrollIntoView({block:'center'});
-        return {ok:true, reason:'password_targets'};
+        return {ok:true, reason:'password_targets', input, button: buttons[0].el};
         """) or {}
-        _check_manual_stop()
         if not result.get('ok'):
             reason = str(result.get('reason') or '')
             if reason in {'missing_password_input', 'missing_submit'} and _refresh_after_missing_page_element(
@@ -2364,22 +2363,7 @@ def _fill_password_page_if_present(
                 end = time.time() + timeout
                 continue
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
-        password_result = driver.execute_script("""
-        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
-          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
-        const input = [...document.querySelectorAll('input[type=\"password\"],input[name*=\"password\" i],input[autocomplete=\"new-password\"]')]
-          .find(el => visible(el) && !el.disabled && !el.readOnly);
-        if (!input) return {ok:false, reason:'missing_password_input'};
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-        if (setter) setter.call(input, String(arguments[0])); else input.value = String(arguments[0]);
-        input.dispatchEvent(new Event('input', {bubbles:true}));
-        input.dispatchEvent(new Event('change', {bubbles:true}));
-        input.blur();
-        return {ok:true, reason:'password_filled'};
-        """, password) or {};
-        _check_manual_stop()
-        if not password_result.get('ok'):
-            raise RuntimeError(f"密码输入失败：{password_result}")
+        _human_type_text(driver, result.get("input"), password, clear=True)
         # React/Auth0 会在 input/change 后异步校验密码强度并启用 Continue。
         # 之前输入完 0.4~1.4s 就点，偶发点在按钮还未真正可提交/事件未绑定完成时，页面无反应。
         human_delay("form", minimum=2.0, maximum=3.6)
@@ -2411,41 +2395,17 @@ def _fill_password_page_if_present(
         const target = scored[0]?.el;
         if (!target) return {ok:false, reason:'missing_enabled_submit'};
         target.scrollIntoView({block:'center'});
-        // 密码页主提交按钮同样必须派发完整指针序列。Chromium 只对真实指针
-        // 序列生成 trusted click 并触发表单导航，裸 target.click() 只产生
-        // 合成事件，React 手势判定不认，导航不会发起，函数却会报告
-        // clicked_enabled_submit，形成“日志说点了、页面停在密码页”的假成功。
-        const rect = target.getBoundingClientRect();
-        const cx = rect.left + rect.width / 2;
-        const cy = rect.top + rect.height / 2;
-        const base = {bubbles:true, cancelable:true, composed:true, view:window,
-                      clientX:cx, clientY:cy, button:0, buttons:1};
-        try {
-          target.dispatchEvent(new PointerEvent('pointerover', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
-          target.dispatchEvent(new PointerEvent('pointerenter', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
-          target.dispatchEvent(new MouseEvent('mouseover', {...base, buttons:0}));
-          target.dispatchEvent(new MouseEvent('mouseenter', {...base, buttons:0}));
-          target.dispatchEvent(new MouseEvent('mousemove', {...base, buttons:0}));
-          target.dispatchEvent(new PointerEvent('pointerdown', {...base, pointerId:1, pointerType:'mouse', isPrimary:true}));
-          target.dispatchEvent(new MouseEvent('mousedown', base));
-          if (typeof target.focus === 'function') target.focus({preventScroll:true});
-          target.dispatchEvent(new PointerEvent('pointerup', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
-          target.dispatchEvent(new MouseEvent('mouseup', {...base, buttons:0}));
-          target.click();
-        } catch (err) {
-          return {ok:false, reason:'dispatch_failed', error:String(err)};
-        }
         return {
           ok:true,
-          reason:'clicked_enabled_submit',
+          reason:'enabled_submit_target',
+          button: target,
           text: (target.textContent || target.getAttribute('value') || '').trim().slice(0, 80),
           type: target.getAttribute('type') || '',
           dd: target.getAttribute('data-dd-action-name') || '',
           ariaDisabled: target.getAttribute('aria-disabled') || ''
         };
         """) or {}
-        _check_manual_stop()
-        if not submit_result.get("ok"):
+        if not submit_result.get("ok") or not submit_result.get("button"):
             reason = str(submit_result.get('reason') or '')
             if reason == 'missing_enabled_submit' and _refresh_after_missing_page_element(
                 driver, "密码页 Continue 按钮", missing_element_refreshes
@@ -2454,11 +2414,8 @@ def _fill_password_page_if_present(
                 end = time.time() + timeout
                 continue
             raise RuntimeError(f"密码页找不到可点击的 Continue 按钮：{submit_result} state={_password_page_state(driver)}")
-        _check_manual_stop()
+        _human_click(driver, submit_result.get("button"), label="password_submit")
         logger.info("%s 已填写并点击密码页 Continue：detail=%s", _log_prefix(driver), {k: v for k, v in submit_result.items() if k != "button"})
-        # OpenAI 侧密码此刻已经生效，但本任务后续仍可能失败（例如邮箱验证码被拒），
-        # 失败时账号不会落库、密码就丢了。立即写回邮箱素材行，失败重试或复用到同一
-        # 邮箱时才能取回，避免产出"已注册但无密码"的账号。
         try:
             from core import db as _db
             if _db.remember_pool_password(email, password, note="registration_password"):
@@ -2471,20 +2428,14 @@ def _fill_password_page_if_present(
         # 会在 /create-account/password 上查找验证码框。这里给足提交/导航时间。
         wait_end = time.time() + 60
         retried_submit = False
-        empty_form_since: float | None = None
-        reloaded_empty_password_page = False
         while time.time() < wait_end:
-            _check_manual_stop()
             if _is_email_verification_page(driver):
-                _check_manual_stop()
                 logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
                 return password
             if _has_access_token(driver):
-                _check_manual_stop()
                 logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
                 return password
             if _is_signup_password_page(driver):
-                _check_manual_stop()
                 error_state = _password_page_state(driver)
                 errors = error_state.get("errors") or []
                 if errors:
@@ -2493,46 +2444,6 @@ def _fill_password_page_if_present(
                         f"密码页提交被拒绝: {error_text} "
                         f"url={error_state.get('url') or getattr(driver, 'current_url', '')}"
                     )
-                if _password_state_has_form(error_state):
-                    empty_form_since = None
-                else:
-                    # URL 仍在密码路由上，但 DOM 里连表单和输入框都没有：
-                    # 提交后的跳转被网络截断，或 SPA 过渡卡住。只靠 URL 判定
-                    # 会在这里死等到超时，所以持续该状态一段时间后整页重载
-                    # 一次，再按重载后的真实页面状态决定下一步。
-                    if empty_form_since is None:
-                        empty_form_since = time.time()
-                    elif (
-                        not reloaded_empty_password_page
-                        and _recovery_round < 1
-                        and time.time() - empty_form_since >= 10
-                    ):
-                        reloaded_empty_password_page = True
-                        logger.warning(
-                            "%s 密码路由下已无密码表单，整页重载后重新判定：url=%s",
-                            _log_prefix(driver), error_state.get("url") or "",
-                        )
-                        try:
-                            driver.refresh()
-                        except Exception as exc:
-                            logger.warning(
-                                "%s 重载密码页失败，继续等待页面自行恢复：%s: %s",
-                                _log_prefix(driver), type(exc).__name__, str(exc)[:160],
-                            )
-                        _stop_aware_sleep(2.0)
-                        _check_manual_stop()
-                        if _is_email_verification_page(driver):
-                            logger.info("%s 重载后已进入邮箱验证码页，交给 OTP 阶段", _log_prefix(driver))
-                            return password
-                        if _has_access_token(driver):
-                            logger.info("%s 重载后已检测到登录态", _log_prefix(driver))
-                            return password
-                        if _password_state_has_form(_password_page_state(driver)):
-                            logger.info("%s 重载后密码表单已恢复，重新填写并提交", _log_prefix(driver))
-                            return _fill_password_page_if_present(
-                                driver, email, timeout=timeout, _recovery_round=_recovery_round + 1
-                            )
-                        continue
             if not retried_submit and time.time() > wait_end - 42 and _is_signup_password_page(driver):
                 retried_submit = True
                 retry_result = _resubmit_signup_password_form(driver)
@@ -2540,65 +2451,23 @@ def _fill_password_page_if_present(
                 if retry_result.get("reason") == "page_errors":
                     raise RuntimeError(f"密码页提交被页面拒绝: {retry_result}")
             if not _is_signup_password_page(driver):
-                _check_manual_stop()
                 return password
-            _stop_aware_sleep(0.5)
+            time.sleep(0.5)
         # 密码提交超时仍停留在注册密码页时，不能把“已设置密码”当成成功并
         # 直接交给后续 OTP 阶段；此时 OTP 输入框必然不存在。明确失败并保留
         # 当前 URL/DOM 诊断，避免无意义地刷新密码页三次。
         if _is_signup_password_page(driver):
-            _check_manual_stop()
             current_url = str(getattr(driver, "current_url", "") or "")
-            final_state = _password_page_state(driver)
-            if not _password_state_has_form(final_state):
-                raise RuntimeError(
-                    f"密码提交后跳转被截断，密码路由下已无密码表单（整页重载后仍未恢复）: "
-                    f"url={current_url} state={final_state}"
-                )
-            raise RuntimeError(f"密码提交后仍停留在注册密码页: url={current_url} state={final_state}")
+            raise RuntimeError(f"密码提交后仍停留在注册密码页: url={current_url} state={_password_page_state(driver)}")
         return password
-    # 一旦点击过“使用密码继续”，本次认证就已经确定要走注册密码路径。
-    # 这里不能再用 URL 子串判断是否“还在密码流程里”：跨主机跳转到
-    # auth.openai.com 时若上游返回 500，Chromium 会停在
-    # chrome-error://chromewebdata/，URL 里不含任何密码路由子串，旧判据会
-    # 直接把流程放行到 OTP 阶段，最终在错误的页面上刷新三次并报出
-    # “找不到 OTP 输入框”，掩盖真正的上游错误。
+    # 如果已经请求切换到密码方式，不允许在导航竞态中静默进入 OTP 阶段。
+    # 最后再读取一次浏览器 URL；已抵达密码路由但 DOM 尚未就绪时明确报错，
+    # 避免后续在密码页连续刷新并查找 OTP 输入框。
     current_url = str(getattr(driver, "current_url", "") or "")
-    if password_route_requested:
-        # 导航被网络/上游错误中断时，整页重开一次登录入口重走流程；这是
-        # ERR_EMPTY_RESPONSE / HTTP 500 这类可恢复故障的标准处置。
-        if _is_navigation_error_url(current_url):
-            logger.warning(
-                "%s 已请求密码路径但页面停留在导航错误页，重开登录入口重试一次：url=%s last=%s",
-                _log_prefix(driver), current_url[:180], last,
-            )
-            try:
-                _safe_get(
-                    driver,
-                    "https://chatgpt.com/auth/login",
-                    timeout=45,
-                    attempts=2,
-                    accept_hosts=("chatgpt.com",),
-                )
-                _page_warmup(driver, reason="password_route_navigation_error")
-            except Exception as exc:
-                logger.warning("%s 导航错误页重开登录入口失败：%s: %s", _log_prefix(driver), type(exc).__name__, str(exc)[:180])
-            human_delay("api")
-            retry_state = _current_email_submit_next_state(driver)
-            _check_manual_stop()
-            if retry_state in ("password", "login_password"):
-                logger.info("%s 导航错误页重开后已回到密码路径：state=%s", _log_prefix(driver), retry_state)
-                return _fill_password_page_if_present(driver, email, timeout=timeout)
-            if retry_state == "otp":
-                logger.info("%s 导航错误页重开后进入邮箱验证码页，交给 OTP 阶段处理", _log_prefix(driver))
-                return None
-            if retry_state == "logged_in":
-                logger.info("%s 导航错误页重开后已检测到登录态", _log_prefix(driver))
-                return None
-        raise RuntimeError(
-            f"已请求注册密码路径但密码表单在等待期限内未就绪（导航可能被上游错误截断）: "
-            f"url={current_url} last={last}"
-        )
+    if password_route_requested and any(x in current_url.lower() for x in (
+        "/create-account/password", "/u/signup/password", "/signup/password",
+    )):
+        raise RuntimeError(f"已进入注册密码页但密码表单在等待期限内未就绪: url={current_url} state={last}")
     logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
     return None
 
