@@ -552,6 +552,25 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
     return None
 
 
+def _wait_for_codex_auth_entry_state(driver, timeout: int = 12) -> str:
+    """等待邮箱提交后的 password、MFA 或邮箱 OTP 页面完成渲染。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        if _is_mfa_challenge_page(driver):
+            return "mfa"
+        if _is_email_verification_page(driver):
+            return "email_otp"
+        if _is_login_password_page(driver):
+            return "password"
+        _stop_sleep(0.4)
+    try:
+        state = driver.execute_script("return {url:location.href, title:document.title, text:(document.body?.innerText || '').trim().slice(0,500)};") or {}
+        logger.warning("[Codex][Browser] 邮箱提交后认证页面仍未就绪：%s", state)
+    except Exception as exc:
+        logger.warning("[Codex][Browser] 邮箱提交后页面诊断失败：%s: %s", type(exc).__name__, str(exc)[:160])
+    return "unknown"
+
+
 def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None:
     otp_after_ts = time.time()
     logger.info("[Codex][Browser] 打开授权地址")
@@ -568,7 +587,8 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         logger.info("[Codex][Browser] 已填写邮箱：%s", email)
         human_delay("form")
         _submit_email_step(driver)
-        logger.info("[Codex][Browser] 已提交邮箱，等待邮箱 OTP 页面")
+        entry_state = _wait_for_codex_auth_entry_state(driver, timeout=12)
+        logger.info("[Codex][Browser] 邮箱提交后认证页面状态：%s", entry_state)
         pw_result = _fill_login_password_if_present(driver, email, timeout=18)
         if pw_result == "next_step":
             if _is_mfa_challenge_page(driver):

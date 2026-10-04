@@ -43,6 +43,13 @@ class CodexPasswordStateTests(unittest.TestCase):
         self.assertIn("inputs:", body)
         self.assertIn("buttons:", body)
 
+    def test_post_email_auth_entry_wait_has_explicit_states(self):
+        body = _source("_wait_for_codex_auth_entry_state")
+        self.assertIn('return "mfa"', body)
+        self.assertIn('return "email_otp"', body)
+        self.assertIn('return "password"', body)
+        self.assertIn('return "unknown"', body)
+
 
 if __name__ == "__main__":
     unittest.main()
