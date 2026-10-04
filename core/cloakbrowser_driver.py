@@ -299,8 +299,15 @@ class CloakSeleniumDriver:
 
     @staticmethod
     def _unwrap_js_result(page, handle: Any) -> Any:
-        # evaluate_handle 返回对象时，DOM 子项仍是独立 JSHandle；不能先
-        # json_value()，否则 {input, button} 会丢失元素语义。
+        # 先判断元素句柄。ElementHandle 也暴露 get_properties；若先展开，
+        # 会把 DOM 节点自身递归成无限属性树。
+        try:
+            element = handle.as_element()
+        except Exception:
+            element = None
+        if element is not None:
+            return CloakElement(page, handle=element)
+        # 普通对象/数组的子项仍是独立 JSHandle，保留其中的 DOM 元素。
         try:
             properties = handle.get_properties()
         except Exception:
@@ -312,17 +319,14 @@ class CloakSeleniumDriver:
                     return [CloakSeleniumDriver._unwrap_js_result(page, properties[key]) for key in sorted(keys, key=lambda key: int(key))]
                 return {str(key): CloakSeleniumDriver._unwrap_js_result(page, child) for key, child in properties.items()}
             finally:
+                # 子句柄若已变成 CloakElement，所有权已转交给返回对象；这里只
+                # 释放未被返回的普通句柄，避免点击/输入前提前 dispose 元素。
                 for child in properties.values():
                     try:
-                        child.dispose()
+                        if child.as_element() is None:
+                            child.dispose()
                     except Exception:
                         pass
-        try:
-            element = handle.as_element()
-        except Exception:
-            element = None
-        if element is not None:
-            return CloakElement(page, handle=element)
         try:
             value = handle.json_value()
             return CloakSeleniumDriver._unwrap_result_value(page, value)
