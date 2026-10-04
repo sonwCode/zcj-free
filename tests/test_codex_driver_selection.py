@@ -8,13 +8,38 @@ from unittest.mock import patch
 SOURCE = Path(__file__).parents[1] / "core" / "codex_oauth.py"
 
 
+# 驱动分派现在走降级链，除入口外还需一并加载解析/分发辅助函数与其常量。
+_HELPER_NAMES = {
+    "_codex_result",
+    "run_codex_oauth",
+    "_resolve_oauth_drivers",
+    "_normalize_driver_name",
+    "_run_codex_oauth_with_driver",
+    "_is_codex_driver_recoverable",
+    "_last_driver_error",
+}
+
+
 def load_entry():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
-    wanted = {"_codex_result", "run_codex_oauth"}
-    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    body = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in _HELPER_NAMES:
+            body.append(node)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = []
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    names.append(target.id)
+            if any(n.startswith("_CODEX_DRIVER") or n == "_LAST_DRIVER_ERROR" for n in names):
+                body.append(node)
+    # 类体级别执行的辅助（如 _LAST_DRIVER_ERROR 已含在上面），补上运行期依赖。
+    body.append(ast.parse("_LAST_DRIVER_ERROR = []", str(SOURCE)).body[0])
     namespace = {
         "_cfg": types.SimpleNamespace(ENABLE_CODEX_AUTO=True),
         "_is_cpa_callback_reauth_error": lambda exc: False,
+        "logger": __import__("logging").getLogger("test"),
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace

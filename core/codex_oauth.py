@@ -1963,6 +1963,166 @@ def _save_sub2_local_record(
 # 入口
 # ============================================================
 
+
+# ============================================================
+# Codex OAuth 驱动降级链
+# ============================================================
+
+# 资源/配额/依赖类错误：换一个驱动通常能绕过，不该让整轮失败。
+_CODEX_DRIVER_RESOURCE_ERROR_MARKERS = (
+    "窗口额度不足", "额度不足", "quota", "insufficient",
+    "额度", "余额不足", "no_balance", "out of capacity",
+    "服务不可用", "service unavailable", "connection refused",
+    "connection reset", "connection closed", "econnrefused",
+    "temporarily unavailable", "circuit breaker",
+)
+
+# 依赖缺失类错误：本机没装对应驱动所需的组件，同样应降级。
+_CODEX_DRIVER_DEPENDENCY_ERROR_MARKERS = (
+    "no module named", "modulenotfounderror", "未安装", "未配置",
+    "api key 不能为空", "api_base 不能为空", "token 不能为空",
+)
+
+_CODEX_DRIVER_ALIASES: dict[str, str] = {
+    "roxy": "roxy", "roxybrowser": "roxy", "fingerprint": "roxy", "browser": "roxy",
+    "cloak": "cloak", "cloakbrowser": "cloak",
+    "browser_use": "browser_use", "browseruse": "browser_use",
+    "browser-use": "browser_use", "bu": "browser_use",
+    "skyvern": "skyvern", "sv": "skyvern",
+    "protocol": "protocol", "api": "protocol", "http": "protocol",
+}
+
+_LAST_DRIVER_ERROR: list[str] = []
+
+
+def _last_driver_error() -> str:
+    return _LAST_DRIVER_ERROR[-1] if _LAST_DRIVER_ERROR else ""
+
+
+def _normalize_driver_name(raw: str) -> str:
+    name = str(raw or "").strip().lower()
+    return _CODEX_DRIVER_ALIASES.get(name, "")
+
+
+def _resolve_oauth_drivers(driver: str | None) -> list[str]:
+    """把配置解析成有序且去重的驱动降级链。
+
+    显式传入 driver 时只用它；否则读取 CODEX_OAUTH_DRIVER，支持逗号分隔。
+    CODEX_OAUTH_DRIVER_FALLBACK=False 时只保留第一个可用驱动。
+    末尾兜底追加 protocol——纯协议驱动不依赖任何外部浏览器资源。
+    """
+    try:
+        from config import codex as _codex_cfg
+        from config import roxybrowser as _roxy_cfg
+    except Exception:
+        return ["protocol"]
+
+    raw = str(driver if driver is not None else getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "") or "").strip()
+    if raw.lower() == "same_as_registration":
+        raw = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip()
+
+    candidates: list[str] = []
+    for chunk in raw.split(","):
+        name = _normalize_driver_name(chunk)
+        if name and name not in candidates:
+            candidates.append(name)
+    if not candidates:
+        candidates = ["protocol"]
+
+    allow_fallback = bool(getattr(_codex_cfg, "CODEX_OAUTH_DRIVER_FALLBACK", True))
+    if not allow_fallback:
+        return candidates[:1]
+    if "protocol" not in candidates:
+        candidates.append("protocol")
+    return candidates
+
+
+def _is_codex_driver_recoverable(exc: BaseException | str) -> bool:
+    """判断某个驱动的失败是否值得换驱动重试。
+
+    只对资源/配额/依赖类错误降级；账号级失败（已废号、验证码被拒）换驱动
+    也没用，应当直接返回，避免重复消耗邮箱与短信。
+    """
+    text = str(exc or "").lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _CODEX_DRIVER_RESOURCE_ERROR_MARKERS):
+        return True
+    if any(marker in text for marker in _CODEX_DRIVER_DEPENDENCY_ERROR_MARKERS):
+        return True
+    return False
+
+
+def _run_codex_oauth_with_driver(
+    oauth_driver: str,
+    *,
+    email: str,
+    otp_provider=None,
+    proxy: str | None = None,
+) -> dict | None:
+    """用指定驱动跑一轮 Codex 授权。
+
+    返回结果 dict；当该驱动因可恢复原因不可用时返回 None 并记录原因，
+    由调用方决定是否降级到下一个驱动。
+    """
+    _LAST_DRIVER_ERROR.clear()
+    driver_name = _normalize_driver_name(oauth_driver) or oauth_driver
+    if driver_name == "roxy":
+        from core.roxy_codex_oauth import run_roxy_codex_oauth
+        return run_roxy_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
+
+    if driver_name == "browser_use":
+        from core.browser_use_codex_oauth import run_browser_use_codex_oauth
+        return run_browser_use_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
+
+    if driver_name == "skyvern":
+        from core.skyvern_codex_oauth import run_skyvern_codex_oauth
+        return run_skyvern_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
+
+    if driver_name == "cloak":
+        from config import cloakbrowser as _cloak_cfg
+        from core.cloakbrowser_driver import build_cloak_driver
+        from core.roxy_codex_oauth import run_roxy_codex_oauth
+        browser = opened = None
+        try:
+            browser, opened = build_cloak_driver(proxy=proxy)
+        except Exception as exc:
+            if _is_codex_driver_recoverable(exc):
+                _LAST_DRIVER_ERROR.append(f"{type(exc).__name__}: {exc}")
+                return None
+            raise
+        try:
+            return run_roxy_codex_oauth(
+                email,
+                otp_provider=otp_provider,
+                proxy=proxy,
+                force=True,
+                existing_driver=browser,
+                existing_opened=opened,
+                reuse_existing_profile=True,
+                clear_existing_state=True,
+            )
+        except Exception as exc:
+            if _is_codex_driver_recoverable(exc):
+                _LAST_DRIVER_ERROR.append(f"{type(exc).__name__}: {exc}")
+                return None
+            raise
+        finally:
+            if browser is not None and not bool(getattr(_cloak_cfg, "CLOAK_KEEP_BROWSER_OPEN", False)):
+                try:
+                    browser.quit()
+                except Exception:
+                    pass
+
+    if driver_name != "protocol":
+        raise RuntimeError(
+            f"[Codex] 不支持的 CODEX_OAUTH_DRIVER={oauth_driver!r}，"
+            f"可选 protocol / roxy / cloak / browser_use / skyvern"
+        )
+    # protocol 驱动走下面的主流程，不在这里返回。
+    return None
+
+
 def run_codex_oauth(
     email: str,
     otp_provider=None,
@@ -1994,48 +2154,41 @@ def run_codex_oauth(
 
     # Codex OAuth 支持多种驱动：
     # protocol：原纯协议；roxy/cloak/browser_use：用真实浏览器跑页面并捕获 localhost callback。
-    try:
-        from config import codex as _codex_cfg
-        from config import roxybrowser as _roxy_cfg
-        oauth_driver = str(driver or getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "protocol") or "protocol").strip().lower()
-        if oauth_driver == "same_as_registration":
-            oauth_driver = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
-        if oauth_driver in ("roxy", "roxybrowser", "fingerprint", "browser"):
-            from core.roxy_codex_oauth import run_roxy_codex_oauth
-            return run_roxy_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
-        if oauth_driver in ("browser_use", "browseruse", "browser-use", "bu"):
-            from core.browser_use_codex_oauth import run_browser_use_codex_oauth
-            return run_browser_use_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
-        if oauth_driver in ("skyvern", "sv"):
-            from core.skyvern_codex_oauth import run_skyvern_codex_oauth
-            return run_skyvern_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
-        if oauth_driver in ("cloak", "cloakbrowser"):
-            from config import cloakbrowser as _cloak_cfg
-            from core.cloakbrowser_driver import build_cloak_driver
-            from core.roxy_codex_oauth import run_roxy_codex_oauth
-            driver, opened = build_cloak_driver(proxy=proxy)
-            try:
-                return run_roxy_codex_oauth(
-                    email,
-                    otp_provider=otp_provider,
-                    proxy=proxy,
-                    force=True,
-                    existing_driver=driver,
-                    existing_opened=opened,
-                    reuse_existing_profile=True,
-                    clear_existing_state=True,
-                )
-            finally:
-                if not bool(getattr(_cloak_cfg, "CLOAK_KEEP_BROWSER_OPEN", False)):
-                    try:
-                        driver.quit()
-                    except Exception:
-                        pass
-        if oauth_driver not in ("protocol", "api", "http"):
-            raise RuntimeError(f"[Codex] 不支持的 CODEX_OAUTH_DRIVER={oauth_driver!r}，可选 protocol / roxy / cloak / browser_use / skyvern")
-    except ImportError:
-        # 没装 selenium / 未提供 roxy 配置时继续走协议模式，保持旧行为。
-        pass
+    #
+    # 驱动以“降级链”方式解析：CODEX_OAUTH_DRIVER 允许逗号分隔多个驱动，
+    # 遇到资源/配额类错误自动换下一个，避免单个驱动（如 Roxy 窗口额度）耗尽
+    # 或临时故障时整轮补跑直接失败。
+    resolved_drivers = _resolve_oauth_drivers(driver)
+    last_driver_result: dict | None = None
+    for index, oauth_driver in enumerate(resolved_drivers):
+        has_next = index + 1 < len(resolved_drivers)
+        try:
+            result = _run_codex_oauth_with_driver(
+                oauth_driver,
+                email=email,
+                otp_provider=otp_provider,
+                proxy=proxy,
+            )
+        except ImportError:
+            # 没装 selenium / 未提供 roxy 配置时继续走协议模式，保持旧行为。
+            break
+        if result is not None:
+            return result
+        # 到这里说明该驱动自身出了问题（额度/依赖缺失等），记录后尝试下一个。
+        last_driver_result = {"driver": oauth_driver, "error": _last_driver_error()}
+        if not has_next:
+            message = (
+                f"[Codex] 所有 OAuth 驱动均不可用：{resolved_drivers}；"
+                f"最后错误：{_last_driver_error() or '未知'}"
+            )
+            logger.error(message)
+            return _codex_result(status="failed", email=email, message=message)
+        logger.warning(
+            "[Codex] 驱动 %s 不可用，降级到下一个驱动 %s：%s",
+            oauth_driver,
+            resolved_drivers[index + 1],
+            _last_driver_error() or "未知原因",
+        )
 
     if otp_provider is None:
         from core.email_provider import wait_for_otp as otp_provider
