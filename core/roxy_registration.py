@@ -1913,6 +1913,28 @@ def _is_signup_password_page(driver) -> bool:
     )
 
 
+def _password_state_has_form(state: dict) -> bool:
+    """注册密码路由下，DOM 里是否真的有可填写的密码表单。
+
+    _is_signup_password_page 只看 URL。密码提交后的跳转被网络截断时，
+    URL 仍停在 /create-account/password，但 DOM 已经是一个空壳（没有 form、
+    没有 input）。只凭 URL 会把它当成正常密码页，死等到超时才失败。
+    """
+    if not isinstance(state, dict) or state.get("error"):
+        return False
+    if state.get("forms"):
+        return True
+    for item in state.get("inputs") or []:
+        if not isinstance(item, dict) or not item.get("visible"):
+            continue
+        attrs = " ".join(
+            str(item.get(key) or "") for key in ("type", "name", "autocomplete")
+        ).lower()
+        if "password" in attrs:
+            return True
+    return False
+
+
 def _is_login_password_page(driver) -> bool:
     try:
         url = str(driver.current_url or '').lower()
@@ -2113,7 +2135,9 @@ def _click_continue_with_password_if_present(driver) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str | None:
+def _fill_password_page_if_present(
+    driver, email: str, timeout: int = 25, _recovery_round: int = 0
+) -> str | None:
     """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。"""
     _check_manual_stop()
     end = time.time() + timeout
@@ -2315,6 +2339,8 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         # 会在 /create-account/password 上查找验证码框。这里给足提交/导航时间。
         wait_end = time.time() + 60
         retried_submit = False
+        empty_form_since: float | None = None
+        reloaded_empty_password_page = False
         while time.time() < wait_end:
             _check_manual_stop()
             if _is_email_verification_page(driver):
@@ -2335,6 +2361,46 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                         f"密码页提交被拒绝: {error_text} "
                         f"url={error_state.get('url') or getattr(driver, 'current_url', '')}"
                     )
+                if _password_state_has_form(error_state):
+                    empty_form_since = None
+                else:
+                    # URL 仍在密码路由上，但 DOM 里连表单和输入框都没有：
+                    # 提交后的跳转被网络截断，或 SPA 过渡卡住。只靠 URL 判定
+                    # 会在这里死等到超时，所以持续该状态一段时间后整页重载
+                    # 一次，再按重载后的真实页面状态决定下一步。
+                    if empty_form_since is None:
+                        empty_form_since = time.time()
+                    elif (
+                        not reloaded_empty_password_page
+                        and _recovery_round < 1
+                        and time.time() - empty_form_since >= 10
+                    ):
+                        reloaded_empty_password_page = True
+                        logger.warning(
+                            "%s 密码路由下已无密码表单，整页重载后重新判定：url=%s",
+                            _log_prefix(driver), error_state.get("url") or "",
+                        )
+                        try:
+                            driver.refresh()
+                        except Exception as exc:
+                            logger.warning(
+                                "%s 重载密码页失败，继续等待页面自行恢复：%s: %s",
+                                _log_prefix(driver), type(exc).__name__, str(exc)[:160],
+                            )
+                        _stop_aware_sleep(2.0)
+                        _check_manual_stop()
+                        if _is_email_verification_page(driver):
+                            logger.info("%s 重载后已进入邮箱验证码页，交给 OTP 阶段", _log_prefix(driver))
+                            return password
+                        if _has_access_token(driver):
+                            logger.info("%s 重载后已检测到登录态", _log_prefix(driver))
+                            return password
+                        if _password_state_has_form(_password_page_state(driver)):
+                            logger.info("%s 重载后密码表单已恢复，重新填写并提交", _log_prefix(driver))
+                            return _fill_password_page_if_present(
+                                driver, email, timeout=timeout, _recovery_round=_recovery_round + 1
+                            )
+                        continue
             if not retried_submit and time.time() > wait_end - 42 and _is_signup_password_page(driver):
                 retried_submit = True
                 retry_result = _resubmit_signup_password_form(driver)
@@ -2351,7 +2417,13 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         if _is_signup_password_page(driver):
             _check_manual_stop()
             current_url = str(getattr(driver, "current_url", "") or "")
-            raise RuntimeError(f"密码提交后仍停留在注册密码页: url={current_url} state={_password_page_state(driver)}")
+            final_state = _password_page_state(driver)
+            if not _password_state_has_form(final_state):
+                raise RuntimeError(
+                    f"密码提交后跳转被截断，密码路由下已无密码表单（整页重载后仍未恢复）: "
+                    f"url={current_url} state={final_state}"
+                )
+            raise RuntimeError(f"密码提交后仍停留在注册密码页: url={current_url} state={final_state}")
         return password
     # 一旦点击过“使用密码继续”，本次认证就已经确定要走注册密码路径。
     # 这里不能再用 URL 子串判断是否“还在密码流程里”：跨主机跳转到
