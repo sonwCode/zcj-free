@@ -325,7 +325,25 @@ def _wait_for_otp_input(driver, timeout: int = 30) -> None:
     raise RuntimeError("等待 OTP 输入框超时，页面未出现验证码输入框")
 
 
+# 注册流程刚设好的密码只存在于内存里：Cloak/Roxy 注册会在 Codex 授权完成后
+# 才把账号写入数据库，而 Codex 登录密码页需要通过邮箱查库取密码。查库必然为空，
+# 于是密码登录被静默跳过、降级为一次性验证码登录，服务端会连续报 Incorrect code
+# 并最终封掉 max_check_attempts。这里保存注册阶段刚生成的密码，供查库失败时兜底。
+_REGISTRATION_PASSWORD_CACHE: dict[str, str] = {}
+
+
+def remember_registration_password(email: str, password: str | None) -> None:
+    """注册阶段把刚设置的密码写入进程内缓存，供随后的 Codex 授权使用。"""
+    target = str(email or "").strip().lower()
+    secret = str(password or "").strip()
+    if target and secret:
+        _REGISTRATION_PASSWORD_CACHE[target] = secret
+
+
 def _account_password_for_email(email: str) -> str:
+    cached = _REGISTRATION_PASSWORD_CACHE.get(str(email or "").strip().lower(), "")
+    if cached:
+        return cached
     try:
         return _codex_proto._account_registration_password(email)
     except Exception:
@@ -402,6 +420,12 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
     """Codex OAuth 若账号有密码，优先在登录密码页输入密码。返回 next_step / email_otp / None。"""
     password = _account_password_for_email(email)
     if not password:
+        # 不能静默返回：账号未落库或密码丢失时这里会直接跳过密码登录，流程
+        # 降级成一次性验证码并被服务端连续拒绝，日志里却看不出发生了什么。
+        logger.warning(
+            "[Codex][Browser] 未取得账号注册密码，跳过密码登录并降级为邮箱验证码登录：email=%s",
+            email,
+        )
         return None
     end = time.time() + timeout
     while time.time() < end:
@@ -2088,6 +2112,7 @@ def _run_roxy_codex_oauth_once(
     existing_opened=None,
     reuse_existing_profile: bool = False,
     clear_existing_state: bool = True,
+    registration_password: str | None = None,
 ) -> dict:
     """指纹浏览器 Codex OAuth 入口。
 
@@ -2102,6 +2127,9 @@ def _run_roxy_codex_oauth_once(
         return proto._codex_result(status="skipped", message="email 为空")
     if otp_provider is None:
         otp_provider = wait_for_otp
+    if registration_password:
+        # 注册流程传下来的密码优先于查库结果，避免账号未落库时静默降级。
+        remember_registration_password(email, registration_password)
 
     client = None if reuse_existing_profile else RoxyBrowserClient()
     opened = existing_opened if reuse_existing_profile else client.open_profile()
@@ -2252,9 +2280,17 @@ def run_roxy_codex_oauth(
     existing_opened=None,
     reuse_existing_profile: bool = False,
     clear_existing_state: bool = True,
+    registration_password: str | None = None,
 ) -> dict:
-    """指纹浏览器 Codex OAuth 入口；CPA callback 409 timeout 时重新开启一轮授权。"""
+    """指纹浏览器 Codex OAuth 入口；CPA callback 409 timeout 时重新开启一轮授权。
+
+    registration_password 用于注册后立刻跑 Codex 的场景：账号此时尚未落库，
+    Codex 登录密码页拿不到密码就会降级成一次性验证码登录并被服务端拒绝。
+    """
     from core import codex_oauth as proto
+
+    if registration_password:
+        remember_registration_password(email, registration_password)
 
     max_rounds = 2
     last_result = None
@@ -2273,6 +2309,7 @@ def run_roxy_codex_oauth(
             existing_opened=existing_opened,
             reuse_existing_profile=reuse_existing_profile,
             clear_existing_state=clear_existing_state,
+            registration_password=registration_password,
         )
         last_result = result
         if result.get("ok"):

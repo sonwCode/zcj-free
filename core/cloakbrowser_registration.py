@@ -241,6 +241,9 @@ def _run_cloak_registration_impl(
                     existing_opened=opened,
                     force=True,
                     clear_existing_state=True,
+                    # 账号要到本轮注册收尾才落库，Codex 授权必须用刚设好的密码，
+                    # 否则密码登录会被静默跳过。
+                    registration_password=openai_password,
                 )
             else:
                 logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")

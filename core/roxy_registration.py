@@ -3058,6 +3058,9 @@ def run_roxy_registration(
                     existing_opened=opened,
                     force=True,
                     clear_existing_state=True,
+                    # 账号要到本轮注册收尾才落库，Codex 授权必须用刚设好的密码，
+                    # 否则密码登录会被静默跳过。
+                    registration_password=openai_password,
                 )
                 _traffic_checkpoint()
             else:
