@@ -50,10 +50,13 @@ class CodexPasswordStateTests(unittest.TestCase):
         self.assertIn('return "password"', body)
         self.assertIn('return "unknown"', body)
 
-    def test_unknown_login_state_retries_email_form_submission(self):
+    def test_initial_codex_email_flow_matches_reference_call_order(self):
         body = _source("_fill_email_and_otp")
-        self.assertIn('_recover_email_submit_if_stuck(driver, email)', body)
-        self.assertIn('仍停留 /log-in，执行邮箱表单重提交', body)
+        submit_at = body.index("_submit_email_step(driver)")
+        password_at = body.index("_fill_login_password_if_present(driver, email, timeout=18)")
+        self.assertLess(submit_at, password_at)
+        self.assertIn("按参考流程等待密码页或验证码页", body)
+        self.assertNotIn("仍停留 /log-in，执行邮箱表单重提交", body)
 
 
 if __name__ == "__main__":
