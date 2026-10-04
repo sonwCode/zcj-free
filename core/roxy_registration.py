@@ -1013,15 +1013,30 @@ def _submit_email_form_stable(driver, email: str) -> dict:
         // 不要在 execute_script 同步执行 submit.click()：
         // ChromeDriver 会等前端 submit/navigation，Roxy/Chrome 150 上可能卡到 page/script timeout。
         // setTimeout 让 Selenium 先返回，点击在页面事件循环里异步发生，和补交逻辑一致。
+        window.__roxy_email_submit_trace = {startedAt:Date.now(), events:[], requests:[]};
+        const trace = window.__roxy_email_submit_trace;
+        const push = item => { try { trace.events.push(Object.assign({at:Date.now()}, item)); } catch (_) {} };
+        if (!window.__roxy_email_submit_fetch_hook) {
+          window.__roxy_email_submit_fetch_hook = true;
+          const originalFetch = window.fetch;
+          window.fetch = function(...args) {
+            const url = String(args[0]?.url || args[0] || '');
+            const record = {kind:'fetch', url:url.slice(0,240), method:String(args[1]?.method || 'GET')};
+            try { trace.requests.push(record); } catch (_) {}
+            return originalFetch.apply(this, args).then(response => { record.status=response.status; record.ok=response.ok; return response; }).catch(error => { record.error=String(error).slice(0,180); throw error; });
+          };
+        }
         setTimeout(() => {
           try {
-            input.focus();
-            input.dispatchEvent(new KeyboardEvent('keydown', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'}));
-            input.dispatchEvent(new KeyboardEvent('keypress', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'}));
-            input.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'}));
-            if (submit && !submit.disabled) submit.click();
-            else if (form && typeof form.requestSubmit === 'function') form.requestSubmit();
-          } catch (_) {}
+            const currentInput = [...document.querySelectorAll('input[type="email"],input[name="email"],input[name="username"],input[autocomplete*="email"]')].find(editable);
+            const currentForm = currentInput?.closest('form');
+            const currentSubmit = currentForm && [...currentForm.querySelectorAll('button[type="submit"],input[type="submit"]')].find(el => visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
+            push({type:'submit_attempt', hasInput:!!currentInput, hasForm:!!currentForm, hasSubmit:!!currentSubmit, oldNode:!!submit});
+            if (currentInput) { currentInput.focus(); currentInput.dispatchEvent(new KeyboardEvent('keydown', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'})); currentInput.dispatchEvent(new KeyboardEvent('keypress', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'})); currentInput.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'})); }
+            if (currentSubmit) currentSubmit.click();
+            else if (currentForm && typeof currentForm.requestSubmit === 'function') currentForm.requestSubmit();
+            push({type:'submit_dispatched'});
+          } catch (error) { push({type:'submit_error', error:String(error).slice(0,180)}); }
         }, 80);
 
         window.__roxy_email_submit_debug = {
@@ -1073,7 +1088,11 @@ def _submit_email_step(driver, email: str | None = None) -> None:
             if "/log-in" not in current or "email-verification" in current:
                 return
             _stop_aware_sleep(0.4)
-        raise RuntimeError(f"email_submit_stalled: 提交邮箱后仍停留登录页 state={_email_entry_state(driver)}")
+        try:
+            trace = driver.execute_script("return window.__roxy_email_submit_trace || null;")
+        except Exception as trace_exc:
+            trace = {"error": f"{type(trace_exc).__name__}: {trace_exc}"}
+        raise RuntimeError(f"email_submit_stalled: 提交邮箱后仍停留登录页 state={_email_entry_state(driver)} trace={trace}")
     logger.warning("%s 邮箱稳定表单提交失败，回退 UI 点击提交：%s", _log_prefix(driver), stable_submit)
     if _submit_nearest_form_for_active_input(driver):
         return

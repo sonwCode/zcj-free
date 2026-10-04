@@ -74,6 +74,13 @@ class CodexPasswordStateTests(unittest.TestCase):
         self.assertIn("_recover_email_submit_if_stuck(driver, email_value)", body)
         self.assertIn("email_submit_stalled", body)
 
+    def test_email_submit_stall_includes_runtime_trace(self):
+        registration_text = (ROOT / "core" / "roxy_registration.py").read_text(encoding="utf-8")
+        self.assertIn("__roxy_email_submit_trace", registration_text)
+        self.assertIn("submit_attempt", registration_text)
+        self.assertIn("record.status=response.status", registration_text)
+        self.assertIn("trace={trace}", registration_text)
+
 
 if __name__ == "__main__":
     unittest.main()
