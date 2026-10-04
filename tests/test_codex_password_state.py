@@ -65,6 +65,15 @@ class CodexPasswordStateTests(unittest.TestCase):
         self.assertIn('_human_click(driver, result.get("button")', body)
         self.assertIn("codex_password_submit", body)
 
+    def test_shared_email_submit_confirms_navigation_and_recovers_stall(self):
+        registration_text = (ROOT / "core" / "roxy_registration.py").read_text(encoding="utf-8")
+        tree = ast.parse(registration_text)
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_submit_email_step")
+        body = ast.get_source_segment(registration_text, node) or ""
+        self.assertIn("/log-in", body)
+        self.assertIn("_recover_email_submit_if_stuck(driver, email_value)", body)
+        self.assertIn("email_submit_stalled", body)
+
 
 if __name__ == "__main__":
     unittest.main()

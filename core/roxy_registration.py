@@ -1057,7 +1057,23 @@ def _submit_email_step(driver, email: str | None = None) -> None:
         logger.info("%s 邮箱稳定表单提交：%s", _log_prefix(driver), stable_submit)
         _stop_aware_sleep(1.0)
         _assert_not_external_idp(driver, "稳定表单提交邮箱后")
-        return
+        # 参考实现的异步 Enter/click 偶发只触发前端事件而不推进认证路由；
+        # 在共享提交层确认页面确实离开 /log-in，停滞时补一次同一表单提交。
+        deadline = time.time() + 4
+        while time.time() < deadline:
+            current = str(getattr(driver, "current_url", "") or "").lower()
+            if "/log-in" not in current or "email-verification" in current:
+                return
+            _stop_aware_sleep(0.4)
+        recovery = _recover_email_submit_if_stuck(driver, email_value)
+        logger.warning("%s 邮箱提交后仍停留 /log-in，执行共享恢复：%s", _log_prefix(driver), recovery)
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            current = str(getattr(driver, "current_url", "") or "").lower()
+            if "/log-in" not in current or "email-verification" in current:
+                return
+            _stop_aware_sleep(0.4)
+        raise RuntimeError(f"email_submit_stalled: 提交邮箱后仍停留登录页 state={_email_entry_state(driver)}")
     logger.warning("%s 邮箱稳定表单提交失败，回退 UI 点击提交：%s", _log_prefix(driver), stable_submit)
     if _submit_nearest_form_for_active_input(driver):
         return
