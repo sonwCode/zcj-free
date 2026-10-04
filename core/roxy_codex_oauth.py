@@ -489,7 +489,9 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
           .filter(x => x.below)
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
-        return {ok:true, reason:'password_targets'};
+        const target = buttons[0].el;
+        target.scrollIntoView({block:'center'});
+        return {ok:true, reason:'password_targets', text:(target.textContent || target.getAttribute('value') || '').trim().slice(0,80), type:target.getAttribute('type') || '', dd:target.getAttribute('data-dd-action-name') || '', ariaDisabled:target.getAttribute('aria-disabled') || ''};
         """) or {}
         if not result.get("ok"):
             logger.info("[Codex][Browser] 登录密码页未找到输入/提交按钮：%s", result)
@@ -497,8 +499,20 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
             continue
         _human_type_password_by_selector(driver, password)
         human_delay("form", minimum=2.0, maximum=3.6)
-        _click_if_present(driver, ["button[type='submit']"], timeout=8)
-        logger.info("[Codex][Browser] 已填写并提交登录密码：%s", email)
+        submit_result = driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const input = [...document.querySelectorAll('input[type=\"password\"],input[name*=\"password\" i],input[autocomplete=\"current-password\"]')].find(visible);
+        const form = input?.closest('form');
+        const button = form && [...form.querySelectorAll('button[type=\"submit\"],input[type=\"submit\"]')].find(el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true');
+        if (!button) return {ok:false, reason:'missing_password_submit'};
+        button.scrollIntoView({block:'center'});
+        if (form && typeof form.requestSubmit === 'function') form.requestSubmit(button); else button.click();
+        return {ok:true, reason:'password_submitted'};
+        """) or {};
+        if not submit_result.get("ok"):
+            logger.warning("[Codex][Browser] 登录密码提交按钮未找到：%s", submit_result)
+            return None
+        logger.info("[Codex][Browser] 已填写并提交登录密码：%s detail=%s", email, submit_result)
         wait_end = time.time() + 12
         while time.time() < wait_end:
             if _is_mfa_challenge_page(driver):
