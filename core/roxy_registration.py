@@ -342,11 +342,26 @@ def _human_click(driver, el, *, label: str = "") -> None:
         x = float(point.get("x") or 0)
         y = float(point.get("y") or 0)
         if hasattr(driver, "execute_cdp_cmd") and x > 0 and y > 0:
-            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+            moved = driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
             _stop_aware_sleep(random.uniform(0.05, 0.22))
-            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
+            pressed = driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
             _stop_aware_sleep(random.uniform(0.035, 0.13))
-            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+            released = driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+            # Cloak 适配层的 execute_cdp_cmd 在 CDP 会话失败时返回 None 而不是抛错。
+            # 此时鼠标事件根本没派发，必须补一次 JS 合成点击，否则会出现
+            # “日志报告已点击、页面毫无反应”的静默失败。
+            if pressed is None or released is None:
+                logger.warning(
+                    "%s CDP 鼠标事件未派发成功，回退 JS 合成点击 label=%s moved=%s pressed=%s released=%s",
+                    _log_prefix(driver), label, moved, pressed, released,
+                )
+                driver.execute_script(r"""
+                const el = arguments[0];
+                el.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
+                el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+                el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+                el.click();
+                """, el)
         else:
             driver.execute_script(r"""
             const el = arguments[0];
@@ -1986,16 +2001,33 @@ def _click_passwordless_signup_if_present(driver) -> dict:
         const btn = candidates.find(isPasswordlessOtp);
         if (!btn) return {ok:false, reason:'missing_passwordless_button'};
         btn.scrollIntoView({block:'center'});
-        try { btn.click(); }
-        catch (_) { btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); }
+        // 同“使用密码继续”：页面内合成 click 不被 React 手势判定接受，
+        // 交给 Python 侧 _human_click 派发完整指针事件。
+        btn.setAttribute('data-cloak-passwordless-otp', '1');
         return {
           ok:true,
-          reason:'clicked_passwordless_send_otp',
+          reason:'passwordless_send_otp_target',
           name: btn.getAttribute('name') || '',
           value: btn.getAttribute('value') || '',
           text: (btn.textContent || '').trim().slice(0, 80)
         };
         """) or {"ok": False, "reason": "empty_result"}
+        if not result.get("ok"):
+            return result
+        from selenium.webdriver.common.by import By
+        try:
+            marked = driver.find_elements(By.CSS_SELECTOR, "[data-cloak-passwordless-otp='1']")
+            driver.execute_script(
+                "document.querySelectorAll(\"[data-cloak-passwordless-otp='1']\")"
+                ".forEach(el => el.removeAttribute('data-cloak-passwordless-otp'));"
+            )
+            target = next((el for el in marked if _visible(el)), None)
+        except Exception:
+            target = None
+        if target is None:
+            return {"ok": False, "reason": "passwordless_button_target_lost"}
+        _human_click(driver, target, label="passwordless_send_otp")
+        result["reason"] = "clicked_passwordless_send_otp"
         return result
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -2030,17 +2062,34 @@ def _click_continue_with_password_if_present(driver) -> dict:
         const btn = candidates.find(isPasswordCreate);
         if (!btn) return {ok:false, reason:'missing_continue_with_password'};
         btn.scrollIntoView({block:'center'});
-        try { btn.click(); }
-        catch (_) {
-          btn.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
-        }
+        // 只做定位与标记，不在页面内直接 click。ChatGPT/Auth0 的“使用密码继续”
+        // 入口绑定的是指针事件链，execute_script 内的合成 click 常常不被 React
+        // 手势判定接受，导航不会真正发起。这里把元素交给 Python 侧的 _human_click
+        // 派发完整鼠标事件序列。
+        btn.setAttribute('data-cloak-pw-continue', '1');
         return {
           ok:true,
-          reason:'clicked_continue_with_password',
+          reason:'continue_with_password_target',
           href: btn.getAttribute('href') || '',
           text: (btn.textContent || '').trim().slice(0, 80)
         };
         """) or {"ok": False, "reason": "empty_result"}
+        if not result.get("ok"):
+            return result
+        from selenium.webdriver.common.by import By
+        try:
+            candidates_now = driver.find_elements(By.CSS_SELECTOR, "[data-cloak-pw-continue='1']")
+            driver.execute_script(
+                "document.querySelectorAll(\"[data-cloak-pw-continue='1']\")"
+                ".forEach(el => el.removeAttribute('data-cloak-pw-continue'));"
+            )
+            target = next((el for el in candidates_now if _visible(el)), None)
+        except Exception:
+            target = None
+        if target is None:
+            return {"ok": False, "reason": "continue_with_password_target_lost", **{k: v for k, v in result.items() if k != "ok"}}
+        _human_click(driver, target, label="continue_with_password")
+        result["reason"] = "clicked_continue_with_password"
         return result
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
