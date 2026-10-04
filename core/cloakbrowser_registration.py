@@ -20,7 +20,7 @@ from core.humanize import delay as human_delay
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
 from core.roxy_registration import (  # noqa: F401
-    _maybe_accept, _type_email_address, _submit_email_and_wait_next, _fill_password_page_if_present,
+    _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
     _safe_get,
@@ -80,14 +80,6 @@ def _bounded_cleanup(label: str, callback):
     elif errors:
         logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(errors[0]).__name__, errors[0])
     return result[0] if result else None
-
-
-def _restart_cloak_email_otp(driver, email: str) -> None:
-    """重新打开登录入口提交邮箱，避免登录页状态下继续点击 resend。"""
-    _safe_get(driver, "https://chatgpt.com/auth/login", timeout=60, attempts=2, accept_hosts=("chatgpt.com",))
-    human_delay("navigate")
-    _maybe_accept(driver)
-    _submit_email_and_wait_next(driver, email, attempts=2)
 
 
 def _run_cloak_registration_impl(
@@ -166,14 +158,14 @@ def _run_cloak_registration_impl(
                     if otp_attempt >= max_otp_attempts:
                         raise
                     logger.warning(
-                        "[Cloak注册][OTP] 未收到新验证码，重新提交邮箱触发 OTP（下一轮 %s/%s）：%s: %s",
+                        "[Cloak注册][OTP] 未收到新验证码，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
                         otp_attempt + 1,
                         max_otp_attempts,
                         type(exc).__name__,
                         str(exc)[:180],
                     )
                     otp_after_ts = time.time()
-                    _restart_cloak_email_otp(driver, email)
+                    _click_resend_email_otp(driver, timeout=25)
                     human_delay("api")
                     current_otp = None
                     continue
@@ -200,7 +192,7 @@ def _run_cloak_registration_impl(
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             otp_after_ts = time.time()
-            _restart_cloak_email_otp(driver, email)
+            _click_resend_email_otp(driver, timeout=25)
             human_delay("api")
             current_otp = None
 
