@@ -1320,8 +1320,9 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
                 now = time.time()
                 if cleared_seen_at is None:
                     cleared_seen_at = now
-                # URL 已带 email 查询参数时更像是提交后的中间态，给它更长观察窗口。
-                debounce = 18.0 if ("/auth/login" in url and "email=" in url) else 5.0
+                # URL 在 /auth/login 且有任何查询参数（email=, callbackUrl=, error= 等）都是提交后的中间态，给更长观察窗口。
+                # Job 85 证明 callbackUrl 参数也需要 18s debounce。
+                debounce = 18.0 if ("/auth/login" in url and "?" in url) else 5.0
                 if now - cleared_last_log_at > 2.0:
                     logger.info(
                         "%s 邮箱提交后检测到输入框短暂清空，继续等待跳转：elapsed=%.1fs debounce=%.1fs url=%s",
