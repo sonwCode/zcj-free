@@ -20,7 +20,7 @@ from core.humanize import delay as human_delay
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
 from core.roxy_registration import (  # noqa: F401
-    _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
+    _maybe_accept, _type_email_address, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
     _safe_get,
