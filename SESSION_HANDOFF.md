@@ -292,3 +292,12 @@ cd /实际项目目录 && git status --short --branch && git rev-parse --short H
 - 本地 Codex 投影回归测试 3/3 通过；生产真实列表两条 CPA 记录均返回 `plan=free`、非空 `account_id` 和 `expired`。
 - 生产 `core/db.py` SHA-256：`e690a1feb649c9cb3153d071602d76e7d30cd948f7a34753ed1dd672a38f13b3`；生产 py_compile 退出码为 0。
 - 重启后服务 active，MainPID=484599；HTTP 健康检查返回 302 `/login?next=/`。
+
+## 17. 2026-10-06 Codex 手机表单 React 状态修复
+
+- 根因：Cloak 流程通过 JS 直接调用 `radio.click()` 和 setter 改手机号时，DOM 显示值已更新，但 React/React-Aria 内部表单状态仍可能为空或回到 WhatsApp；生产日志表现为 `channels=[sms=n whatsapp=Y]`、`Phone number required` 和 `send_not_accepted`。
+- 修复：SMS 通道改用现有真实元素点击器；手机号改用真实键盘事件同步受控输入状态，并对隐藏 E.164 字段做回写校验；通道选择后移除额外 document blur/change 等待，缩短到提交的状态漂移窗口。
+- 回归覆盖：生产依赖环境运行 `test_roxy_codex_phone.py` 共 14 项，全部通过；新增真实 SMS 点击、真实键盘输入和提交时序断言。
+- 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T124609Z-codex-phone-react-state/roxy-codex-oauth-before.tar.gz`。
+- 生产 `core/roxy_codex_oauth.py` SHA-256：`08e4a850f4bde7c8235605b7516ce2f75399a7cb161b4fd4fdecf8529b119ac7`；生产 py_compile 退出码为 0。
+- 重启后服务 active，MainPID=36837；HTTP 健康检查返回 302 `/login?next=/`。

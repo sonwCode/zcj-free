@@ -1084,23 +1084,31 @@ def _select_sms_channel_or_raise(driver) -> None:
     # checked 状态，提交前若回到 WhatsApp 就立即释放当前激活并换号。
     last_state = state
     for selection_round in range(1, 4):
-        driver.execute_script(r"""
+        target_info = driver.execute_script(r"""
         const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
         const radios = [...document.querySelectorAll('input[type=radio]')].filter(visible);
         const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
-        if (!sms) return false;
+        if (!sms) return null;
         const label = sms.id
           ? [...document.querySelectorAll('label')].find(el => el.htmlFor === sms.id)
           : null;
-        const target = label || sms.closest('label') || sms.closest('[role="radio"]') || sms;
-        sms.click();
-        if (!sms.checked && target !== sms) target.click();
-        sms.dispatchEvent(new Event('input', {bubbles:true}));
-        sms.dispatchEvent(new Event('change', {bubbles:true}));
-        return true;
-        """)
-        _stop_sleep(0.35)
+        return {radio: sms, target: label || sms.closest('label') || sms.closest('[role="radio"]') || sms};
+        """) or {}
+        target = target_info.get("target") or target_info.get("radio")
+        if not target:
+            logger.warning("[Codex][Browser] 当前页面找不到可点击的 SMS 通道控件")
+            continue
+        try:
+            # 通过 Cloak/Chrome 的真实元素点击更新 React/React-Aria 内部状态；
+            # 仅执行 HTMLElement.click() 时，DOM checked 可能变化但表单状态仍是旧值。
+            _human_click(driver, target, label="codex_sms_channel")
+        except Exception as click_exc:
+            logger.warning("[Codex][Browser] 真实点击 SMS 通道失败，回退元素点击：%s", str(click_exc)[:160])
+            radio = target_info.get("radio")
+            if radio:
+                driver.execute_script("arguments[0].click(); arguments[0].dispatchEvent(new Event('change', {bubbles:true}));", radio)
+        _stop_sleep(0.25)
         last_state = _phone_page_state(driver)
         last_radios = last_state.get("radios") or []
         sms_checked = any(
@@ -1601,6 +1609,38 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
       url: location.href,
     };
     """, phone, expected_dial_code)
+    if result and result.get("ok"):
+        try:
+            # 先用真实键盘事件写入可见手机号，让 React/React-Aria 的受控状态
+            # 与 DOM value 同步；JS setter 只作为初始值和兼容回退。
+            phone_input = _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=2)
+            _human_type_text(driver, phone_input, str(result.get("visibleValue") or ""))
+            driver.execute_script(r"""
+            const form = document.querySelector('form[action*="/add-phone" i]')
+              || [...document.querySelectorAll('form')].find(f => /add-phone/i.test(f.getAttribute('action') || ''));
+            const hidden = form?.querySelector('input[name="phoneNumber"]');
+            if (!hidden) return false;
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            if (setter) setter.call(hidden, String(arguments[0] || ''));
+            else hidden.value = String(arguments[0] || '');
+            hidden.dispatchEvent(new Event('input', {bubbles:true}));
+            hidden.dispatchEvent(new Event('change', {bubbles:true}));
+            return true;
+            """, str(result.get("e164") or phone))
+            keyboard_state = driver.execute_script(r"""
+            const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+            const form = document.querySelector('form[action*="/add-phone" i]')
+              || [...document.querySelectorAll('form')].find(f => /add-phone/i.test(f.getAttribute('action') || ''));
+            const phoneInput = [...(form?.querySelectorAll('input[type="tel"], input[name="__reservedForPhoneNumberInput_tel"], input[autocomplete="tel"], input[name="phone"], input[name="phone_number"]') || [])].find(visible);
+            const hidden = form?.querySelector('input[name="phoneNumber"]');
+            return {actualVisible: phoneInput?.value || '', hiddenValue: hidden?.value || ''};
+            """) or {}
+            result.update({
+                "actualVisible": keyboard_state.get("actualVisible") or result.get("actualVisible"),
+                "hiddenValue": keyboard_state.get("hiddenValue") or result.get("hiddenValue"),
+            })
+        except Exception as exc:
+            logger.debug("[Codex][Browser] 真实键盘写入手机号失败，保留 JS 写入结果：%s", str(exc)[:160])
     if not result or not result.get("ok"):
         reason = "phone_country_mismatch" if (result or {}).get("error") == "phone_country_mismatch" else "phone_value_write_failed"
         raise RuntimeError(f"{reason}: 手机号写入失败 result={result} state={_phone_page_state(driver)}")
@@ -1932,7 +1972,9 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
     )
     logger.info("[Codex][Browser] 检查并选择 SMS 短信通道")
     _select_sms_channel_or_raise(driver)
-    _blur_active_input_and_wait(driver, label="短信通道确认完成")
+    # SMS 通过真实控件点击后立即进入最终校验；额外对 document 派发 change
+    # 会给 React/React-Aria 留出一次无效重渲染机会，把通道切回 WhatsApp。
+    _stop_sleep(0.25)
     # 选择通道会让 add-phone 表单整体重新渲染，已填的手机号可能被 React 用组件
     # 状态（空）覆盖回 DOM。提交前必须重新校验并按需重填。
     try:
@@ -1943,7 +1985,7 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
             str(verify_exc)[:200],
         )
         phone_fill = _set_phone_value(driver, e164, timeout=10)
-        _blur_active_input_and_wait(driver, label="手机号重填完成")
+        _stop_sleep(0.25)
         phone_verify = _verify_add_phone_value_before_submit(
             driver, str(phone_fill.get("e164") or e164), str(phone_fill.get("dialCode") or dial_code),
         )

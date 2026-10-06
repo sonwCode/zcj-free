@@ -93,7 +93,7 @@ class RoxyCodexPhoneTests(unittest.TestCase):
             "url": "https://auth.openai.com/u/add-phone",
             "radios": [{"value": "whatsapp", "checked": False}],
         }
-        self.assertEqual(self.classify(checked), "whatsapp_channel")
+        self.assertEqual(self.classify(checked), "whatsapp_channel_reverted")
         self.assertEqual(self.classify(only), "whatsapp_channel")
 
     def test_phone_code_page_is_not_classified_as_send_failure(self):
@@ -229,6 +229,27 @@ class RoxyCodexPhoneTests(unittest.TestCase):
             self.helpers["_verify_add_phone_value_before_submit"](
                 driver, "+84833648563", "84"
             )
+
+    def _function_source(self, name):
+        source = SOURCE.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(SOURCE))
+        node = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == name)
+        return ast.get_source_segment(source, node) or ""
+
+    def test_sms_selection_uses_real_element_click(self):
+        source = self._function_source("_select_sms_channel_or_raise")
+        self.assertIn('_human_click(driver, target, label="codex_sms_channel")', source)
+        self.assertNotIn("sms.click()", source)
+
+    def test_phone_fill_uses_real_keyboard_events_for_react_state(self):
+        source = self._function_source("_set_phone_value")
+        self.assertIn("_human_type_text(driver, phone_input", source)
+        self.assertIn("keyboard_state = driver.execute_script", source)
+
+    def test_phone_submit_skips_long_post_channel_blur(self):
+        source = self._function_source("_prepare_and_submit_add_phone")
+        self.assertNotIn('短信通道确认完成', source)
+        self.assertIn("_stop_sleep(0.25)", source)
 
 
 if __name__ == "__main__":
