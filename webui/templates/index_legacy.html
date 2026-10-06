@@ -136,9 +136,10 @@
     .accounts-table td:nth-child(8), .accounts-table th:nth-child(8) { overflow: visible; text-overflow: clip; }
     .accounts-table td:nth-child(11), .accounts-table th:nth-child(11) { overflow: visible; text-overflow: clip; }
     .outlook-table .col-actions { width: 220px; }
-    .codex-table .col-phone { width: 150px; }
-    .codex-table .col-phone-country { width: 120px; }
-    .codex-table .col-phone-price { width: 100px; }
+    .codex-table .col-phone-info { width: 240px; white-space: normal; overflow: visible; }
+    .codex-table .codex-phone-info-v2 { display: grid; gap: 1px; line-height: 1.35; white-space: normal; font-variant-numeric: tabular-nums; }
+    .codex-table .codex-phone-info-v2-line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .codex-table .codex-phone-info-v2-label { color: #667085; }
     .codex-table .col-actions { width: 260px; }
     th { position: sticky; top: 0; background: #fbfcfe; color: #475467; z-index: 1; font-size: 12px; }
     tr:hover td { background: #fbfdff; }
@@ -709,10 +710,10 @@
       </div>
       <div class="table-wrap">
         <table class="codex-table">
-          <colgroup><col class="col-check"><col class="col-email"><col class="col-phone"><col class="col-phone-country"><col class="col-phone-price"><col class="col-plan"><col class="col-status"><col class="col-account"><col class="col-time"><col class="col-expire"><col class="col-actions"></colgroup>
+          <colgroup><col class="col-check"><col class="col-email"><col class="col-phone-info"><col class="col-plan"><col class="col-status"><col class="col-account"><col class="col-time"><col class="col-expire"><col class="col-actions"></colgroup>
           <thead><tr>
             <th><input type="checkbox" id="codexSelectAll" title="全选/取消全选当前页"></th>
-            <th>邮箱</th><th>手机号</th><th>归属地</th><th>价格</th><th>Plan</th><th>状态</th><th>Account ID</th><th>更新时间</th><th>过期时间</th><th>操作</th>
+            <th>邮箱</th><th>手机信息</th><th>Plan</th><th>状态</th><th>Account ID</th><th>更新时间</th><th>过期时间</th><th>操作</th>
           </tr></thead>
           <tbody id="codexBody"></tbody>
         </table>
@@ -3207,6 +3208,19 @@ function _codexUpdateSelectedHint() {
   const delBtn = $('#btnCodexDeleteBulk');
   if (delBtn) delBtn.disabled = CODEX_SELECTED.size === 0;
 }
+function _codexCredentialPhoneInfo(r) {
+  const phone = String(r.phone ?? '').trim();
+  const country = String(r.phone_country ?? '').trim();
+  const price = String(r.phone_price ?? '').trim();
+  if (!phone && !country && !price) return '<span class="muted">-</span>';
+  const title = [phone && '手机号: ' + phone, country && '归属地: ' + country, price && '价格: ' + price]
+    .filter(Boolean).join('；');
+  const titleAttr = title ? ' title="' + esc(title) + '"' : '';
+  return '<div class="codex-phone-info-v2"' + titleAttr + '>'
+    + '<div class="codex-phone-info-v2-line"><span class="codex-phone-info-v2-label">手机号：</span>' + esc(phone || '—') + '</div>'
+    + '<div class="codex-phone-info-v2-line"><span class="codex-phone-info-v2-label">归属地：</span>' + esc(country || '—') + '</div>'
+    + '<div class="codex-phone-info-v2-line"><span class="codex-phone-info-v2-label">价格：</span>' + esc(price || '—') + '</div></div>';
+}
 function renderCodex() {
   const total = CODEX_TOTAL;
   const rows = CODEX;
@@ -3220,9 +3234,7 @@ function renderCodex() {
     <tr>
       <td><input type="checkbox" class="codex-row-check" data-fname="${esc(r.filename)}" ${checked}></td>
       <td><div class="main-cell">${esc(r.email || '-')}</div><div class="sub-cell mono">${esc(r.filename)}</div></td>
-      <td title="${esc(r.phone || '-')}">${esc(r.phone || '-')}</td>
-      <td title="${esc(r.phone_country || '-')}">${esc(r.phone_country || '-')}</td>
-      <td title="${esc(r.phone_price || '-')}">${esc(r.phone_price || '-')}</td>
+      <td class="col-phone-info">${_codexCredentialPhoneInfo(r)}</td>
       <td>${esc(r.plan || '-')}</td>
       <td>${statusBadge}</td>
       <td><span class="mono">${esc(r.account_id || '-')}</span></td>
@@ -3235,7 +3247,7 @@ function renderCodex() {
         <button class="danger" data-codex-delete="${esc(r.filename)}" title="删除本地 Codex JSON 凭证文件">删除</button>
       </td>
     </tr>`;
-  }).join('') || '<tr><td colspan="11" class="muted">还没有 Codex 凭证。注册成功并跑通 Codex 授权后会自动出现。</td></tr>';
+  }).join('') || '<tr><td colspan="9" class="muted">还没有 Codex 凭证。注册成功并跑通 Codex 授权后会自动出现。</td></tr>';
   // 全选 checkbox：仅反映当前页状态
   const pageFilenames = rows.map(r => r.filename);
   const allChecked = pageFilenames.length > 0 && pageFilenames.every(f => CODEX_SELECTED.has(f));

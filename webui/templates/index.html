@@ -1264,9 +1264,10 @@
       text-align: left; vertical-align: middle;
     }
     .codex-table-v2 .col-email { width: 280px; white-space: normal; overflow: visible; }
-    .codex-table-v2 .col-phone { width: 150px; }
-    .codex-table-v2 .col-phone-country { width: 120px; }
-    .codex-table-v2 .col-phone-price { width: 100px; }
+    .codex-table-v2 .col-phone-info { width: 240px; white-space: normal; overflow: visible; }
+    .codex-table-v2 .codex-phone-info-v2 { display: grid; gap: 1px; line-height: 1.35; white-space: normal; font-variant-numeric: tabular-nums; }
+    .codex-table-v2 .codex-phone-info-v2-line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .codex-table-v2 .codex-phone-info-v2-label { color: #909399; }
     .codex-table-v2 .col-plan { width: 100px; }
     .codex-table-v2 .col-status { width: 100px; }
     .codex-table-v2 .col-account { width: 160px; }
@@ -2495,16 +2496,14 @@
       <div class="codex-table-v2-wrap">
         <table class="codex-table-v2">
           <colgroup>
-            <col class="col-check"><col class="col-email"><col class="col-phone"><col class="col-phone-country"><col class="col-phone-price">
-            <col class="col-plan"><col class="col-status"><col class="col-account"><col class="col-time"><col class="col-time"><col class="col-actions">
+            <col class="col-check"><col class="col-email"><col class="col-phone-info"><col class="col-plan"><col class="col-status">
+            <col class="col-account"><col class="col-time"><col class="col-time"><col class="col-actions">
           </colgroup>
           <thead>
             <tr>
               <th class="col-check"><input type="checkbox" id="codexSelectAllV2" title="全选/取消全选当前页" disabled></th>
               <th class="col-email">邮箱</th>
-              <th class="col-phone">手机号</th>
-              <th class="col-phone-country">归属地</th>
-              <th class="col-phone-price">价格</th>
+              <th class="col-phone-info">手机信息</th>
               <th class="col-plan">Plan</th>
               <th class="col-status">状态</th>
               <th class="col-account">Account ID</th>
@@ -3553,6 +3552,19 @@ function _codexAccountInfoCellV2(r) {
     + '<div class="acc-v2-codex-info-line"><span class="acc-v2-codex-info-label">手机号：</span>' + esc(phone) + '</div>'
     + '<div class="acc-v2-codex-info-line"><span class="acc-v2-codex-info-label">归属地：</span>' + esc(region) + '</div>'
     + '<div class="acc-v2-codex-info-line"><span class="acc-v2-codex-info-label">价格：</span>' + esc(priceDisplay) + '</div></div>';
+}
+function _codexCredentialPhoneInfoV2(r) {
+  const phone = String(r.phone ?? '').trim();
+  const country = String(r.phone_country ?? '').trim();
+  const price = String(r.phone_price ?? '').trim();
+  if (!phone && !country && !price) return '<span class="acc-v2-muted">-</span>';
+  const title = [phone && '手机号: ' + phone, country && '归属地: ' + country, price && '价格: ' + price]
+    .filter(Boolean).join('；');
+  const titleAttr = title ? ' title="' + esc(title) + '"' : '';
+  return '<div class="codex-phone-info-v2"' + titleAttr + '>'
+    + '<div class="codex-phone-info-v2-line"><span class="codex-phone-info-v2-label">手机号：</span>' + esc(phone || '—') + '</div>'
+    + '<div class="codex-phone-info-v2-line"><span class="codex-phone-info-v2-label">归属地：</span>' + esc(country || '—') + '</div>'
+    + '<div class="codex-phone-info-v2-line"><span class="codex-phone-info-v2-label">价格：</span>' + esc(price || '—') + '</div></div>';
 }
 function _codexCellV2(r) {
   const s = String(r.codex_status || '').toLowerCase();
@@ -5971,9 +5983,7 @@ function renderCodex() {
         <div class="acc-v2-email">${esc(r.email || '-')}${r.archived ? ' <span class="pill status-used" title="已归档">归档</span>' : ''}</div>
         <div class="acc-v2-sub" title="${esc(r.filename)}">${esc(r.filename)}</div>
       </td>
-      <td class="col-phone" title="${esc(r.phone || '-')}">${esc(r.phone || '-')}</td>
-      <td class="col-phone-country" title="${esc(r.phone_country || '-')}">${esc(r.phone_country || '-')}</td>
-      <td class="col-phone-price" title="${esc(r.phone_price || '-')}">${esc(r.phone_price || '-')}</td>
+      <td class="col-phone-info">${_codexCredentialPhoneInfoV2(r)}</td>
       <td class="col-plan">${esc(r.plan || '-')}</td>
       <td class="col-status">${_codexStatusBadge(r)}</td>
       <td class="col-account" title="${esc(r.account_id || '-')}">${esc(r.account_id || '-')}</td>
@@ -5990,7 +6000,7 @@ function renderCodex() {
         </div>
       </td>
     </tr>`;
-  }).join('') || '<tr><td colspan="11" style="text-align:center;color:#909399;padding:28px;">还没有 Codex 凭证</td></tr>';
+  }).join('') || '<tr><td colspan="9" style="text-align:center;color:#909399;padding:28px;">还没有 Codex 凭证</td></tr>';
   syncCodexSelectAllUi(rows);
   _codexUpdateSelectedHint();
   _renderPager('codex', total);
