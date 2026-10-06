@@ -8,6 +8,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import uuid
 from contextlib import closing
 from datetime import datetime
@@ -3197,6 +3198,13 @@ def _codex_account_payloads(conn, contents: list[dict]) -> dict[str, dict]:
     return result
 
 
+def _format_codex_phone_money(value: Decimal) -> str:
+    rounded = value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+    whole, _, fraction = format(rounded, "f").partition(".")
+    fraction = fraction.rstrip("0")
+    return whole + "." + fraction.ljust(2, "0")
+
+
 def _codex_content_to_record(content: dict, account_payload: dict | None = None) -> dict:
     """把 SQLite 中的 Codex payload 转成列表展示对象。"""
     fname = content.get("_filename", "")
@@ -3222,6 +3230,20 @@ def _codex_content_to_record(content: dict, account_payload: dict | None = None)
             )
             if part
         )
+    phone_price_cny = str(content.get("phone_price_cny") or "").strip()
+    if not phone_price_cny:
+        try:
+            amount = Decimal(str(phone_activation.get("price_amount")))
+            currency = str(phone_activation.get("price_currency") or "").strip().upper()
+            if amount.is_finite() and amount >= 0 and currency == "CNY":
+                phone_price_cny = _format_codex_phone_money(amount)
+            elif amount.is_finite() and amount >= 0 and currency == "USD":
+                # price_limit_fx_rate 记录的是 CNY -> USD，反算为 USD -> CNY。
+                cny_to_usd = Decimal(str(phone_activation.get("price_limit_fx_rate")))
+                if cny_to_usd.is_finite() and cny_to_usd > 0:
+                    phone_price_cny = _format_codex_phone_money(amount / cny_to_usd)
+        except (InvalidOperation, TypeError, ValueError):
+            phone_price_cny = ""
     def _text(*values: object) -> str:
         for value in values:
             if value is None:
@@ -3261,6 +3283,7 @@ def _codex_content_to_record(content: dict, account_payload: dict | None = None)
         "phone": phone,
         "phone_country": phone_country,
         "phone_price": phone_price,
+        "phone_price_cny": phone_price_cny,
     }
     if phone_activation:
         result["phone_activation"] = phone_activation

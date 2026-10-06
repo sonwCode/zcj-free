@@ -329,3 +329,13 @@ cd /实际项目目录 && git status --short --branch && git rev-parse --short H
 - 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T135613Z-codex-phone-visible-country/roxy-codex-oauth-before-visible-country.tar.gz`。
 - 生产 `core/roxy_codex_oauth.py` SHA-256：`fd974c4f10156a899aac7a7e0f2dbf9d89fc329e591cc54eec9f031b34c7fc58`。
 - 重启后服务 active，MainPID=71543；HTTP 健康检查返回 302 `/login?next=/`。
+
+## 21. 2026-10-06 Codex 手机价格追加人民币显示
+
+- 需求：Codex 授权页 `手机信息` 列在原始价格后追加人民币价格，例如 `0.004 USD / 0.026858 ￥`。
+- 根因：截图实际使用 `renderCodex()` 的 `_codexCredentialPhoneInfoV2()`，它读取 `phone_price`；账号页另一条 `codex_account_info` 双币渲染路径不影响该表格。
+- 修复：Codex SQLite 列表投影新增 `phone_price_cny`，使用激活快照已保存的 CNY→USD `price_limit_fx_rate` 反算 USD→CNY；现代和旧版模板统一追加 `原始价格 / 人民币价格`，不修改 SQLite 数据。
+- 验证：Codex 投影测试 4/4 通过；生产 SQLite immutable 只读抽样中，`0.004 USD` 返回 `phone_price_cny=0.026858`，`0.02 USD` 返回 `phone_price_cny=0.134289`。
+- 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T144257Z-codex-price-cny/codex-price-before-cny.tar.gz`。
+- 生产哈希：`core/db.py=ca8299ca97a2cda35e21f21233a3ae3715cd20c9dcea2863a4b6cdf36f55f7ac`；`webui/templates/index.html=fbc3030aec6c0f434cc52f1c9fc39b90946742414fb0d1cba66690976ac38841`；`webui/templates/index_legacy.html=394cedfe7aa8cb879044468c7f0a0ac48a3e46f0c5b971910b614ca7f4348dd0`。
+- 重启后服务 active，MainPID=95277；HTTP 健康检查返回 302 `/login?next=/`。

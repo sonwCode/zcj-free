@@ -1463,6 +1463,12 @@ function _codexMoneyLabel(value, symbol) {
   const amount = text.replace(/^[\$¥￥]\s*/, '').replace(/\s*(?:USD|CNY|RMB)$/i, '').trim();
   return amount ? amount + symbol : '—';
 }
+function _codexPhonePriceDisplay(price, priceCny) {
+  const original = String(price ?? '').trim();
+  const cny = String(priceCny ?? '').trim();
+  if (!original) return cny ? cny + ' ￥' : '—';
+  return cny ? original + ' / ' + cny + ' ￥' : original;
+}
 function _codexPhoneInfo(r) {
   if (String(r.codex_status || '').toLowerCase() !== 'success') return '';
   const info = r.codex_account_info && typeof r.codex_account_info === 'object'
@@ -3219,9 +3225,9 @@ function _codexUpdateSelectedHint() {
 function _codexCredentialPhoneInfo(r) {
   const phone = String(r.phone ?? '').trim();
   const country = String(r.phone_country ?? '').trim();
-  const price = String(r.phone_price ?? '').trim();
-  if (!phone && !country && !price) return '<span class="muted">-</span>';
-  const title = [phone && '手机号: ' + phone, country && '归属地: ' + country, price && '价格: ' + price]
+  const price = _codexPhonePriceDisplay(r.phone_price, r.phone_price_cny);
+  if (!phone && !country && price === '—') return '<span class="muted">-</span>';
+  const title = [phone && '手机号: ' + phone, country && '归属地: ' + country, price !== '—' && '价格: ' + price]
     .filter(Boolean).join('；');
   const titleAttr = title ? ' title="' + esc(title) + '"' : '';
   return '<div class="codex-phone-info-v2"' + titleAttr + '>'
