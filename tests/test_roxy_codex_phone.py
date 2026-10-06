@@ -241,6 +241,17 @@ class RoxyCodexPhoneTests(unittest.TestCase):
         self.assertIn('_human_click(driver, target, label="codex_sms_channel")', source)
         self.assertNotIn("sms.click()", source)
 
+    def test_country_selection_uses_native_and_real_controls(self):
+        source = self._function_source("_select_phone_country")
+        self.assertIn("native_select.select_option(value=option_value)", source)
+        self.assertIn('_human_click(driver, trigger, label="codex_phone_country")', source)
+        self.assertIn('_human_click(driver, option, label="codex_phone_country_option")', source)
+
+    def test_phone_continue_uses_real_element_click(self):
+        source = self._function_source("_click_add_phone_continue_button")
+        self.assertIn('_human_click(driver, btn, label="codex_phone_continue")', source)
+        self.assertIn('"method": "human_click"', source)
+
     def test_phone_fill_uses_atomic_cloak_fill_for_react_state(self):
         source = self._function_source("_set_phone_value")
         self.assertIn('getattr(phone_input, "fill", None)', source)

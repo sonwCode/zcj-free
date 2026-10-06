@@ -1382,14 +1382,9 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
     if (matches.length) {
       const {select, option, code, alias} = matches[0];
       const changed = String(select.value) !== String(option.value);
-      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-      if (setter) setter.call(select, option.value); else select.value = option.value;
-      [...select.options].forEach(opt => { opt.selected = opt === option; });
-      select.dispatchEvent(new Event('input', {bubbles:true}));
-      select.dispatchEvent(new Event('change', {bubbles:true}));
-      select.blur?.();
       return {
-        ok:true, mode:'native_select', dialCode:code || expectedDialCode, selectedText:meta(option),
+        ok:true, mode:'native_select', select, optionValue:String(option.value || ''),
+        dialCode:code || expectedDialCode, selectedText:meta(option),
         selectedKey:String(option.value || option.getAttribute('data-key') || ''),
         countryName:alias || '', selectedChanged:changed,
       };
@@ -1405,15 +1400,44 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
     const trigger = triggers[0];
     if (!trigger) return {ok:false, error:'missing_country_control'};
     trigger.scrollIntoView({block:'center'});
-    trigger.focus?.();
-    trigger.click();
-    return {ok:false, opened:true, mode:'listbox', triggerText:meta(trigger)};
+    return {ok:false, opened:true, mode:'listbox', trigger, triggerText:meta(trigger)};
     """, digits, expected_dial_code, country_aliases, allow_code_only) or {}
 
+    sleep_fn = globals().get("_stop_sleep") or time.sleep
     selected = dict(result) if result.get("ok") else None
+    if selected and selected.get("mode") == "native_select":
+        native_select = selected.get("select")
+        option_value = str(selected.get("optionValue") or "")
+        try:
+            if native_select is not None and callable(getattr(native_select, "select_option", None)):
+                native_select.select_option(value=option_value)
+            elif native_select is not None:
+                # 标准 Selenium 回退；Cloak 路径使用上面的 Playwright 原生选择。
+                from selenium.webdriver.support.ui import Select
+                Select(native_select).select_by_value(option_value)
+        except Exception as select_exc:
+            logger.warning("[Codex][Browser] 原生国家下拉选择失败，回退 DOM 事件：%s", str(select_exc)[:160])
+            if native_select is not None:
+                driver.execute_script(r"""
+                const select = arguments[0];
+                const value = String(arguments[1] || '');
+                const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+                if (setter) setter.call(select, value); else select.value = value;
+                [...select.options].forEach(option => { option.selected = option.value === value; });
+                select.dispatchEvent(new Event('input', {bubbles:true}));
+                select.dispatchEvent(new Event('change', {bubbles:true}));
+                """, native_select, option_value)
+        sleep_fn(0.35)
     if not selected:
         if not result.get("opened"):
             raise RuntimeError(f"phone_country_sync_failed: 找不到国家控件 result={result} state={_phone_page_state(driver)}")
+        trigger = result.get("trigger")
+        if trigger is not None:
+            try:
+                _human_click(driver, trigger, label="codex_phone_country")
+            except Exception as click_exc:
+                logger.warning("[Codex][Browser] 真实打开国家控件失败，回退元素点击：%s", str(click_exc)[:160])
+                driver.execute_script("arguments[0].click();", trigger)
         end = time.time() + max(1, timeout)
         while time.time() < end:
             selected = driver.execute_script(r"""
@@ -1456,15 +1480,22 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
             if (!matches.length) return null;
             const target = matches[0];
             target.option.scrollIntoView({block:'nearest'});
-            target.option.click();
             return {
-              mode:'listbox', dialCode:target.code || expectedDialCode, selectedText:target.text,
+              mode:'listbox', option:target.option, dialCode:target.code || expectedDialCode, selectedText:target.text,
               selectedKey:String(target.option.getAttribute('data-key') || target.option.getAttribute('data-value') || target.option.id || ''),
               countryName:target.alias || target.text.replace(/\s*\(\s*\+\d{1,4}[^)]*\).*$/, '').trim(),
               selectedChanged:true,
             };
             """, digits, expected_dial_code, country_aliases, allow_code_only)
             if selected:
+                option = selected.pop("option", None) if isinstance(selected, dict) else None
+                if option is not None:
+                    try:
+                        _human_click(driver, option, label="codex_phone_country_option")
+                    except Exception as click_exc:
+                        logger.warning("[Codex][Browser] 真实选择国家选项失败，回退元素点击：%s", str(click_exc)[:160])
+                        driver.execute_script("arguments[0].click();", option)
+                    sleep_fn(0.35)
                 break
             _stop_sleep(0.2)
         if not selected:
@@ -1843,35 +1874,11 @@ def _click_add_phone_continue_button(driver, *, timeout: int = 10) -> dict:
                 except Exception:
                     text = ''
                 try:
-                    # 用完整指针序列而不是裸 btn.click()。React / React-Aria 的提交
-                    # 按钮只对真实指针序列触发表单提交，合成 click 常常只让按钮聚焦、
-                    # 表单根本没提交，页面停在原地；随后这个“没提交”会被页面固定文案
-                    # 误判成号码问题，白白换掉一个正常号码。
-                    driver.execute_script(r"""
-                    const btn = arguments[0];
-                    const rect = btn.getBoundingClientRect();
-                    const cx = rect.left + rect.width / 2;
-                    const cy = rect.top + rect.height / 2;
-                    const base = {bubbles:true, cancelable:true, composed:true, view:window,
-                                  clientX:cx, clientY:cy, button:0, buttons:1};
-                    try {
-                      btn.dispatchEvent(new PointerEvent('pointerover', Object.assign({}, base, {buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true})));
-                      btn.dispatchEvent(new PointerEvent('pointerenter', Object.assign({}, base, {buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true})));
-                      btn.dispatchEvent(new MouseEvent('mouseover', Object.assign({}, base, {buttons:0})));
-                      btn.dispatchEvent(new MouseEvent('mouseenter', Object.assign({}, base, {buttons:0})));
-                      btn.dispatchEvent(new MouseEvent('mousemove', Object.assign({}, base, {buttons:0})));
-                      btn.dispatchEvent(new PointerEvent('pointerdown', Object.assign({}, base, {pointerId:1, pointerType:'mouse', isPrimary:true})));
-                      btn.dispatchEvent(new MouseEvent('mousedown', base));
-                      if (typeof btn.focus === 'function') btn.focus({preventScroll:true});
-                      btn.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, base, {buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true})));
-                      btn.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, {buttons:0})));
-                      btn.click();
-                    } catch (err) {
-                      btn.click();
-                    }
-                    """, btn)
+                    # 优先调用 Cloak/Chrome 的真实元素点击，让浏览器按正常事件顺序
+                    # 触发 React 表单提交；合成 DOM 指针事件只作为真实点击失败后的兜底。
+                    _human_click(driver, btn, label="codex_phone_continue")
                     _wait_page_settle_after_submit()
-                    return {"ok": True, "method": "pointer_sequence", "text": text}
+                    return {"ok": True, "method": "human_click", "text": text}
                 except Exception as click_exc:
                     last = click_exc
                     submitted = driver.execute_script(r"""

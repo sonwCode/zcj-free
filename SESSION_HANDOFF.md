@@ -311,3 +311,12 @@ cd /实际项目目录 && git status --short --branch && git rev-parse --short H
 - 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T131002Z-codex-phone-fill/roxy-codex-oauth-before-fill.tar.gz`。
 - 生产 `core/roxy_codex_oauth.py` SHA-256：`7f2eb35aea7ba2661f2fb069107c5d3390c68236575879005de3a659a7480239`。
 - 重启后服务 active，MainPID=48106；HTTP 健康检查返回 302 `/login?next=/`。
+
+## 19. 2026-10-06 Job 134 国家控件与手机号提交修复
+
+- Job 134 暴露两个独立问题：葡萄牙号码 DOM 文本显示 `+351`，但 React 电话组件内部仍按美国 `+1` 生成隐藏值；美国号码已确认 SMS 后，Continue 合成点击未触发表单提交，最终停留在 `/add-phone`。
+- 修复：Cloak 原生下拉增加 `select_option()`，国家选择优先通过 Playwright 原生控件更新 React；React-Aria 列表国家和手机号 Continue 改用真实 Cloak 元素点击，失败时保留 DOM/requestSubmit 回退。
+- 回归覆盖：生产依赖环境 `test_roxy_codex_phone.py` 共 16 项全部通过；生产 py_compile 退出码为 0。
+- 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T134256Z-codex-phone-real-controls/codex-phone-before-real-controls.tar.gz`。
+- 生产哈希：`core/roxy_codex_oauth.py=9650a6e2dbc3799550f802c99d7b5790780bc90cf9d916ab9ecc2fb15d2e9974`；`core/cloakbrowser_driver.py=5b7acb1a9925ae986a7afe5ccedf228824fc9fb1116cd3f66e39f2738449b6d3`。
+- 重启后服务 active，MainPID=64243；HTTP 健康检查返回 302 `/login?next=/`。

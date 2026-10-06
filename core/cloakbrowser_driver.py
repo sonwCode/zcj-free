@@ -65,6 +65,22 @@ class CloakElement:
         else:
             self.handle.click(timeout=10000)
 
+    def select_option(self, *, value=None, label=None, index=None) -> Any:
+        """Select a native option through Playwright so React receives real change events."""
+        target = self.locator if self.locator is not None else self.handle
+        if target is None or not hasattr(target, "select_option"):
+            raise RuntimeError("Cloak 元素不支持原生 select_option")
+        kwargs = {}
+        if value is not None:
+            kwargs["value"] = value
+        elif label is not None:
+            kwargs["label"] = label
+        elif index is not None:
+            kwargs["index"] = index
+        else:
+            raise ValueError("select_option 需要 value、label 或 index")
+        return target.select_option(**kwargs)
+
     def clear(self) -> None:
         try:
             if self.locator is not None:
