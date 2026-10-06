@@ -1364,6 +1364,20 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
           || text.includes(' ' + target + ' ');
       }) || '';
     };
+    // React-Aria 的可见国家按钮才持有电话组件真正的 country 状态；
+    // 隐藏 select 只负责表单兼容，优先走可见控件，避免 DOM 选项变了而 React 状态仍为 +1。
+    const triggers = [...form.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"]')].filter(visible);
+    const score = el => {
+      const text = meta(el).toLowerCase();
+      return (/country|dial|calling|phone.*code|国家|国番号|電話番号/.test(text) ? 20 : 0)
+        + (el.getAttribute('aria-haspopup') === 'listbox' ? 5 : 0);
+    };
+    triggers.sort((a, b) => score(b) - score(a));
+    const trigger = triggers[0];
+    if (trigger) {
+      trigger.scrollIntoView({block:'center'});
+      return {ok:false, opened:true, mode:'listbox', trigger, triggerText:meta(trigger)};
+    }
     const selects = [...new Set([
       ...form.querySelectorAll('[data-testid="hidden-select-container"] select, .react-aria-Select select, select'),
       ...document.querySelectorAll('select[name*="country" i], select[id*="country" i], select[aria-label*="country" i], select[name*="dial" i], select[id*="dial" i]'),
@@ -1390,17 +1404,7 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
       };
     }
 
-    const triggers = [...form.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"]')].filter(visible);
-    const score = el => {
-      const text = meta(el).toLowerCase();
-      return (/country|dial|calling|phone.*code|国家|国番号|電話番号/.test(text) ? 20 : 0)
-        + (el.getAttribute('aria-haspopup') === 'listbox' ? 5 : 0);
-    };
-    triggers.sort((a, b) => score(b) - score(a));
-    const trigger = triggers[0];
-    if (!trigger) return {ok:false, error:'missing_country_control'};
-    trigger.scrollIntoView({block:'center'});
-    return {ok:false, opened:true, mode:'listbox', trigger, triggerText:meta(trigger)};
+    return {ok:false, error:'missing_country_control'};
     """, digits, expected_dial_code, country_aliases, allow_code_only) or {}
 
     sleep_fn = globals().get("_stop_sleep") or time.sleep

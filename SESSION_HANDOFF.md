@@ -320,3 +320,12 @@ cd /实际项目目录 && git status --short --branch && git rev-parse --short H
 - 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T134256Z-codex-phone-real-controls/codex-phone-before-real-controls.tar.gz`。
 - 生产哈希：`core/roxy_codex_oauth.py=9650a6e2dbc3799550f802c99d7b5790780bc90cf9d916ab9ecc2fb15d2e9974`；`core/cloakbrowser_driver.py=5b7acb1a9925ae986a7afe5ccedf228824fc9fb1116cd3f66e39f2738449b6d3`。
 - 重启后服务 active，MainPID=64243；HTTP 健康检查返回 302 `/login?next=/`。
+
+## 20. 2026-10-06 Job 135 可见国家组件状态修复
+
+- Job 135 证明只更新 React-Aria 隐藏 `<select>` 不足以同步电话输入组件国家状态：DOM 仍显示 `+1` 格式，印尼号码期望 `+628...`，实际可见 `(815) 296-9796`、隐藏 `+18152969796`。
+- 修复：国家选择顺序改为优先真实点击可见 React-Aria 国家按钮及列表选项；仅页面没有可见国家控件时才回退原生隐藏 `<select>` 和 `select_option()`。Continue 仍使用真实 Cloak 点击。
+- 回归覆盖：生产依赖环境手机号测试 16 项全部通过；本地与生产 py_compile 通过。
+- 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T135613Z-codex-phone-visible-country/roxy-codex-oauth-before-visible-country.tar.gz`。
+- 生产 `core/roxy_codex_oauth.py` SHA-256：`fd974c4f10156a899aac7a7e0f2dbf9d89fc329e591cc54eec9f031b34c7fc58`。
+- 重启后服务 active，MainPID=71543；HTTP 健康检查返回 302 `/login?next=/`。
