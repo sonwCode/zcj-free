@@ -97,20 +97,17 @@ class CodexDriverSelectionTests(unittest.TestCase):
 
 
 class CodexDriverUiContractTests(unittest.TestCase):
-    def test_both_templates_expose_single_and_bulk_driver_and_send_them(self):
+    def test_both_templates_keep_reference_global_driver_behavior(self):
         root = Path(__file__).parents[1]
-        for template, single_id, bulk_id in (
-            ("index.html", "codexRetryDriverV2", "codexBulkDriverV2"),
-            ("index_legacy.html", "codexRetryDriver", "codexBulkDriver"),
-        ):
+        for template in ("index.html", "index_legacy.html"):
             source = (root / "webui" / "templates" / template).read_text(encoding="utf-8")
             with self.subTest(template=template):
-                self.assertIn(f'id="{single_id}"', source)
-                self.assertIn(f'id="{bulk_id}"', source)
-                self.assertIn("/api/codex/retry'", source)
-                self.assertIn("/api/codex/retry-bulk'", source)
-                self.assertIn(single_id, source[source.index("/api/codex/retry'"):])
-                self.assertIn(bulk_id, source[source.index("/api/codex/retry-bulk'"):])
+                self.assertNotIn("单次驱动", source)
+                self.assertNotIn("批量驱动", source)
+                self.assertNotIn("codexRetryDriver", source)
+                self.assertNotIn("codexBulkDriver", source)
+                self.assertIn("body: JSON.stringify({email})", source)
+                self.assertIn("body: JSON.stringify({account_ids: ids, workers})", source)
 
 
 if __name__ == "__main__":

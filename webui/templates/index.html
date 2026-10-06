@@ -2299,9 +2299,6 @@
 
         <div class="acc-v2-btn-group">
           <span class="acc-v2-selected" id="accountsSelectedHintV2">已选 0</span>
-          <label class="acc-v2-inline" title="本次单账号补跑使用的 Codex OAuth 驱动；留空使用全局配置">单次驱动
-            <select id="codexRetryDriverV2"><option value="">全局</option><option value="roxy">Roxy</option><option value="cloak">本地 Cloak</option><option value="browser_use">Browser Use</option><option value="skyvern">Skyvern</option><option value="protocol">协议</option></select>
-          </label>
           <label class="acc-v2-inline" title="批量补跑 Codex 的并发线程数">线程
             <span class="el-input-number">
               <input id="codexBulkWorkersV2" type="number" min="1" max="16" value="3" inputmode="numeric">
@@ -2364,9 +2361,6 @@
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">Codex</span>
-          <label class="acc-v2-inline" title="批量补跑使用的 Codex OAuth 驱动；留空使用全局配置">批量驱动
-            <select id="codexBulkDriverV2"><option value="">全局</option><option value="roxy">Roxy</option><option value="cloak">本地 Cloak</option><option value="browser_use">Browser Use</option><option value="skyvern">Skyvern</option><option value="protocol">协议</option></select>
-          </label>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedCodexOauthV2" onclick="checkSelectedCodexOauth()" disabled title="只读请求 Codex usage，验证选中账号的 OAuth 凭证；不消耗邮箱 OTP、短信或模型额度">Codex测活</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRetrySelectedCodexV2" disabled title="给选中的账号批量补跑 Codex 授权">补跑</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedCpaV2" disabled title="从 CPA auth-files 下载选中账号的 Codex JSON，并打包 ZIP">下载CPA</button>
@@ -4287,7 +4281,7 @@ async function onAccountsBodyClick(e) {
   if (!confirm(`重新跑 Codex 授权？\n\n${email}\n\n将消耗：\n  • 1 封邮箱 OTP（自动收）\n  • 1 个接码短信（价格按当前 SMSBower 配置，实际以供应商返回为准）\n\n补跑会在后台进行（~1-2 分钟），完成后状态自动更新。`)) return;
   btn.disabled = true;
   try {
-    const r = await api('/api/codex/retry', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, driver: ($('#codexRetryDriverV2')?.value || '') || undefined}) });
+    const r = await api('/api/codex/retry', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email}) });
     showToast(r.message || '已开始补跑');
     loadAccounts();
     openRetryLog(email);
@@ -5354,7 +5348,7 @@ async function retrySelectedCodex() {
     const r = await api('/api/codex/retry-bulk', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, workers, driver: (document.getElementById('codexBulkDriverV2') || {}).value || undefined}),
+      body: JSON.stringify({account_ids: ids, workers}),
     });
     const skippedCount = (r.skipped || []).length;
     showToast(skippedCount ? `已开始 ${r.started_count || 0} 个，跳过 ${skippedCount} 个` : (r.message || '已开始批量补跑'));
