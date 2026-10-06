@@ -241,10 +241,12 @@ class RoxyCodexPhoneTests(unittest.TestCase):
         self.assertIn('_human_click(driver, target, label="codex_sms_channel")', source)
         self.assertNotIn("sms.click()", source)
 
-    def test_phone_fill_uses_real_keyboard_events_for_react_state(self):
+    def test_phone_fill_uses_atomic_cloak_fill_for_react_state(self):
         source = self._function_source("_set_phone_value")
-        self.assertIn("_human_type_text(driver, phone_input", source)
-        self.assertIn("keyboard_state = driver.execute_script", source)
+        self.assertIn('getattr(phone_input, "fill", None)', source)
+        self.assertIn("phone_input.fill(visible_value)", source)
+        self.assertIn("_human_type_text(driver, phone_input, visible_value)", source)
+        self.assertIn("input_state = driver.execute_script", source)
 
     def test_phone_submit_skips_long_post_channel_blur(self):
         source = self._function_source("_prepare_and_submit_add_phone")

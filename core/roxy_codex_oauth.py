@@ -1611,10 +1611,17 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
     """, phone, expected_dial_code)
     if result and result.get("ok"):
         try:
-            # 先用真实键盘事件写入可见手机号，让 React/React-Aria 的受控状态
-            # 与 DOM value 同步；JS setter 只作为初始值和兼容回退。
+            # Cloak 的电话输入框由 React/React-Aria 和号码格式化组件共同控制。
+            # Playwright fill() 会原子替换当前值并触发 input 事件，避免逐字符输入
+            # 时组件重渲染导致光标错位、号码重复或数字被改写。
             phone_input = _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=2)
-            _human_type_text(driver, phone_input, str(result.get("visibleValue") or ""))
+            visible_value = str(result.get("visibleValue") or "")
+            if callable(getattr(phone_input, "fill", None)):
+                phone_input.fill(visible_value)
+                _stop_sleep(0.2)
+            else:
+                # Selenium 元素没有 fill 时保留真实键盘回退路径。
+                _human_type_text(driver, phone_input, visible_value)
             driver.execute_script(r"""
             const form = document.querySelector('form[action*="/add-phone" i]')
               || [...document.querySelectorAll('form')].find(f => /add-phone/i.test(f.getAttribute('action') || ''));
@@ -1627,7 +1634,7 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
             hidden.dispatchEvent(new Event('change', {bubbles:true}));
             return true;
             """, str(result.get("e164") or phone))
-            keyboard_state = driver.execute_script(r"""
+            input_state = driver.execute_script(r"""
             const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
             const form = document.querySelector('form[action*="/add-phone" i]')
               || [...document.querySelectorAll('form')].find(f => /add-phone/i.test(f.getAttribute('action') || ''));
@@ -1636,11 +1643,11 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
             return {actualVisible: phoneInput?.value || '', hiddenValue: hidden?.value || ''};
             """) or {}
             result.update({
-                "actualVisible": keyboard_state.get("actualVisible") or result.get("actualVisible"),
-                "hiddenValue": keyboard_state.get("hiddenValue") or result.get("hiddenValue"),
+                "actualVisible": input_state.get("actualVisible") or result.get("actualVisible"),
+                "hiddenValue": input_state.get("hiddenValue") or result.get("hiddenValue"),
             })
         except Exception as exc:
-            logger.debug("[Codex][Browser] 真实键盘写入手机号失败，保留 JS 写入结果：%s", str(exc)[:160])
+            logger.debug("[Codex][Browser] 受控手机号填值失败，保留 JS 写入结果：%s", str(exc)[:160])
     if not result or not result.get("ok"):
         reason = "phone_country_mismatch" if (result or {}).get("error") == "phone_country_mismatch" else "phone_value_write_failed"
         raise RuntimeError(f"{reason}: 手机号写入失败 result={result} state={_phone_page_state(driver)}")

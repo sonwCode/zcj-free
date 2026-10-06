@@ -301,3 +301,13 @@ cd /实际项目目录 && git status --short --branch && git rev-parse --short H
 - 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T124609Z-codex-phone-react-state/roxy-codex-oauth-before.tar.gz`。
 - 生产 `core/roxy_codex_oauth.py` SHA-256：`08e4a850f4bde7c8235605b7516ce2f75399a7cb161b4fd4fdecf8529b119ac7`；生产 py_compile 退出码为 0。
 - 重启后服务 active，MainPID=36837；HTTP 健康检查返回 302 `/login?next=/`。
+
+## 18. 2026-10-06 Job 133 手机号输入错位修复
+
+- Job 133 暴露了上一版输入路径的新问题：Cloak 的 React 电话格式化组件在逐字符 `send_keys` 过程中反复重渲染，造成光标错位和号码拼接/改写。日志中期望 `5678441562`，实际变成 `(557) 421-6455`；另有号码被拼接为 `85855384891429851`。
+- 该失败发生在 SMS 通道选择之前的 `phone_value_mismatch`，与 SMSBower 取号、验证码和通道回退无关。
+- 修复：Cloak 元素优先调用原子 `fill()` 一次性替换可见手机号，触发 React `input` 状态更新；仅非 Cloak 元素保留键盘输入回退；填值后继续读取可见字段和隐藏 E.164 字段校验。
+- 回归覆盖：生产依赖环境 `test_roxy_codex_phone.py` 共 14 项全部通过；生产 py_compile 退出码为 0。
+- 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T131002Z-codex-phone-fill/roxy-codex-oauth-before-fill.tar.gz`。
+- 生产 `core/roxy_codex_oauth.py` SHA-256：`7f2eb35aea7ba2661f2fb069107c5d3390c68236575879005de3a659a7480239`。
+- 重启后服务 active，MainPID=48106；HTTP 健康检查返回 302 `/login?next=/`。
