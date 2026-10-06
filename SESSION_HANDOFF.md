@@ -283,3 +283,12 @@ cd /实际项目目录 && git status --short --branch && git rev-parse --short H
 - 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T085721Z-beijing-time-display/web-templates-before-timezone.tar.gz`。
 - 生产模板哈希：`index.html=a577156ef6c224fad71d08c99a2efd9de8dbf1eafedfb7a47f9f9c30ae9142c2`；`index_legacy.html=b8e04d31d6b4d1a7618e162ef29b380032ff3d00f0ccfe1cb55e975d78b7c51f`。
 - 重启后服务 active，MainPID=462853；HTTP 健康检查返回 302 `/login?next=/`。
+
+## 16. 2026-10-06 Codex 列表补齐账号元数据
+
+- 根因：生产 Codex CPA 回调记录只保存回调状态和邮箱；同邮箱账号记录已经保存 `current_plan_type`、`account_id`、`expires_at`，原列表投影没有使用关联账号字段。
+- `core/db.py` 已改为凭证字段优先，缺失时回退到同邮箱账号的套餐、账号 ID 和到期时间；数据库内容未修改。
+- 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T093704Z-codex-list-metadata/core-db-before-codex-metadata.tar.gz`。
+- 本地 Codex 投影回归测试 3/3 通过；生产真实列表两条 CPA 记录均返回 `plan=free`、非空 `account_id` 和 `expired`。
+- 生产 `core/db.py` SHA-256：`e690a1feb649c9cb3153d071602d76e7d30cd948f7a34753ed1dd672a38f13b3`；生产 py_compile 退出码为 0。
+- 重启后服务 active，MainPID=484599；HTTP 健康检查返回 302 `/login?next=/`。

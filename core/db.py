@@ -3222,15 +3222,38 @@ def _codex_content_to_record(content: dict, account_payload: dict | None = None)
             )
             if part
         )
-    plan = ""
+    def _text(*values: object) -> str:
+        for value in values:
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    # CPA 回调记录通常只有状态；关联注册账号提供缺失的展示元数据。
+    account_payload = account_payload if isinstance(account_payload, dict) else {}
+    plan = _text(content.get("plan"), content.get("plan_type"), content.get("chatgpt_plan_type")).lower()
+    filename_plan = ""
     if "-" in without_prefix and without_prefix.rsplit("-", 1)[-1].lower() in ("free", "plus", "team", "pro", "enterprise"):
-        plan = without_prefix.rsplit("-", 1)[-1].lower()
+        filename_plan = without_prefix.rsplit("-", 1)[-1].lower()
         if not content.get("email"):
             email = without_prefix.rsplit("-", 1)[0]
+    plan = plan or filename_plan or _text(
+        account_payload.get("current_plan_type"), account_payload.get("plan_type")
+    ).lower()
+    account_id = _text(
+        content.get("account_id"), content.get("chatgpt_account_id"), account_payload.get("account_id")
+    )
+    expired = _text(
+        content.get("expired"), content.get("expires_at"), content.get("plan_expires_at"),
+        content.get("token_expires_at"), account_payload.get("expires_at"),
+        account_payload.get("plan_expires_at"), account_payload.get("token_expires_at")
+    )
     result = {
         "filename": fname, "path": f"sqlite://codex_accounts/{fname}", "email": email, "plan": plan,
-        "account_id": content.get("account_id", ""), "type": content.get("type", "codex"),
-        "last_refresh": content.get("last_refresh", ""), "expired": content.get("expired", ""),
+        "account_id": account_id, "type": content.get("type", "codex"),
+        "last_refresh": content.get("last_refresh", ""), "expired": expired,
         "access_token_preview": (content.get("access_token", "") or "")[:32],
         "size": content.get("_size", 0), "mtime": content.get("_mtime", ""),
         "exported_at": content.get("_exported_at"), "exported_count": content.get("_exported_count", 0),
