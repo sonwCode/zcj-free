@@ -274,3 +274,12 @@ cd /实际项目目录 && git status --short --branch && git rev-parse --short H
 - 第二轮同步文件：`/opt/turb-gpt-register/core/sms_provider.py`，本地与生产 SHA-256 均为 `5cd6259280a56580599e27419f9cba415a215c0f0c227438874af25edb3d06b0`；生产 py_compile 退出码为 0。
 - 第二轮重启后：`turb-gpt-register.service` active，MainPID=368920；WebUI 启动于 05:35:26 UTC；本地 HTTP 健康检查仍返回 302 `/login?next=/`。
 - 第二轮重启后的生产日志没有真实短信采购事件，只有 WebUI 启动/健康请求；status=8/status=6、实际 SMS 通道保持和 provider fallback 仍由本地 81 项行为测试覆盖，待下一次真实 Codex 补跑产生业务日志后再观察。
+
+## 15. 2026-10-06 页面时间改为北京时间
+
+- 新版和 legacy 模板统一增加前端显示转换：无时区时间按 UTC 解析，使用 `Asia/Shanghai` 输出；数据库、接口原值和日志时间未修改。
+- 覆盖注册任务开始/完成、账号创建时间、邮箱池导入/使用时间、Codex 更新/过期时间，以及套餐/查活状态提示时间。
+- 样例验证：`2026-10-06T01:34:19` 显示为 `2026-10-06 09:34:19`；两套模板内联脚本解析通过。
+- 生产备份：`/opt/turb-gpt-register/deploy-backups/20261006T085721Z-beijing-time-display/web-templates-before-timezone.tar.gz`。
+- 生产模板哈希：`index.html=a577156ef6c224fad71d08c99a2efd9de8dbf1eafedfb7a47f9f9c30ae9142c2`；`index_legacy.html=b8e04d31d6b4d1a7618e162ef29b380032ff3d00f0ccfe1cb55e975d78b7c51f`。
+- 重启后服务 active，MainPID=462853；HTTP 健康检查返回 302 `/login?next=/`。
