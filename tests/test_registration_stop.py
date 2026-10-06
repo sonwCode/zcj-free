@@ -49,6 +49,33 @@ class RegistrationStopTests(unittest.TestCase):
             if event is not None:
                 event.set()
 
+    def test_persist_codex_phone_activation_from_nested_result(self):
+        result = {
+            "email": "phone-meta@example.test",
+            "account_id": 42,
+            "codex": {
+                "status": "failed",
+                "message": "phone verification failed",
+                "phone_activation": {
+                    "phone_number": "+15550001111",
+                    "provider": "smsbower",
+                    "price_amount": "0.02",
+                    "price_currency": "USD",
+                },
+            },
+        }
+        with patch.object(registration_service.db, "update_account_codex_status") as update:
+            registration_service._persist_codex_phone_activation(
+                result, result["email"], result["account_id"]
+            )
+
+        update.assert_called_once_with(
+            "phone-meta@example.test",
+            "failed",
+            "phone verification failed",
+            phone_activation=result["codex"]["phone_activation"],
+        )
+
     def test_stop_aware_sleep_raises_promptly_after_signal(self):
         job_id = self._next_job_id()
         started = threading.Event()

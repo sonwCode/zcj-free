@@ -218,6 +218,29 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(sms_provider._provider_chain(), ["tiger", "smsbower"])
         self.assertEqual(sms_provider._attempt_provider_chain(), ["tiger", "smsbower"])
 
+    def test_provider_configuration_and_balance_errors_do_not_fallback(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smsbower,tiger"
+        with patch.object(sms_provider, "_acquire_number_for_provider", side_effect=sms_provider.SmsNoBalanceError("empty")) as acquire:
+            with self.assertRaises(sms_provider.SmsNoBalanceError):
+                sms_provider.acquire_number(http=_Http([]), country="1")
+        self.assertEqual(acquire.call_count, 1)
+
+        with patch.object(sms_provider, "_acquire_number_for_provider", side_effect=sms_provider.SmsProviderConfigurationError("bad config")) as acquire:
+            with self.assertRaises(sms_provider.SmsProviderConfigurationError):
+                sms_provider.acquire_number(http=_Http([]), country="1")
+        self.assertEqual(acquire.call_count, 1)
+
+    def test_preflight_configuration_error_does_not_fallback(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smsbower,tiger"
+        with patch.object(
+            sms_provider,
+            "_preflight_sms_dependency_for_provider",
+            side_effect=sms_provider.SmsProviderConfigurationError("bad config"),
+        ) as preflight:
+            with self.assertRaises(sms_provider.SmsProviderConfigurationError):
+                sms_provider.preflight_sms_dependency(http=_Http([]), country="1")
+        self.assertEqual(preflight.call_count, 1)
+
     def test_acquire_falls_back_to_next_provider_without_parallel_purchase(self):
         codex_config.SMS_PROVIDER_CHAIN = "smsbower,tiger"
         codex_config.SMS_COUNTRY = "1"
@@ -460,6 +483,17 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertIn("'SMS_MAX_PRICE': 'str'", source)
         self.assertIn("'SMSBOWER_USD_CNY_RATE': 'str'", source)
 
+    def test_fx_refresh_log_uses_usd_cny_direction_and_source(self):
+        codex_config.SMS_FX_RATE_URL = "https://fx.test/latest?from=CNY&to=USD"
+        body = json.dumps({"base": "CNY", "rates": {"USD": 0.125}}).encode("utf-8")
+        with patch.object(sms_provider, "urlopen", return_value=BytesIO(body)), self.assertLogs(
+            sms_provider.logger, level="INFO"
+        ) as captured:
+            sms_provider._cny_to_usd_rate()
+        output = "\n".join(captured.output)
+        self.assertIn("rate_usd_cny=8", output)
+        self.assertIn("fx_source=live CNY/USD", output)
+
     def test_live_cny_usd_rate_is_used(self):
         codex_config.SMS_FX_RATE_URL = "https://fx.test/latest?from=CNY&to=USD"
         body = json.dumps({"base": "CNY", "rates": {"USD": 0.14}}).encode("utf-8")
@@ -490,7 +524,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual([row["country"] for row in candidates], ["36"])
         output = "\n".join(captured.output)
         self.assertIn(
-            f"rate_usd_cny={Decimal("1") / live_cny_usd}",
+            f"rate_usd_cny={sms_provider._format_usd_cny_rate(live_cny_usd)}",
             output,
         )
         self.assertIn("fx_source=live CNY/USD (fixture)", output)
@@ -717,11 +751,20 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(http.calls[0]["params"]["status"], "6")
         self.assertEqual(sms_provider._activation_state("b3"), {})
 
+    def test_cancel_does_not_retry_terminal_release_failure(self):
+        codex_config.SMS_RELEASE_RETRIES = 3
+        codex_config.SMS_RELEASE_RETRY_DELAY = 0
+        sms_provider._remember_activation("release-terminal", "15550004444", {"provider": "smsbower"})
+        http = _Http([_Response("BAD_STATUS")])
+        result = sms_provider.cancel("release-terminal", http=http, background=False)
+        self.assertEqual(result["release"], "failed")
+        self.assertEqual(len(http.calls), 1)
+
     def test_cancel_retries_transient_release_failure(self):
         codex_config.SMS_RELEASE_RETRIES = 2
         codex_config.SMS_RELEASE_RETRY_DELAY = 0
         sms_provider._remember_activation("release-retry", "15550004444", {"provider": "smsbower"})
-        http = _Http([_Response("BAD_STATUS"), _Response("ACCESS_CANCEL")])
+        http = _Http([_Response("temporary", status_code=503), _Response("ACCESS_CANCEL")])
         result = sms_provider.cancel("release-retry", http=http, background=False)
         self.assertEqual(result["release"], "cancelled")
         self.assertEqual(len(http.calls), 2)

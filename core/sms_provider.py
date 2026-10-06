@@ -124,6 +124,13 @@ def _attempt_provider_chain() -> list[str]:
     return chain
 
 
+def _provider_error_allows_fallback(reason: object) -> bool:
+    """只对库存耗尽或平台瞬时错误切换，配置/余额错误立即停止。"""
+    if isinstance(reason, (SmsProviderConfigurationError, SmsNoBalanceError)):
+        return False
+    return isinstance(reason, SmsProviderError)
+
+
 def _provider() -> str:
     """返回当前有序链的首选短信渠道。"""
     return _provider_chain()[0]
@@ -188,6 +195,13 @@ def _parse_usd_rate_from_payload(payload: object) -> Decimal | None:
         if rate.is_finite() and rate > 0:
             return rate
     return None
+
+
+def _format_usd_cny_rate(cny_to_usd_rate: Decimal) -> str:
+    """以稳定的小数格式记录 1 USD 对应的人民币汇率。"""
+    value = Decimal("1") / Decimal(cny_to_usd_rate)
+    formatted = format(value.quantize(Decimal("0.000001")), "f")
+    return formatted.rstrip("0").rstrip(".") or "0"
 
 
 def _fallback_usd_cny_rate() -> tuple[Decimal, str]:
@@ -260,12 +274,16 @@ def _cny_to_usd_rate() -> tuple[Decimal, str]:
         with _STATE_LOCK:
             _FX_RATE_CACHE = (now, rate, source)
         _remember_usd_cny_rate(Decimal("1") / rate)
-        logger.info("[SMS] 已刷新人民币兑美元汇率：source=%s rate=%s", source, rate)
+        logger.info(
+            "[SMS] 已刷新汇率：rate_usd_cny=%s fx_source=%s",
+            _format_usd_cny_rate(rate), source,
+        )
         return rate, source
 
     fallback_rate, fallback_source = _fallback_usd_cny_rate()
     logger.warning(
-        "[SMS] 实时汇率源全部失败，使用回退汇率 %s：%s",
+        "[SMS] 实时汇率源全部失败，使用回退汇率：rate_usd_cny=%s fx_source=%s errors=%s",
+        _format_usd_cny_rate(fallback_rate),
         fallback_source,
         "；".join(errors[:3]) or "无可用来源",
     )
@@ -974,7 +992,7 @@ def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list
         "[SMSBower] 随机国家候选：service=%s count=%s price_usd=%s..%s price_cny=%s..%s rate_usd_cny=%s fx_source=%s",
         service, len(candidates), min_price_usd if min_price_usd is not None else 0,
         max_price_usd, min_price_cny if min_price_cny is not None else 0,
-        max_price_cny, (Decimal("1") / cny_to_usd_rate), fx_source,
+        max_price_cny, _format_usd_cny_rate(cny_to_usd_rate), fx_source,
     )
     if not candidates:
         raise SmsNoNumbersError(
@@ -1186,7 +1204,7 @@ def preflight_sms_dependency(
                 return result
             except SmsProviderError as exc:
                 last_error = exc
-                if index + 1 < len(providers):
+                if index + 1 < len(providers) and _provider_error_allows_fallback(exc):
                     logger.warning("[SMS] provider=%s 预检失败，切换下一个 provider：%s", provider, str(exc)[:180])
                     continue
                 raise
@@ -1529,7 +1547,7 @@ def acquire_number(
                 return _acquire_number_for_provider(provider, http, service=service, country=country)
             except SmsProviderError as exc:
                 errors.append(exc)
-                if index + 1 < len(providers):
+                if index + 1 < len(providers) and _provider_error_allows_fallback(exc):
                     logger.warning(
                         "[SMS] provider=%s 取号失败，按顺序切换到下一个 provider：%s",
                         provider, str(exc)[:180],
@@ -1675,7 +1693,9 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
     retry_delay = max(0, _setting_int("SMS_RELEASE_RETRY_DELAY", 1, 0))
     last_error: Exception | None = None
     try:
+        attempted = 0
         for attempt in range(1, retries + 1):
+            attempted = attempt
             try:
                 response = set_status(activation_id, close_status, http=http)
                 release = "closed_after_code" if close_status == 6 else "cancelled"
@@ -1691,7 +1711,11 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
                 }
             except Exception as exc:
                 last_error = exc
-                if attempt < retries:
+                terminal = isinstance(exc, (SmsProviderConfigurationError, SmsNoBalanceError)) or any(
+                    marker in str(exc).upper()
+                    for marker in ("BAD_STATUS", "NO_ACTIVATION", "BAD_ACTION", "BAD_KEY")
+                )
+                if attempt < retries and not terminal:
                     logger.warning(
                         "[%s] 释放号码瞬时失败，立即重试：activation_id=%s status=%s attempt=%s/%s error=%s",
                         provider, activation_id, close_status, attempt, retries, str(exc)[:160],
@@ -1699,6 +1723,12 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
                     if retry_delay:
                         _stop_sleep(retry_delay)
                     continue
+                if terminal:
+                    logger.error(
+                        "[%s] 释放响应为终态错误，不重复请求：activation_id=%s status=%s error=%s",
+                        provider, activation_id, close_status, str(exc)[:160],
+                    )
+                    break
         logger.warning(
             "[%s] 释放号码失败：activation_id=%s status=%s attempts=%s error=%s",
             provider, activation_id, close_status, retries, str(last_error or "")[:180],
@@ -1707,7 +1737,7 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
             "release": "failed",
             "status": close_status,
             "error": str(last_error or "释放请求失败"),
-            "attempts": retries,
+            "attempts": attempted,
         }
     finally:
         _forget_activation(activation_id)

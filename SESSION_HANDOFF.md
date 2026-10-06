@@ -265,3 +265,12 @@ cd /实际项目目录 && git status --short --branch && git rev-parse --short H
 - 生产有效配置：`SMS_PROVIDER=smsbower`、`SMS_PROVIDER_CHAIN=`（空值表示按首选平台追加备用顺序）、SMSBower 已配置、Tiger 未配置；运行时解析链为 `smsbower,tiger`，实际尝试链为 `smsbower`。
 - 重启期间旧 Playwright 子进程出现一次 EPIPE，systemd 随即正常停止旧进程并启动新进程；新进程启动日志和 HTTP 健康检查正常。
 - 尚未执行真实账号的生产短信采购/补跑，因此 status=8/status=6 和实际 SMS 通道切换仍需下一次真实业务请求日志验证；本次部署本身没有产生新的短信费用。
+
+## 14. 2026-10-06 第二轮短信边界修复
+
+- 新增并通过 81 项相关回归测试：provider 配置/余额错误不跨平台 fallback、库存错误顺序 fallback、终态释放错误不重复请求、瞬时 HTTP 失败重试、FX 日志方向、自动注册嵌套 phone_activation 持久化。
+- FX 日志已统一为 `rate_usd_cny` 和 `fx_source`；回退汇率输出稳定为 `7.2` 等短小数，不再出现 `7.199999...` 长尾。
+- 生产第二轮备份：`/opt/turb-gpt-register/deploy-backups/20261006T053438Z-sms-boundary-fix/sms_provider.py.tar.gz`。
+- 第二轮同步文件：`/opt/turb-gpt-register/core/sms_provider.py`，本地与生产 SHA-256 均为 `5cd6259280a56580599e27419f9cba415a215c0f0c227438874af25edb3d06b0`；生产 py_compile 退出码为 0。
+- 第二轮重启后：`turb-gpt-register.service` active，MainPID=368920；WebUI 启动于 05:35:26 UTC；本地 HTTP 健康检查仍返回 302 `/login?next=/`。
+- 第二轮重启后的生产日志没有真实短信采购事件，只有 WebUI 启动/健康请求；status=8/status=6、实际 SMS 通道保持和 provider fallback 仍由本地 81 项行为测试覆盖，待下一次真实 Codex 补跑产生业务日志后再观察。
