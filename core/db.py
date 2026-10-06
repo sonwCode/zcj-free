@@ -1288,7 +1288,9 @@ def update_account_codex_status(
                 codex_extra = {}
             else:
                 codex_extra = dict(codex_extra)
-            codex_extra["phone_activation"] = dict(phone_activation)
+            codex_extra["phone_activation"] = _merge_codex_phone_activation(
+                codex_extra.get("phone_activation"), phone_activation
+            )
             extra["codex"] = codex_extra
             row["extra_json"] = json.dumps(extra, ensure_ascii=False)
         if str(codex_status or "").strip().lower() == "deactivated":
@@ -3133,17 +3135,99 @@ def _codex_filter_sql(
     return where, params
 
 
-def _codex_content_to_record(content: dict) -> dict:
+def _merge_codex_phone_activation(previous: dict | None, current: dict | None) -> dict:
+    """合并手机激活快照，避免重试轮次的空字段覆盖已有值。"""
+    merged: dict = {}
+    for snapshot in (previous, current):
+        if not isinstance(snapshot, dict):
+            continue
+        for key, value in snapshot.items():
+            if value in (None, ""):
+                continue
+            if value is False and key in merged:
+                continue
+            merged[key] = value
+    return merged
+
+
+def _phone_activation_from_account_payload(account_payload: dict | None) -> dict:
+    if not isinstance(account_payload, dict):
+        return {}
+    raw_extra = account_payload.get("extra_json")
+    if isinstance(raw_extra, str) and raw_extra.strip():
+        try:
+            extra = json.loads(raw_extra)
+        except (TypeError, ValueError):
+            extra = {}
+    elif isinstance(raw_extra, dict):
+        extra = raw_extra
+    else:
+        extra = {}
+    codex = extra.get("codex") if isinstance(extra, dict) else None
+    activation = codex.get("phone_activation") if isinstance(codex, dict) else None
+    return dict(activation) if isinstance(activation, dict) else {}
+
+
+def _codex_content_email(content: dict) -> str:
+    fname = content.get("_filename", "")
+    without_prefix = fname[5:-5] if fname.startswith("codex-") and fname.endswith(".json") else fname
+    return str(content.get("email") or without_prefix or "").strip()
+
+
+def _codex_account_payloads(conn, contents: list[dict]) -> dict[str, dict]:
+    emails = {_codex_content_email(content).lower() for content in contents if _codex_content_email(content)}
+    if not emails:
+        return {}
+    placeholders = ",".join("?" for _ in emails)
+    rows = conn.execute(
+        f"SELECT email, payload FROM accounts WHERE lower(email) IN ({placeholders}) ORDER BY id DESC",
+        sorted(emails),
+    ).fetchall()
+    result: dict[str, dict] = {}
+    for row in rows:
+        key = str(row["email"] or "").lower()
+        if key in result:
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            result[key] = payload
+    return result
+
+
+def _codex_content_to_record(content: dict, account_payload: dict | None = None) -> dict:
     """把 SQLite 中的 Codex payload 转成列表展示对象。"""
     fname = content.get("_filename", "")
     without_prefix = fname[5:-5] if fname.startswith("codex-") and fname.endswith(".json") else fname
     email = content.get("email") or without_prefix
+    account_phone = _phone_activation_from_account_payload(account_payload)
+    phone_activation = _merge_codex_phone_activation(account_phone, content.get("phone_activation"))
+    phone = str(content.get("phone") or phone_activation.get("phone_number") or "").strip()
+    phone_country = str(
+        content.get("phone_country")
+        or phone_activation.get("phone_country_name")
+        or phone_activation.get("phone_region")
+        or phone_activation.get("country")
+        or ""
+    ).strip()
+    phone_price = str(content.get("phone_price") or "").strip()
+    if not phone_price and phone_activation.get("price_amount") not in (None, ""):
+        phone_price = " ".join(
+            part
+            for part in (
+                str(phone_activation.get("price_amount") or "").strip(),
+                str(phone_activation.get("price_currency") or "").strip().upper(),
+            )
+            if part
+        )
     plan = ""
     if "-" in without_prefix and without_prefix.rsplit("-", 1)[-1].lower() in ("free", "plus", "team", "pro", "enterprise"):
         plan = without_prefix.rsplit("-", 1)[-1].lower()
         if not content.get("email"):
             email = without_prefix.rsplit("-", 1)[0]
-    return {
+    result = {
         "filename": fname, "path": f"sqlite://codex_accounts/{fname}", "email": email, "plan": plan,
         "account_id": content.get("account_id", ""), "type": content.get("type", "codex"),
         "last_refresh": content.get("last_refresh", ""), "expired": content.get("expired", ""),
@@ -3151,7 +3235,13 @@ def _codex_content_to_record(content: dict) -> dict:
         "size": content.get("_size", 0), "mtime": content.get("_mtime", ""),
         "exported_at": content.get("_exported_at"), "exported_count": content.get("_exported_count", 0),
         "archived": bool(content.get("_archived")), "archived_at": content.get("_archived_at"),
+        "phone": phone,
+        "phone_country": phone_country,
+        "phone_price": phone_price,
     }
+    if phone_activation:
+        result["phone_activation"] = phone_activation
+    return result
 
 
 def list_codex_accounts_page(
@@ -3178,7 +3268,14 @@ def list_codex_accounts_page(
             "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
-    items = [_codex_content_to_record(json.loads(row["payload"])) for row in rows]
+        contents = [json.loads(row["payload"]) for row in rows]
+        account_payloads = _codex_account_payloads(conn, contents)
+    items = [
+        _codex_content_to_record(
+            content, account_payloads.get(_codex_content_email(content).lower())
+        )
+        for content in contents
+    ]
     return {
         "items": items,
         "total": total,
@@ -3202,7 +3299,13 @@ def list_codex_accounts(
         rows = [json.loads(row["payload"]) for row in conn.execute(
             f"SELECT payload FROM codex_accounts WHERE {clause} ORDER BY created_at DESC, id DESC", params
         )]
-    return [_codex_content_to_record(content) for content in rows]
+        account_payloads = _codex_account_payloads(conn, rows)
+    return [
+        _codex_content_to_record(
+            content, account_payloads.get(_codex_content_email(content).lower())
+        )
+        for content in rows
+    ]
 
 
 def upsert_codex_credential(content: dict, filename: str) -> str:
@@ -3219,12 +3322,17 @@ def upsert_codex_credential(content: dict, filename: str) -> str:
             for key in ("_exported_at", "_exported_count", "_archived", "_archived_at"):
                 if key not in meta:
                     meta[key] = previous.get(key)
+            merged_phone = _merge_codex_phone_activation(
+                previous.get("phone_activation"), meta.get("phone_activation")
+            )
+            if merged_phone:
+                meta["phone_activation"] = merged_phone
             created_at = old["created_at"] or now
             account_id = conn.execute("SELECT id FROM codex_accounts WHERE filename=?", (filename,)).fetchone()[0]
         else:
             account_id = int(conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM codex_accounts").fetchone()[0])
             created_at = now
-        meta.update({"_filename": filename, "_size": len(json.dumps(content, ensure_ascii=False).encode("utf-8")), "_mtime": now})
+        meta.update({"_filename": filename, "_size": len(json.dumps(meta, ensure_ascii=False).encode("utf-8")), "_mtime": now})
         conn.execute(
             "INSERT INTO codex_accounts(id,filename,email,archived,created_at,updated_at,payload) VALUES(?,?,?,?,?,?,?) "
             "ON CONFLICT(filename) DO UPDATE SET email=excluded.email, archived=excluded.archived, updated_at=excluded.updated_at, payload=excluded.payload",

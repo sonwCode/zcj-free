@@ -135,6 +135,9 @@ class SmsProviderStrategyTests(unittest.TestCase):
     def setUp(self):
         sms_provider._reset_runtime_state_for_tests()
         codex_config.SMS_PROVIDER = "smsbower"
+        codex_config.SMS_PROVIDER_CHAIN = ""
+        codex_config.SMS_RELEASE_RETRIES = 3
+        codex_config.SMS_RELEASE_RETRY_DELAY = 0
         codex_config.SMS_SERVICE = "dr"
         codex_config.SMS_COUNTRY = "1"
         codex_config.SMS_FX_RATE_URL = ""
@@ -193,6 +196,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertFalse(http.closed)
 
     def test_preflight_smsbower_no_inventory_does_not_call_get_number(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smsbower"
         codex_config.SMSBOWER_RANDOM_COUNTRY = False
         http = _Http([_Response(json.dumps({
             "1": {"dr": {"cost": 0.08, "count": 0}},
@@ -208,6 +212,38 @@ class SmsProviderStrategyTests(unittest.TestCase):
     def test_unsupported_legacy_provider_falls_back_to_smsbower(self):
         codex_config.SMS_PROVIDER = "h"
         self.assertEqual(sms_provider._provider(), "smsbower")
+
+    def test_provider_chain_is_ordered_deduplicated_and_explicit(self):
+        codex_config.SMS_PROVIDER_CHAIN = "tiger,smsbower,tiger"
+        self.assertEqual(sms_provider._provider_chain(), ["tiger", "smsbower"])
+        self.assertEqual(sms_provider._attempt_provider_chain(), ["tiger", "smsbower"])
+
+    def test_acquire_falls_back_to_next_provider_without_parallel_purchase(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smsbower,tiger"
+        codex_config.SMS_COUNTRY = "1"
+        codex_config.SMSBOWER_RANDOM_COUNTRY = False
+        codex_config.SMSBOWER_USE_V2 = False
+        codex_config.TIGER_SMS_RANDOM_COUNTRY = False
+        http = _Http([
+            _Response(json.dumps({"1": {"dr": {"cost": 0.08, "count": 2}}})),
+            _Response("NO_NUMBERS"),
+            _Response(json.dumps({"1": {"dr": {"cost": 0.09, "count": 2}}})),
+            _Response(json.dumps({
+                "activationId": "chain-tiger-1",
+                "phoneNumber": "15550009999",
+                "activationCost": 0.02,
+                "currency": "USD",
+            })),
+        ])
+        activation_id, phone = sms_provider.acquire_number(http=http, country="1")
+        self.assertEqual((activation_id, phone), ("chain-tiger-1", "15550009999"))
+        self.assertEqual([call["url"] for call in http.calls[:2]], [
+            "http://sms.test/handler_api", "http://sms.test/handler_api",
+        ])
+        self.assertEqual([call["url"] for call in http.calls[2:]], [
+            "http://tiger.test/stubs/handler_api.php", "http://tiger.test/stubs/handler_api.php",
+        ])
+        self.assertEqual(sms_provider.get_activation_info(activation_id)["provider"], "tiger")
 
     def test_tiger_provider_selection_and_number_params_use_common_cny_ceiling(self):
         codex_config.SMS_PROVIDER = "tiger"
@@ -436,6 +472,30 @@ class SmsProviderStrategyTests(unittest.TestCase):
         # 成功的实时汇率要写回配置，供后续网络失败时回退。
         self.assertEqual(codex_config.SMS_LAST_KNOWN_USD_CNY_RATE, format(Decimal("1") / Decimal("0.14"), "f"))
 
+    def test_random_country_log_uses_live_usd_cny_inverse_and_source(self):
+        codex_config.SMSBOWER_MIN_PRICE = "0.10"
+        codex_config.SMS_MAX_PRICE = "0.25"
+        http = _Http([_Response(json.dumps({
+            "36": {"dr": {"cost": 0.03, "count": 10}},
+        }))])
+        live_cny_usd = Decimal("0.149023")
+
+        with patch.object(
+            sms_provider,
+            "_cny_to_usd_rate",
+            return_value=(live_cny_usd, "live CNY/USD (fixture)"),
+        ), self.assertLogs(sms_provider.logger, level="INFO") as captured:
+            candidates = sms_provider._smsbower_random_country_candidates(http, "dr")
+
+        self.assertEqual([row["country"] for row in candidates], ["36"])
+        output = "\n".join(captured.output)
+        self.assertIn(
+            f"rate_usd_cny={Decimal("1") / live_cny_usd}",
+            output,
+        )
+        self.assertIn("fx_source=live CNY/USD (fixture)", output)
+        self.assertNotIn("rate_usd_cny=7.2", output)
+
     def test_failure_falls_back_to_last_known_rate_instead_of_aborting(self):
         """实时汇率源全部失败时回退到最近已知汇率，不再中断取号。"""
         codex_config.SMS_FX_RATE_URLS = "https://fx1.test/latest,https://fx2.test/latest"
@@ -641,8 +701,31 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
         sms_provider._remember_activation("b2", "15550004", {"provider": "smsbower"})
         http = _Http([_Response("OK")])
-        sms_provider.cancel("b2", http=http, background=False)
+        result = sms_provider.cancel("b2", http=http, background=False)
+        self.assertEqual(result["release"], "cancelled")
+        self.assertEqual(result["status"], 8)
+        self.assertEqual(http.calls[0]["params"]["status"], "8")
         self.assertEqual(sms_provider._activation_state("b2"), {})
+
+    def test_cancel_after_code_uses_completion_status_not_cancel_status(self):
+        sms_provider._remember_activation("b3", "15550005", {"provider": "smsbower"})
+        sms_provider._remember_code("b3", "123456")
+        http = _Http([_Response("OK")])
+        result = sms_provider.cancel("b3", http=http, background=False)
+        self.assertEqual(result["release"], "closed_after_code")
+        self.assertEqual(result["status"], 6)
+        self.assertEqual(http.calls[0]["params"]["status"], "6")
+        self.assertEqual(sms_provider._activation_state("b3"), {})
+
+    def test_cancel_retries_transient_release_failure(self):
+        codex_config.SMS_RELEASE_RETRIES = 2
+        codex_config.SMS_RELEASE_RETRY_DELAY = 0
+        sms_provider._remember_activation("release-retry", "15550004444", {"provider": "smsbower"})
+        http = _Http([_Response("BAD_STATUS"), _Response("ACCESS_CANCEL")])
+        result = sms_provider.cancel("release-retry", http=http, background=False)
+        self.assertEqual(result["release"], "cancelled")
+        self.assertEqual(len(http.calls), 2)
+        self.assertEqual([call["params"]["status"] for call in http.calls], ["8", "8"])
 
     def test_roxy_feedback_hooks_release_before_failure_feedback(self):
         source = ROXY_SOURCE.read_text(encoding="utf-8")

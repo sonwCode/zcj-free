@@ -104,8 +104,11 @@ CPA_SAVE_CALLBACK_RECEIPT: bool = True
 # 接码平台（SMSBower + Tiger SMS）
 # ============================================================
 
-# 运行时仅允许 smsbower 或 tiger；默认保持 SMSBower。
+# 兼容旧配置：SMS_PROVIDER 仍表示单平台模式下的首选平台。
 SMS_PROVIDER: str = "smsbower"
+# 有序接码链：前一个平台没有库存、余额或瞬时故障时才切到下一个；同一尝试绝不并发取号。
+# 未配置 API Key 的平台会被自动跳过。留空时退回 SMS_PROVIDER 单平台模式。
+SMS_PROVIDER_CHAIN: str = env_str("SMS_PROVIDER_CHAIN", "")
 
 # SMSBower handler_api 配置
 SMSBOWER_API_BASE: str = "https://smsbower.page/stubs/handler_api.php"
@@ -159,12 +162,6 @@ SMS_TIER_COOLDOWN_SECONDS: int = 2700
 # 一个号收不到短信/被拒时，换号重试的最大次数
 SMS_MAX_RETRIES: int = 10
 
-# 同一个号码在换号之前，原地重新填写/选通道/提交的最大次数。
-# 手机号提交失败大多是页面没推进（提交时序竞态），换号对此无效：下一个号码会以
-# 完全相同的方式卡住，结果是烧掉一批号码却看不出真因。只有确认号码被服务端
-# 拒绝（invalid_phone / invalid_phone_code / delivery_refused 等）才直接换号。
-SMS_NUMBER_SUBMIT_ROUNDS: int = 2
-
 # 单个号等待短信的最长秒数（超时则取消该号换下一个）
 SMS_CODE_WAIT: int = 120
 
@@ -173,6 +170,9 @@ SMS_POLL_INTERVAL: int = 5
 
 # 接码平台 HTTP 请求超时（秒）
 SMS_REQUEST_TIMEOUT: int = 30
+# 释放/关闭激活的同步重试，避免瞬时网络错误让号码继续计费。
+SMS_RELEASE_RETRIES: int = 3
+SMS_RELEASE_RETRY_DELAY: int = 1
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_OAUTH_DRIVER_FALLBACK': 'bool', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_REQUEST_RETRIES': 'int', 'CPA_REQUEST_RETRY_DELAY': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_URLS': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_LAST_KNOWN_USD_CNY_RATE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_NUMBER_SUBMIT_ROUNDS': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_OAUTH_DRIVER_FALLBACK': 'bool', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_REQUEST_RETRIES': 'int', 'CPA_REQUEST_RETRY_DELAY': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_PROVIDER_CHAIN': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_URLS': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_LAST_KNOWN_USD_CNY_RATE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_RELEASE_RETRIES': 'int', 'SMS_RELEASE_RETRY_DELAY': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int'})

@@ -59,6 +59,8 @@ def _load_run():
         "_is_cpa_callback_reauth_error": lambda exc: False,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
+    # 该夹具只验证短信异常映射；驱动解析由独立测试覆盖。
+    namespace["_resolve_oauth_drivers"] = lambda driver: [str(driver or "protocol")]
     return namespace
 
 

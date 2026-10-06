@@ -938,16 +938,60 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
 
 
 def _select_sms_channel(page) -> None:
-    try:
-        page.evaluate(
-            """() => {
-              const radios = [...document.querySelectorAll('input[type=radio]')];
-              const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
-              if (sms) { sms.click(); sms.dispatchEvent(new Event('input', {bubbles:true})); sms.dispatchEvent(new Event('change', {bubbles:true})); }
-            }"""
-        )
-    except Exception:
-        pass
+    """选择并确认 SMS；通道被 WhatsApp 覆盖时立即终止当前号码。"""
+    read_or_select = r"""
+    (select) => {
+      const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+        && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+      const radios = [...document.querySelectorAll('input[type=radio]')].filter(visible);
+      const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
+      const whatsapp = radios.find(el => /whatsapp/i.test(el.value || ''));
+      if (!sms) return {found:false, hasWhatsapp:!!whatsapp, smsChecked:false, whatsappChecked:!!whatsapp?.checked};
+      if (select) {
+        const label = sms.id
+          ? [...document.querySelectorAll('label')].find(el => el.htmlFor === sms.id)
+          : null;
+        const target = label || sms.closest('label') || sms.closest('[role="radio"]') || sms;
+        sms.click();
+        if (!sms.checked && target !== sms) target.click();
+        sms.dispatchEvent(new Event('input', {bubbles:true}));
+        sms.dispatchEvent(new Event('change', {bubbles:true}));
+      }
+      return {found:true, hasWhatsapp:!!whatsapp, smsChecked:!!sms.checked, whatsappChecked:!!whatsapp?.checked};
+    }
+    """
+    last = {}
+    found = False
+    for _round in range(3):
+        for frame in _all_frames(page):
+            try:
+                result = frame.evaluate(read_or_select, True) or {}
+            except Exception:
+                continue
+            if not result.get("found"):
+                last = result
+                continue
+            found = True
+            last = result
+            _bu_delay("form", seconds=0.25)
+            try:
+                checked = frame.evaluate(read_or_select, False) or {}
+            except Exception:
+                checked = result
+            last = checked
+            if checked.get("smsChecked") and not checked.get("whatsappChecked"):
+                logger.info("[Codex][BrowserUse] 已选择并确认 SMS 短信通道")
+                return
+        if found:
+            _bu_delay("form", seconds=0.15)
+    if last.get("whatsappChecked"):
+        marker = "whatsapp_channel_reverted" if last.get("found") else "whatsapp_channel"
+        raise RuntimeError(f"{marker}: SMS 通道未保持选中 state={last}")
+    if found:
+        raise RuntimeError(f"sms_channel_select_failed: SMS 通道未被稳定选中 state={last}")
+    if last.get("hasWhatsapp"):
+        raise RuntimeError(f"whatsapp_channel: 页面仅提供 WhatsApp 通道 state={last}")
+    # 没有 radio 时保留页面默认通道行为；有 radio 却无法确认 SMS 才算失败。
 
 
 def _has_phone_prompt(page) -> bool:
@@ -964,6 +1008,13 @@ def _has_phone_prompt(page) -> bool:
 
 def _phone_digits(value: str) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _mask_phone_for_log(value: str) -> str:
+    digits = _phone_digits(value)
+    if len(digits) <= 4:
+        return digits or "-"
+    return "*" * max(len(digits) - 4, 2) + digits[-4:]
 
 
 def _phone_e164(value: str) -> str:
@@ -1081,7 +1132,7 @@ def _wait_after_phone_send(page, timeout: int = 18) -> str:
         if _has_visible_phone_code_input(page):
             return "code_page"
         phone_value = _read_phone_input_value(page)
-        state = f"url={url} phone_value={phone_value!r} body={_body_snippet(page, 220)!r}"
+        state = f"url={url} phone_value={_mask_phone_for_log(phone_value)!r} body={_body_snippet(page, 220)!r}"
         last_state = state
         _stop_sleep(0.7)
     logger.warning("[Codex][BrowserUse] 提交手机号后未确认进入短信页，最后状态：%s", last_state)
@@ -1208,8 +1259,8 @@ def _clear_phone_inputs(page) -> None:
 def _fill_phone(page, phone: str) -> str:
     phone_e164 = _phone_e164(phone)
     if not phone_e164:
-        raise RuntimeError(f"手机号为空/格式无效：{phone!r}")
-    logger.info("[Codex][BrowserUse] 准备填写手机号 E.164：%s", phone_e164)
+        raise RuntimeError(f"手机号为空/格式无效：{_mask_phone_for_log(phone)!r}")
+    logger.info("[Codex][BrowserUse] 准备填写手机号 E.164：%s", _mask_phone_for_log(phone_e164))
     if not _wait_phone_form_ready(page, timeout=8):
         raise RuntimeError("找不到手机号输入框；" + _current_state_for_log(page))
     selectors = [
@@ -1239,7 +1290,7 @@ def _fill_phone(page, phone: str) -> str:
         _force_set_phone_value(page, phone_e164)
         actual = _read_phone_input_value(page)
     if _phone_digits(actual) != _phone_digits(phone_e164):
-        raise RuntimeError(f"手机号未正确写入页面：expected={phone_e164}, actual={actual!r}")
+        raise RuntimeError(f"手机号未正确写入页面：expected={_mask_phone_for_log(phone_e164)}, actual={_mask_phone_for_log(actual)!r}")
     logger.info("[Codex][BrowserUse] 页面手机号输入值：%r", actual)
 
     _select_sms_channel(page)
@@ -1398,7 +1449,7 @@ def _do_phone_verification_if_present(page) -> dict | None:
             price = " ".join(
                 part for part in (str(snapshot.get("price_amount") or ""), str(snapshot.get("price_currency") or "")) if part
             ) or "unknown"
-            logger.info("[Codex][BrowserUse] 已取号：+%s activation=%s", phone, activation_id)
+            logger.info("[Codex][BrowserUse] 已取号：%s activation=%s", _mask_phone_for_log(phone), activation_id)
             logger.info(
                 "[Codex][BrowserUse] 号码采购快照：region=%s provider_country=%s price=%s "
                 "price_limit_max=%s price_validated=%s",
@@ -1411,7 +1462,7 @@ def _do_phone_verification_if_present(page) -> dict | None:
             _bu_delay("form")
             send_state = _wait_after_phone_send(page, timeout=12 if _fast_mode() else 18)
             _t_phone_send.done(f"state={send_state}")
-            logger.info("[Codex][BrowserUse] 手机号提交后状态：%s phone=%s", send_state, phone_e164)
+            logger.info("[Codex][BrowserUse] 手机号提交后状态：%s phone=%s", send_state, _mask_phone_for_log(phone_e164))
             if send_state == "callback":
                 try:
                     sms_provider.report_success(activation_id)
@@ -1508,7 +1559,14 @@ def _finish_consent_workspace(context, page) -> str:
     return _wait_for_callback(context, page, timeout=5)
 
 
-def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str | None = None, force: bool = False, cloud_provider: str = "browser_use") -> dict:
+def _run_browser_use_codex_oauth_once(
+    email: str,
+    otp_provider=None,
+    proxy: str | None = None,
+    force: bool = False,
+    cloud_provider: str = "browser_use",
+    _phone_activation: dict | None = None,
+) -> dict:
     from core import codex_oauth as proto
     if not force and not proto._cfg.ENABLE_CODEX_AUTO:
         return proto._codex_result(status="skipped", message="ENABLE_CODEX_AUTO=False")
@@ -1516,6 +1574,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
         return proto._codex_result(status="skipped", message="email 为空")
     if otp_provider is None:
         from core.email_provider import wait_for_otp as otp_provider
+    phone_activation = dict(_phone_activation or {})
 
     try:
         from playwright.sync_api import sync_playwright
@@ -1578,7 +1637,10 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
             dead_tracker = _install_account_dead_response_tracker(page)
 
             _fill_email_and_otp(page, email, otp_provider, auth_url, dead_tracker=dead_tracker)
-            phone_activation = _do_phone_verification_if_present(page) or {}
+            current_phone_activation = _do_phone_verification_if_present(page) or {}
+            phone_activation = proto._merge_phone_activation(
+                phone_activation, current_phone_activation
+            )
             logger.info("[Codex][BrowserUse] 手机验证处理完成/无需处理，等待授权确认和 callback")
             _t_callback = _StepTimer("等待 consent/workspace/callback")
             callback_url = _finish_consent_workspace(context, page)
@@ -1594,6 +1656,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     auth_url=auth_url,
                     state=state,
                     submit_payload=submit_payload,
+                    phone_activation=phone_activation,
                 )
                 msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
                 _t_all.done("success")
@@ -1619,6 +1682,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     auth_url=auth_url,
                     state=state,
                     submit_payload=submit_payload,
+                    phone_activation=phone_activation,
                 )
                 msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
                 _t_all.done("success")
@@ -1634,7 +1698,9 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
 
             token_payload = proto._exchange_codex_token(code, code_verifier)
             storage = proto._build_codex_storage(token_payload)
-            path = proto._save_codex_credential(email, storage)
+            path = proto._save_codex_credential(
+                email, storage, phone_activation=phone_activation
+            )
             _t_all.done("success")
             return proto._codex_result(status="success", ok=True, email=email, file_path=str(path), callback_url=callback_url, phone_activation=phone_activation)
     except AccountUnusableError as exc:
@@ -1643,6 +1709,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
             status="deactivated",
             email=email,
             message=f"账号已废（{exc.error_code or 'account_deactivated'}）",
+            phone_activation=phone_activation,
         )
     except Exception as exc:
         logger.error("[Codex][BrowserUse] 授权失败：%s: %s", type(exc).__name__, exc)
@@ -1655,8 +1722,14 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                 error_code=sms_outcome["error_code"],
                 retryable=sms_outcome["retryable"],
                 message=sms_outcome["message"][:240],
+                phone_activation=phone_activation,
             )
-        return proto._codex_result(status="failed", email=email, message=f"{type(exc).__name__}: {str(exc)[:300]}")
+        return proto._codex_result(
+            status="failed",
+            email=email,
+            message=f"{type(exc).__name__}: {str(exc)[:300]}",
+            phone_activation=phone_activation,
+        )
     finally:
         keep_open = bool(getattr(_cfg, "BROWSER_USE_KEEP_BROWSER_OPEN", False))
         if provider in ("skyvern", "sv"):
@@ -1727,6 +1800,7 @@ def _run_browser_use_codex_oauth_impl(email: str, otp_provider=None, proxy: str 
 
     max_rounds = 2
     last_result = None
+    phone_activation: dict = {}
     for round_no in range(1, max_rounds + 1):
         if round_no > 1:
             logger.warning(
@@ -1735,7 +1809,20 @@ def _run_browser_use_codex_oauth_impl(email: str, otp_provider=None, proxy: str 
                 max_rounds,
                 email,
             )
-        result = _run_browser_use_codex_oauth_once(email=email, otp_provider=otp_provider, proxy=proxy, force=force, cloud_provider=cloud_provider)
+        result = _run_browser_use_codex_oauth_once(
+            email=email,
+            otp_provider=otp_provider,
+            proxy=proxy,
+            force=force,
+            cloud_provider=cloud_provider,
+            _phone_activation=phone_activation,
+        )
+        phone_activation = proto._merge_phone_activation(
+            phone_activation, result.get("phone_activation")
+        )
+        if phone_activation:
+            result = dict(result)
+            result["phone_activation"] = phone_activation
         last_result = result
         if result.get("ok"):
             return result
@@ -1746,7 +1833,12 @@ def _run_browser_use_codex_oauth_impl(email: str, otp_provider=None, proxy: str 
         last_result = dict(last_result)
         last_result["message"] = f"CPA callback 超时，已重新授权 {max_rounds} 轮仍失败：{last_result.get('message') or ''}"
         return last_result
-    return proto._codex_result(status="failed", email=email, message="CPA callback 超时，重新授权失败")
+    return proto._codex_result(
+        status="failed",
+        email=email,
+        message="CPA callback 超时，重新授权失败",
+        phone_activation=phone_activation,
+    )
 
 
 def run_browser_use_codex_oauth(email: str, otp_provider=None, proxy: str | None = None, force: bool = False, cloud_provider: str = "browser_use") -> dict:

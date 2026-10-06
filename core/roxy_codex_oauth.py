@@ -624,21 +624,26 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", code)
         _wait_for_otp_input(driver, timeout=30)
         _clear_otp_inputs(driver)
+        _install_email_otp_validate_hook(driver)
+        baseline_count = _email_otp_validate_snapshot(driver).get("count", 0)
         _type_otp(driver, code)
         logger.info("[Codex][Browser] 已填写邮箱 OTP")
         human_delay("otp_input")
-        _install_email_otp_validate_hook(driver)
-        clicked = _click_if_present(driver, [
-            "button[type='submit']",
-            "//button[contains(., 'Continue')]",
-            "//button[contains(., '继续')]",
-            "//button[contains(., 'Verify')]",
-            "//button[contains(., '验证')]",
-        ], timeout=8)
-        if clicked:
-            logger.info("[Codex][Browser] 已提交邮箱 OTP，等待后续授权/手机号页面")
+        submitted = _wait_for_codex_auto_submit(driver, baseline_count)
+        if not submitted:
+            clicked = _click_if_present(driver, [
+                "button[type='submit']",
+                "//button[contains(., 'Continue')]",
+                "//button[contains(., '继续')]",
+                "//button[contains(., 'Verify')]",
+                "//button[contains(., '验证')]",
+            ], timeout=8)
+            if clicked:
+                logger.info("[Codex][Browser] 已提交邮箱 OTP，等待后续授权/手机号页面")
+            else:
+                logger.info("[Codex][Browser] 未找到显式提交按钮，继续等待页面状态")
         else:
-            logger.info("[Codex][Browser] 未找到显式提交按钮，继续等待页面状态")
+            logger.info("[Codex][Browser] 页面已自动提交邮箱 OTP，不再重复点击")
 
         outcome = _wait_after_email_otp_submit(driver, timeout=45)
         logger.info("[Codex][Browser] 邮箱 OTP 提交后状态：%s", outcome)
@@ -1035,26 +1040,89 @@ def _phone_page_state(driver) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}", "url": getattr(driver, 'current_url', '')}
 
 
-def _select_sms_channel_or_raise(driver) -> None:
+def _assert_sms_channel_or_raise(driver) -> None:
     state = _phone_page_state(driver)
-    radios = state.get('radios') or []
-    # 如果存在 WhatsApp 且没有 SMS/text 可选，当前接码平台无法读取 WhatsApp，直接换号。
-    has_whatsapp = any('whatsapp' in str(r.get('value','')).lower().replace(' ', '') for r in radios)
-    has_sms = any(str(r.get('value','')).lower() in ('sms', 'text', 'text_message', 'text-message') for r in radios)
+    radios = state.get("radios") or []
+    normalized = [str(item.get("value") or "").lower().replace(" ", "") for item in radios]
+    has_sms = any(value in ("sms", "text", "text_message", "text-message") for value in normalized)
+    has_whatsapp = any("whatsapp" in value for value in normalized)
+    sms_checked = any(
+        value in ("sms", "text", "text_message", "text-message") and bool(item.get("checked"))
+        for value, item in zip(normalized, radios)
+    )
+    whatsapp_checked = any(
+        "whatsapp" in value and bool(item.get("checked"))
+        for value, item in zip(normalized, radios)
+    )
+    if whatsapp_checked:
+        marker = "whatsapp_channel_reverted" if has_sms else "whatsapp_channel"
+        raise RuntimeError(f"{marker}: SMS 通道未保持选中 state={state}")
+    if has_sms and not sms_checked:
+        raise RuntimeError(f"sms_channel_select_failed: SMS 通道未被选中 state={state}")
     if has_whatsapp and not has_sms:
         raise RuntimeError(f"whatsapp_channel: 页面仅提供 WhatsApp 通道 state={state}")
-    # 选择 SMS/text radio。无 radio 时可能默认 SMS。
-    selected = driver.execute_script(r"""
-    const radios = [...document.querySelectorAll('input[type=radio]')];
-    const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
-    if (!sms) return false;
-    sms.click();
-    sms.dispatchEvent(new Event('input', {bubbles:true}));
-    sms.dispatchEvent(new Event('change', {bubbles:true}));
-    return true;
-    """)
-    if selected:
-        logger.info("[Codex][Browser] 已选择 SMS 短信通道")
+
+
+def _select_sms_channel_or_raise(driver) -> None:
+    state = _phone_page_state(driver)
+    radios = state.get("radios") or []
+    # 如果存在 WhatsApp 且没有 SMS/text 可选，当前接码平台无法读取 WhatsApp，直接换号。
+    has_whatsapp = any("whatsapp" in str(r.get("value", "")).lower().replace(" ", "") for r in radios)
+    has_sms = any(
+        str(r.get("value", "")).lower().replace(" ", "") in ("sms", "text", "text_message", "text-message")
+        for r in radios
+    )
+    if has_whatsapp and not has_sms:
+        raise RuntimeError(f"whatsapp_channel: 页面仅提供 WhatsApp 通道 state={state}")
+    # 没有可确认的 SMS 选项时，不能把默认通道猜成 SMS。
+    if not has_sms:
+        if not has_whatsapp:
+            return
+        raise RuntimeError(f"sms_channel_select_failed: 页面未找到 SMS 通道 state={state}")
+
+    # React/React-Aria 可能在失焦或异步校验后重渲染表单。选择后重新读取
+    # checked 状态，提交前若回到 WhatsApp 就立即释放当前激活并换号。
+    last_state = state
+    for selection_round in range(1, 4):
+        driver.execute_script(r"""
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const radios = [...document.querySelectorAll('input[type=radio]')].filter(visible);
+        const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
+        if (!sms) return false;
+        const label = sms.id
+          ? [...document.querySelectorAll('label')].find(el => el.htmlFor === sms.id)
+          : null;
+        const target = label || sms.closest('label') || sms.closest('[role="radio"]') || sms;
+        sms.click();
+        if (!sms.checked && target !== sms) target.click();
+        sms.dispatchEvent(new Event('input', {bubbles:true}));
+        sms.dispatchEvent(new Event('change', {bubbles:true}));
+        return true;
+        """)
+        _stop_sleep(0.35)
+        last_state = _phone_page_state(driver)
+        last_radios = last_state.get("radios") or []
+        sms_checked = any(
+            str(item.get("value") or "").lower().replace(" ", "") in ("sms", "text", "text_message", "text-message")
+            and bool(item.get("checked"))
+            for item in last_radios
+        )
+        whatsapp_checked = any(
+            "whatsapp" in str(item.get("value") or "").lower().replace(" ", "")
+            and bool(item.get("checked"))
+            for item in last_radios
+        )
+        if sms_checked and not whatsapp_checked:
+            logger.info("[Codex][Browser] 已选择并确认 SMS 短信通道")
+            return
+        logger.warning(
+            "[Codex][Browser] SMS 选择后通道状态不稳定：round=%s/3 %s",
+            selection_round, _phone_state_digest(last_state),
+        )
+        if selection_round < 3:
+            _stop_sleep(0.2)
+    _assert_sms_channel_or_raise(driver)
 
 
 def _is_phone_code_state(state: dict) -> bool:
@@ -1210,9 +1278,9 @@ def _phone_country_identity(phone: str) -> dict:
     try:
         parsed = phonenumbers.parse(e164, None)
     except phonenumbers.NumberParseException as exc:
-        raise RuntimeError(f"phone_country_sync_failed: E.164 号码解析失败 phone={e164}") from exc
+        raise RuntimeError(f"phone_country_sync_failed: E.164 号码解析失败 phone={sms_provider._mask_phone(e164)}") from exc
     if not phonenumbers.is_possible_number(parsed):
-        raise RuntimeError(f"phone_country_sync_failed: E.164 号码长度无效 phone={e164}")
+        raise RuntimeError(f"phone_country_sync_failed: E.164 号码长度无效 phone={sms_provider._mask_phone(e164)}")
 
     regions = tuple(
         region for region in phonenumbers.region_codes_for_country_code(parsed.country_code)
@@ -1222,7 +1290,7 @@ def _phone_country_identity(phone: str) -> dict:
     if not region and len(regions) == 1:
         region = regions[0]
     if not region:
-        raise RuntimeError(f"phone_country_sync_failed: E.164 号码无法确定国家 phone={e164}")
+        raise RuntimeError(f"phone_country_sync_failed: E.164 号码无法确定国家 phone={sms_provider._mask_phone(e164)}")
 
     names = [
         phone_geocoder.country_name_for_number(parsed, "en"),
@@ -1473,7 +1541,7 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
     expected_digits = ''.join(ch for ch in str(phone or "") if ch.isdigit())
     if not expected_dial_code or not expected_digits.startswith(expected_dial_code):
         raise RuntimeError(
-            f"phone_country_mismatch: 号码前缀与国家控件不一致 phone={phone} country={country}"
+            f"phone_country_mismatch: 号码前缀与国家控件不一致 phone={sms_provider._mask_phone(phone)} country={country}"
         )
     result = driver.execute_script(r"""
     const rawPhone = String(arguments[0] || '').trim();
@@ -1593,7 +1661,7 @@ def _verify_add_phone_value_before_submit(
     if requested_dial_code and requested_dial_code != resolved_dial_code:
         raise RuntimeError(
             "phone_country_mismatch: 调用方区号与 E.164 号码不一致 "
-            f"phone={expected_e164} expected={requested_dial_code} resolved={resolved_dial_code}"
+            f"phone={sms_provider._mask_phone(expected_e164)} expected={requested_dial_code} resolved={resolved_dial_code}"
         )
     result = driver.execute_script(r"""
     const expected = String(arguments[0] || '').trim();
@@ -1826,39 +1894,18 @@ def _phone_state_digest(state: dict) -> str:
     return f"channels=[{channels}] fields=[{'; '.join(fields) or '-'}]"
 
 
-# 这些失败表示“页面没有推进”，多半是提交时序问题而不是号码被服务端拒绝。
-# 同一号码重新提交一次通常就能过去，比直接换号便宜得多（换号还会连带取消/消耗一个号码）。
-_PHONE_RESUBMIT_HINTS = (
-    "send_not_accepted",
-    "whatsapp_channel_reverted",
-    "phone_number_required",
-    "sms_channel_select_failed",
-)
-
-# 这些是明确的号码/账号/依赖问题，换号才有意义，不原地重试。
+# 通道/号码/提交的任何失败都会先释放当前激活，再进入下一次取号。
 _PHONE_SWITCH_HINTS = (
     "invalid_phone",
     "invalid_phone_code",
     "delivery_refused",
     "send_limited",
     "phone_in_use",
+    "whatsapp_channel_reverted",
+    "sms_channel_select_failed",
     "whatsapp_channel:",
     "invalid_auth_step",
 )
-
-
-def _is_repeatable_phone_submit_error(exc: object) -> bool:
-    """判断这次失败值不值得用同一个号码再提交一次。
-
-    换号对“页面没推进”这类失败无效：下一个号码会以完全相同的方式卡住，
-    结果是烧掉一批号码却看不出真因。只有确认号码被拒/通道确实不可用才换号。
-    """
-    text = str(exc or "").lower()
-    if not text:
-        return False
-    if any(k in text for k in _PHONE_SWITCH_HINTS):
-        return False
-    return any(k in text for k in _PHONE_RESUBMIT_HINTS)
 
 
 def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict:
@@ -1905,6 +1952,8 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
             phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-",
             phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
         )
+    # 最后一次失焦/重填后只读确认通道，确认提交不会落到 WhatsApp。
+    _assert_sms_channel_or_raise(driver)
     submit_info = _click_add_phone_continue_button(driver, timeout=10)
     logger.info("[Codex][Browser] 已点击手机号 Continue/続行 按钮：%s，等待进入短信验证码页", submit_info)
     _wait_page_settle_after_submit()
@@ -2097,8 +2146,8 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     part for part in (str(snapshot.get("price_amount") or ""), str(snapshot.get("price_currency") or "")) if part
                 ) or "unknown"
                 logger.info(
-                    "[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=+%s",
-                    attempt, max_retries, provider, phone,
+                    "[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=%s",
+                    attempt, max_retries, provider, sms_provider._mask_phone(phone),
                 )
                 logger.info(
                     "[Codex][Browser] 号码采购快照：activation=%s region=%s provider_country=%s "
@@ -2108,31 +2157,12 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     snapshot.get("price_limit_max") or "unlimited", snapshot.get("price_validated", False),
                 )
                 e164 = f"+{phone}"
-                # 同一号码先原地重提交一次，再考虑换号。失败大多不是号码被拒，
-                # 而是提交时序问题；换号对这种情况无效，只会连着烧掉一批号码，
-                # 还让日志里每次失败都长成不同的样子，掩盖真正卡点。
-                sms_cfg = getattr(sms_provider, "_cfg", None)
-                submit_rounds = max(1, int(getattr(sms_cfg, "SMS_NUMBER_SUBMIT_ROUNDS", 2) or 2))
-                submit_error: Exception | None = None
-                for submit_round in range(1, submit_rounds + 1):
-                    if submit_round > 1:
-                        logger.warning(
-                            "[Codex][Browser] 号码未换，原地重新填写并再次提交（第 %s/%s 次）：%s",
-                            submit_round, submit_rounds, str(submit_error)[:160],
-                        )
-                    _prepare_and_submit_add_phone(
-                        driver, e164, label=f"-attempt-{attempt}-submit-{submit_round}",
-                    )
-                    try:
-                        _wait_after_phone_send(driver, timeout=15)
-                        submit_error = None
-                        break
-                    except Exception as send_exc:
-                        submit_error = send_exc
-                        if not _is_repeatable_phone_submit_error(send_exc):
-                            raise
-                if submit_error is not None:
-                    raise submit_error
+                # 号码尝试只允许一次：任何未进入验证码页的失败都立即释放，
+                # 不再用同一个激活反复提交，避免平台继续计费或状态失控。
+                _prepare_and_submit_add_phone(
+                    driver, e164, label=f"-attempt-{attempt}-submit-1",
+                )
+                _wait_after_phone_send(driver, timeout=15)
                 logger.info("[Codex][Browser] 已进入手机验证码页")
 
                 sms_provider.set_status(activation_id, 1, http=http)
@@ -2290,6 +2320,7 @@ def _run_roxy_codex_oauth_once(
     reuse_existing_profile: bool = False,
     clear_existing_state: bool = True,
     registration_password: str | None = None,
+    _phone_activation: dict | None = None,
 ) -> dict:
     """指纹浏览器 Codex OAuth 入口。
 
@@ -2307,6 +2338,7 @@ def _run_roxy_codex_oauth_once(
     if registration_password:
         # 注册流程传下来的密码优先于查库结果，避免账号未落库时静默降级。
         remember_registration_password(email, registration_password)
+    phone_activation = dict(_phone_activation or {})
 
     client = None if reuse_existing_profile else RoxyBrowserClient()
     opened = existing_opened if reuse_existing_profile else client.open_profile()
@@ -2345,7 +2377,10 @@ def _run_roxy_codex_oauth_once(
         _fill_email_and_otp(driver, email, otp_provider, auth_url)
         human_delay("api")
         logger.info("[Codex][Browser] 检查是否需要手机号验证")
-        phone_activation = _do_phone_verification_if_present(driver) or {}
+        current_phone_activation = _do_phone_verification_if_present(driver) or {}
+        phone_activation = proto._merge_phone_activation(
+            phone_activation, current_phone_activation
+        )
         logger.info("[Codex][Browser] 手机验证处理完成/无需处理，等待授权确认和 callback")
         callback_url = _finish_consent_workspace(driver)
         code = proto._extract_code(callback_url, state)
@@ -2359,6 +2394,7 @@ def _run_roxy_codex_oauth_once(
                 auth_url=auth_url,
                 state=state,
                 submit_payload=submit_payload,
+                phone_activation=phone_activation,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
             return proto._codex_result(
@@ -2383,6 +2419,7 @@ def _run_roxy_codex_oauth_once(
                 auth_url=auth_url,
                 state=state,
                 submit_payload=submit_payload,
+                phone_activation=phone_activation,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
             return proto._codex_result(
@@ -2402,7 +2439,12 @@ def _run_roxy_codex_oauth_once(
         id_claims = proto._parse_id_token(token_resp.get("id_token", ""))
         effective_email = id_claims.get("email") or email
         storage = proto.build_codex_storage(token_resp, id_claims)
-        path = proto.save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""))
+        path = proto.save_codex_credential(
+            storage,
+            effective_email,
+            id_claims.get("plan_type", ""),
+            phone_activation=phone_activation,
+        )
         return proto._codex_result(
             status="success",
             ok=True,
@@ -2418,6 +2460,7 @@ def _run_roxy_codex_oauth_once(
             status="deactivated",
             email=email,
             message=f"账号已废（{exc.error_code or 'account_deactivated'}）",
+            phone_activation=phone_activation,
         )
     except Exception as exc:
         logger.warning("[Codex][Browser] 失败：%s，%s: %s", email, type(exc).__name__, str(exc)[:240])
@@ -2430,8 +2473,14 @@ def _run_roxy_codex_oauth_once(
                 error_code=sms_outcome["error_code"],
                 retryable=sms_outcome["retryable"],
                 message=sms_outcome["message"][:240],
+                phone_activation=phone_activation,
             )
-        return proto._codex_result(status="failed", email=email, message=f"{type(exc).__name__}: {str(exc)[:220]}")
+        return proto._codex_result(
+            status="failed",
+            email=email,
+            message=f"{type(exc).__name__}: {str(exc)[:220]}",
+            phone_activation=phone_activation,
+        )
     finally:
         # 注册后复用窗口时，driver/profile 生命周期由注册流程统一清理，
         # 这里不能 quit/delete，否则会提前销毁注册环境。
@@ -2471,6 +2520,7 @@ def run_roxy_codex_oauth(
 
     max_rounds = 2
     last_result = None
+    phone_activation: dict = {}
     for round_no in range(1, max_rounds + 1):
         if round_no > 1:
             logger.warning(
@@ -2487,7 +2537,14 @@ def run_roxy_codex_oauth(
             reuse_existing_profile=reuse_existing_profile,
             clear_existing_state=clear_existing_state,
             registration_password=registration_password,
+            _phone_activation=phone_activation,
         )
+        phone_activation = proto._merge_phone_activation(
+            phone_activation, result.get("phone_activation")
+        )
+        if phone_activation:
+            result = dict(result)
+            result["phone_activation"] = phone_activation
         last_result = result
         if result.get("ok"):
             return result
@@ -2498,4 +2555,9 @@ def run_roxy_codex_oauth(
         last_result = dict(last_result)
         last_result["message"] = f"CPA callback 超时，已重新授权 {max_rounds} 轮仍失败：{last_result.get('message') or ''}"
         return last_result
-    return proto._codex_result(status="failed", email=email, message="CPA callback 超时，重新授权失败")
+    return proto._codex_result(
+        status="failed",
+        email=email,
+        message="CPA callback 超时，重新授权失败",
+        phone_activation=phone_activation,
+    )

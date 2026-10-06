@@ -697,11 +697,15 @@ EDITABLE_FIELDS = [
 
     {
         "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "短信平台", "help": "只允许 SMSBower 或 Tiger SMS；修改后新激活使用该平台",
+        "label": "短信平台（兼容首选）", "help": "单平台模式下的首选；启用 SMS_PROVIDER_CHAIN 后由链配置决定顺序",
         "choices": [
             {"value": "smsbower", "label": "SMSBower"},
             {"value": "tiger", "label": "Tiger SMS"},
         ],
+    },
+    {
+        "key": "SMS_PROVIDER_CHAIN", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "短信平台有序链", "help": "逗号分隔，例如 smsbower,tiger；逐个平台尝试，不会为同一号码并发采购",
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -730,6 +734,14 @@ EDITABLE_FIELDS = [
     {
         "key": "SMS_REQUEST_TIMEOUT", "file": "codex.py", "type": "int", "group": "接码平台",
         "label": "短信平台请求超时(秒)", "help": "访问当前短信平台 API 的 HTTP 超时时间",
+    },
+    {
+        "key": "SMS_RELEASE_RETRIES", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "释放重试次数", "help": "释放号码遇到瞬时网络错误时同步重试，避免激活悬挂",
+    },
+    {
+        "key": "SMS_RELEASE_RETRY_DELAY", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "释放重试间隔(秒)", "help": "释放请求失败后的基础等待时间",
     },
     {
         "key": "SMSBOWER_RANDOM_COUNTRY", "file": "codex.py", "type": "bool", "group": "接码平台",

@@ -175,6 +175,30 @@ def _release_unconsumed_job_email(email: str | None, reason: str) -> None:
         logger.exception("[Service] 回收未消耗邮箱失败: %s", email)
 
 
+def _persist_codex_phone_activation(result: dict, email: str | None, account_id: int | None) -> None:
+    """注册驱动可能已落库，也可能只把手机快照放在返回值；这里统一补写一次。"""
+    if account_id is None or not email or not isinstance(result, dict):
+        return
+    codex = result.get("codex") if isinstance(result.get("codex"), dict) else {}
+    phone_activation = result.get("phone_activation")
+    if not isinstance(phone_activation, dict) or not phone_activation:
+        phone_activation = codex.get("phone_activation")
+    if not isinstance(phone_activation, dict) or not phone_activation:
+        return
+    codex_status = str(result.get("codex_status") or codex.get("status") or "not_started").strip()
+    codex_error = result.get("error") or codex.get("message")
+    try:
+        db.update_account_codex_status(
+            email,
+            codex_status,
+            str(codex_error or "")[:500] or None,
+            phone_activation=phone_activation,
+        )
+        logger.info("[Service] 已补写账号 Codex 手机激活元数据: account_id=%s email=%s", account_id, email)
+    except Exception:
+        logger.exception("[Service] 补写 Codex 手机激活元数据失败: %s", email)
+
+
 def _cancel_codex_retry_state(job: dict | None, reason: str) -> None:
     """取消尚未启动的 Codex 任务时释放占位并收口账号状态。"""
     if not job or str(job.get("job_type") or "registration") != "codex_retry":
@@ -422,6 +446,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             result_dict = result if isinstance(result, dict) else {}
             result_email = str(result_dict.get("email") or email or "").strip() or None
             result_account_id = result_dict.get("account_id")
+            _persist_codex_phone_activation(result_dict, result_email, result_account_id)
             if is_stop_requested(job_id):
                 # 停止信号可能在账号已经保存、但 Codex/清理尚未结束时到达。
                 # 这种情况不能把已存在账号伪装成“未注册”，否则 UI 会错误回收/重试。
@@ -478,6 +503,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                 result_status = "failed"
             result_email = str(result_dict.get("email") or email or "").strip() or None
             result_account_id = result_dict.get("account_id")
+            _persist_codex_phone_activation(result_dict, result_email, result_account_id)
             result_error = str(result_dict.get("error") or "").strip()
             result_account_status = str(result_dict.get("account_status") or ("success" if result_account_id else "failed"))
             result_codex_status = str(result_dict.get("codex_status") or "not_started")

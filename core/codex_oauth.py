@@ -194,6 +194,28 @@ def _codex_result(
     return result
 
 
+def _mask_phone_for_log(value: object) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) <= 4:
+        return digits or "-"
+    return "*" * max(len(digits) - 4, 2) + digits[-4:]
+
+
+def _merge_phone_activation(previous: dict | None, current: dict | None) -> dict:
+    """合并跨授权轮次的手机号快照，空字段不覆盖已有值。"""
+    merged: dict = {}
+    for snapshot in (previous, current):
+        if not isinstance(snapshot, dict):
+            continue
+        for key, value in snapshot.items():
+            if value in (None, ""):
+                continue
+            if value is False and key in merged:
+                continue
+            merged[key] = value
+    return merged
+
+
 def _account_registration_password(email: str) -> str:
     """读取账号的注册密码；不存在则返回空字符串。"""
     try:
@@ -1515,7 +1537,7 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 ) or "unknown"
                 logger.info(
                     f"[Codex] 手机验证尝试 {attempt}/{max_retries}，"
-                    f"provider={provider}, activation_id={activation_id}, 号码=+{phone}"
+                    f"provider={provider}, activation_id={activation_id}, 号码={_mask_phone_for_log(phone)}"
                 )
                 logger.info(
                     "[Codex] 号码采购快照：region=%s provider_country=%s price=%s "
@@ -1556,7 +1578,7 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                     )
                     sms_code = sms_provider.wait_for_sms_code(activation_id, http)
                 except sms_provider.SmsCodeTimeout:
-                    logger.warning(f"[Codex] 号码 +{phone} 在 {_cfg.SMS_CODE_WAIT}s 内未收到短信，取消换号")
+                    logger.warning(f"[Codex] 号码 {_mask_phone_for_log(phone)} 在 {_cfg.SMS_CODE_WAIT}s 内未收到短信，取消换号")
                     cancel_and_report_failure(activation_id, "code_timeout")
                     _sleep_before_phone_retry(attempt, max_retries)
                     continue
@@ -1830,19 +1852,34 @@ def _credential_file_name(email: str, plan_type: str) -> str:
     return f"codex-{email}-{plan}.json"
 
 
-def save_codex_credential(storage: dict, email: str, plan_type: str) -> str:
+def save_codex_credential(
+    storage: dict,
+    email: str,
+    plan_type: str,
+    phone_activation: dict | None = None,
+) -> str:
     """保存 Codex 凭证到 SQLite，不创建本地文件。"""
     fname = _credential_file_name(email, plan_type)
-    db.upsert_codex_credential(storage, fname)
+    payload = dict(storage or {})
+    merged_phone = _merge_phone_activation(payload.get("phone_activation"), phone_activation)
+    if merged_phone:
+        payload["phone_activation"] = merged_phone
+    db.upsert_codex_credential(payload, fname)
     return f"sqlite://codex_accounts/{fname}"
 
 
-def _save_codex_credential(email: str, storage: dict) -> str:
+def _save_codex_credential(
+    email: str,
+    storage: dict,
+    phone_activation: dict | None = None,
+) -> str:
     """BrowserUse 兼容入口：同样只保存到 SQLite。"""
     plan = ""
     if isinstance(storage, dict):
         plan = storage.get("plan_type") or storage.get("chatgpt_plan_type") or ""
-    return save_codex_credential(storage, email, plan)
+    return save_codex_credential(
+        storage, email, plan, phone_activation=phone_activation
+    )
 
 
 def _extract_cpa_auth_json(payload: dict) -> dict | None:
@@ -1888,6 +1925,7 @@ def _save_cpa_local_record(
     auth_url: str,
     state: str,
     submit_payload: dict,
+    phone_activation: dict | None = None,
 ) -> str | None:
     """
     在 SQLite 记录 CPA 授权结果：
@@ -1898,7 +1936,9 @@ def _save_cpa_local_record(
     if auth_json:
         effective_email = auth_json.get("email") or email
         plan = auth_json.get("plan_type") or auth_json.get("chatgpt_plan_type") or ""
-        return save_codex_credential(auth_json, effective_email, plan)
+        return save_codex_credential(
+            auth_json, effective_email, plan, phone_activation=phone_activation
+        )
 
     if not bool(getattr(_cfg, "CPA_SAVE_CALLBACK_RECEIPT", True)):
         return None
@@ -1916,6 +1956,8 @@ def _save_cpa_local_record(
         "submitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "note": "授权地址由 CPA 生成；callback 已提交给 CPA。若 CPA 响应未包含 token，本文件为本地回执记录。",
     }
+    if phone_activation:
+        record["phone_activation"] = _merge_phone_activation({}, phone_activation)
     db.upsert_codex_credential(record, fname)
     return f"sqlite://codex_accounts/{fname}"
 
@@ -1927,13 +1969,16 @@ def _save_sub2_local_record(
     auth_url: str,
     state: str,
     submit_payload: dict,
+    phone_activation: dict | None = None,
 ) -> str | None:
     """在 SQLite 记录 sub2 授权结果；若返回完整 auth json，则保存为 Codex 凭证。"""
     auth_json = _extract_cpa_auth_json(submit_payload)
     if auth_json:
         effective_email = auth_json.get("email") or email
         plan = auth_json.get("plan_type") or auth_json.get("chatgpt_plan_type") or ""
-        return save_codex_credential(auth_json, effective_email, plan)
+        return save_codex_credential(
+            auth_json, effective_email, plan, phone_activation=phone_activation
+        )
 
     if not bool(getattr(_cfg, "CPA_SAVE_CALLBACK_RECEIPT", True)):
         return None
@@ -1955,6 +2000,8 @@ def _save_sub2_local_record(
         "submitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "note": "授权地址由 sub2 生成；callback 已上传给 sub2。若 sub2 响应未包含 token，本文件为本地回执记录。",
     }
+    if phone_activation:
+        record["phone_activation"] = _merge_phone_activation({}, phone_activation)
     db.upsert_codex_credential(record, fname)
     return f"sqlite://codex_accounts/{fname}"
 
@@ -2130,6 +2177,7 @@ def run_codex_oauth(
     force: bool = False,
     driver: str | None = None,
     _cpa_reauth_round: int = 1,
+    _phone_activation: dict | None = None,
 ) -> dict:
     """
     注册成功后的 Codex OAuth 授权入口（全新 session + 接码方案）。
@@ -2152,6 +2200,8 @@ def run_codex_oauth(
     if not email:
         return _codex_result(status="skipped", message="email 为空")
 
+    phone_activation = dict(_phone_activation or {})
+
     # Codex OAuth 支持多种驱动：
     # protocol：原纯协议；roxy/cloak/browser_use：用真实浏览器跑页面并捕获 localhost callback。
     #
@@ -2161,6 +2211,9 @@ def run_codex_oauth(
     resolved_drivers = _resolve_oauth_drivers(driver)
     last_driver_result: dict | None = None
     for index, oauth_driver in enumerate(resolved_drivers):
+        # protocol 是内置主流程，不经过外部驱动包装器；包装器返回 None 只表示“交回这里继续执行”。
+        if str(oauth_driver or "").strip().lower() == "protocol":
+            break
         has_next = index + 1 < len(resolved_drivers)
         try:
             result = _run_codex_oauth_with_driver(
@@ -2299,10 +2352,10 @@ def run_codex_oauth(
             ) if continue_url else early_callback_url
 
         # 5. 是否需要手机号也完全由 Auth 返回决定，不再因为走过 OTP/密码而固定执行。
-        phone_activation = {}
         if _is_phone_step(auth_result):
             logger.info("[Codex] Auth 明确要求手机号验证，开始接码：%s", email)
-            phone_result, phone_activation = _do_phone_verification(session)
+            phone_result, current_phone_activation = _do_phone_verification(session)
+            phone_activation = _merge_phone_activation(phone_activation, current_phone_activation)
             phone_continue = _extract_continue_url(phone_result)
             if phone_continue:
                 early_callback_url = _follow_login_continue(
@@ -2333,6 +2386,7 @@ def run_codex_oauth(
                 auth_url=auth_url or "",
                 state=state,
                 submit_payload=submit_payload,
+                phone_activation=phone_activation,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
             logger.info(f"[Codex][CPA] 成功：{email}，{msg}，本地记录={path or 'disabled'}")
@@ -2359,6 +2413,7 @@ def run_codex_oauth(
                 auth_url=auth_url or "",
                 state=state,
                 submit_payload=submit_payload,
+                phone_activation=phone_activation,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
             logger.info(f"[Codex][sub2] 成功：{email}，{msg}，本地记录={path or 'disabled'}")
@@ -2381,7 +2436,12 @@ def run_codex_oauth(
         id_claims = _parse_id_token(token_resp.get("id_token", ""))
         effective_email = id_claims.get("email") or email
         storage = build_codex_storage(token_resp, id_claims)
-        path = save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""))
+        path = save_codex_credential(
+            storage,
+            effective_email,
+            id_claims.get("plan_type", ""),
+            phone_activation=phone_activation,
+        )
 
         logger.info(
             f"[Codex] 成功：{effective_email}，plan={id_claims.get('plan_type') or 'unknown'}, "
@@ -2402,6 +2462,7 @@ def run_codex_oauth(
             status="deactivated",
             email=email,
             message=f"账号已废（{exc.error_code}）",
+            phone_activation=phone_activation,
         )
     except Exception as exc:
         if _is_cpa_callback_reauth_error(exc) and _cpa_reauth_round < 2:
@@ -2415,6 +2476,7 @@ def run_codex_oauth(
                 proxy=proxy,
                 force=force,
                 _cpa_reauth_round=_cpa_reauth_round + 1,
+                _phone_activation=phone_activation,
             )
         logger.warning(f"[Codex] 失败：{email}，{type(exc).__name__}: {str(exc)[:200]}")
         logger.debug("[Codex] 失败详情:", exc_info=True)
@@ -2426,9 +2488,11 @@ def run_codex_oauth(
                 error_code=sms_outcome["error_code"],
                 retryable=sms_outcome["retryable"],
                 message=sms_outcome["message"][:240],
+                phone_activation=phone_activation,
             )
         return _codex_result(
             status="failed",
             email=email,
             message=f"{type(exc).__name__}: {str(exc)[:200]}",
+            phone_activation=phone_activation,
         )

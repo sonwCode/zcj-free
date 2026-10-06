@@ -25,36 +25,24 @@ def _load(names):
     return ns
 
 
-class ResubmitClassificationTests(unittest.TestCase):
-    """失败先原地重提交，而不是立刻换号。"""
+class ImmediateReleaseWiringTests(unittest.TestCase):
+    """每个已采购号码只提交一次；异常会回到统一释放分支。"""
 
-    def test_page_did_not_advance_is_repeatable(self):
-        fn = _load({"_is_repeatable_phone_submit_error"})["_is_repeatable_phone_submit_error"]
-        for text in (
-            "send_not_accepted: 提交后仍停留在 add-phone",
-            "whatsapp_channel_reverted: ...",
-            "phone_number_required: Phone number required",
-            "sms_channel_select_failed: SMS 通道未被勾选",
-        ):
-            with self.subTest(text=text):
-                self.assertTrue(fn(RuntimeError(text)))
+    def test_same_activation_resubmit_helper_is_removed(self):
+        self.assertNotIn("_is_repeatable_phone_submit_error", TEXT)
+        self.assertNotIn("submit_rounds", TEXT)
 
-    def test_number_rejected_is_not_repeatable(self):
-        fn = _load({"_is_repeatable_phone_submit_error"})["_is_repeatable_phone_submit_error"]
-        for text in (
-            "invalid_phone: add-phone input aria-invalid",
-            "invalid_phone_code: Check your phone",
-            "delivery_refused: cannot send",
-            "whatsapp_channel: 页面仅提供 WhatsApp 通道",
-            "invalid_auth_step: ...",
-        ):
-            with self.subTest(text=text):
-                self.assertFalse(fn(RuntimeError(text)))
+    def test_channel_failure_is_in_switch_path(self):
+        switch_start = TEXT.index("_PHONE_SWITCH_HINTS")
+        switch_block = TEXT[switch_start:TEXT.index("def _prepare_and_submit_add_phone", switch_start)]
+        self.assertIn("whatsapp_channel_reverted", switch_block)
+        self.assertIn("sms_channel_select_failed", switch_block)
 
-    def test_empty_error_is_not_repeatable(self):
-        fn = _load({"_is_repeatable_phone_submit_error"})["_is_repeatable_phone_submit_error"]
-        self.assertFalse(fn(RuntimeError("")))
-        self.assertFalse(fn(None))
+    def test_phone_failure_is_released_before_retry(self):
+        acquire = TEXT.index("activation_id, phone = sms_provider.acquire_number(http)")
+        release = TEXT.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)")
+        self.assertLess(acquire, release)
+        self.assertIn("_prepare_and_submit_add_phone(", TEXT)
 
 
 class ChannelMarkerSplitTests(unittest.TestCase):
@@ -104,13 +92,20 @@ class StateDigestTests(unittest.TestCase):
 
 
 class ResubmitLoopWiringTests(unittest.TestCase):
-    def test_loop_uses_extracted_helper(self):
+    def test_loop_submits_each_activation_once(self):
         self.assertIn("_prepare_and_submit_add_phone(", TEXT)
-        self.assertIn("_is_repeatable_phone_submit_error(send_exc)", TEXT)
+        self.assertNotIn("_is_repeatable_phone_submit_error", TEXT)
+        self.assertNotIn("submit_rounds", TEXT)
+        self.assertNotIn("SMS_NUMBER_SUBMIT_ROUNDS", CFG.read_text(encoding="utf-8"))
 
-    def test_submit_rounds_is_configurable(self):
-        self.assertIn("SMS_NUMBER_SUBMIT_ROUNDS", CFG.read_text(encoding="utf-8"))
-        self.assertIn("'SMS_NUMBER_SUBMIT_ROUNDS': 'int'", CFG.read_text(encoding="utf-8"))
+    def test_retry_acquires_a_new_activation_after_release(self):
+        loop_start = TEXT.index("def _do_phone_verification_if_present")
+        loop_block = TEXT[loop_start:]
+        acquire = loop_block.index("activation_id, phone = sms_provider.acquire_number(http)")
+        release = loop_block.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)")
+        next_attempt = loop_block.index("for attempt in range(1, max_retries + 1)")
+        self.assertLess(next_attempt, acquire)
+        self.assertLess(acquire, release)
 
     def test_no_bare_cfg_reference(self):
         """历史教训：_cfg 未定义会抛 NameError 并被宽泛 except 吞掉。"""
