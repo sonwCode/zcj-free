@@ -1935,7 +1935,7 @@ def _registration_password() -> str:
 
 def _password_page_state(driver) -> dict:
     try:
-        return driver.execute_script(r"""
+        state = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
           && !el.disabled && !el.readOnly;
@@ -1952,6 +1952,14 @@ def _password_page_state(driver) -> dict:
           .filter(el => visible(el)).map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 10);
         return {url: location.href, inputs, forms, buttons, errors};
         """) or {}
+        if not isinstance(state, dict):
+            state = {"error": "invalid_password_page_state", "value": str(state)[:300]}
+        for key in ("inputs", "forms", "buttons", "errors"):
+            if not isinstance(state.get(key), list):
+                state[key] = []
+        if not isinstance(state.get("url"), str):
+            state["url"] = str(getattr(driver, "current_url", "") or "")
+        return state
     except Exception as exc:
         return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
 
@@ -2441,7 +2449,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             if _is_signup_password_page(driver):
                 error_state = _password_page_state(driver)
                 errors = error_state.get("errors") or []
-                if errors:
+                if isinstance(errors, list) and errors:
                     error_text = "；".join(str(item) for item in errors[:3])
                     raise RuntimeError(
                         f"密码页提交被拒绝: {error_text} "

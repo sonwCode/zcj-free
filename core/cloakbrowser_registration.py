@@ -14,7 +14,7 @@ from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import PlaywrightTrafficTracker
-from core.cloakbrowser_driver import build_cloak_driver
+from core.cloakbrowser_driver import build_cloak_driver, close_cloak_driver
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 
@@ -28,7 +28,6 @@ from core.roxy_registration import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-_STOP_CLEANUP_TIMEOUT_SECONDS = 2.0
 
 
 def _current_job_id() -> int | None:
@@ -62,34 +61,21 @@ def _clear_job_id() -> None:
 
 
 def _bounded_cleanup(label: str, callback, on_timeout=None):
-    """清理卡住时让注册 worker 回到停止状态落库路径。"""
-    result = []
-    errors = []
+    """在 Playwright owner 线程直接完成清理。
 
-    def _run() -> None:
-        try:
-            result.append(callback())
-        except BaseException as exc:
-            errors.append(exc)
-
-    thread = threading.Thread(target=_run, name=f"cloak-cleanup-{label}", daemon=True)
-    thread.start()
-    thread.join(_STOP_CLEANUP_TIMEOUT_SECONDS)
-    if thread.is_alive():
-        logger.warning("[Cloak注册] 清理 %s 超时 %.1fs，继续停止流程", label, _STOP_CLEANUP_TIMEOUT_SECONDS)
+    同步 Playwright API 带有 greenlet 线程亲和性；把 callback 放入辅助线程
+    会在线程退出后触发 "cannot switch to a different thread"。
+    """
+    try:
+        return callback()
+    except BaseException as exc:
+        logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(exc).__name__, exc)
         if on_timeout is not None:
             try:
                 on_timeout()
-            except BaseException as exc:
-                logger.debug("[Cloak注册] 清理 %s 超时兜底失败：%s: %s", label, type(exc).__name__, exc)
-    elif errors:
-        logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(errors[0]).__name__, errors[0])
-        if on_timeout is not None:
-            try:
-                on_timeout()
-            except BaseException as exc:
-                logger.debug("[Cloak注册] 清理 %s 报错兜底失败：%s: %s", label, type(exc).__name__, exc)
-    return result[0] if result else None
+            except BaseException as fallback_exc:
+                logger.debug("[Cloak注册] 清理 %s 兜底失败：%s: %s", label, type(fallback_exc).__name__, fallback_exc)
+        return None
 
 
 def _run_cloak_registration_impl(
@@ -155,12 +141,18 @@ def _run_cloak_registration_impl(
         _check_manual_stop()
 
         current_otp = otp_code
+        used_otps: set[str] = set()
         max_otp_attempts = 3
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
                 try:
-                    current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                    candidate_otp = wait_for_otp(
+                        email, after_ts=otp_after_ts, exclude_codes=used_otps
+                    )
+                    if candidate_otp and str(candidate_otp) in used_otps:
+                        raise RuntimeError("重复验证码，等待重新发送")
+                    current_otp = candidate_otp
                 except Exception as exc:
                     if otp_attempt >= max_otp_attempts:
                         raise
@@ -176,6 +168,7 @@ def _run_cloak_registration_impl(
                     human_delay("api")
                     current_otp = None
                     continue
+            used_otps.add(str(current_otp))
             logger.info("[Cloak注册][OTP] 收到验证码：%s", current_otp)
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
@@ -319,15 +312,7 @@ def _run_cloak_registration_impl(
             _bounded_cleanup("data_saver.stop", data_saver.stop)
         if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
             driver_quit = True
-            try:
-                # Playwright sync objects must be closed on this same worker thread.
-                driver.quit()
-            except BaseException as exc:
-                logger.warning("[Cloak注册] 同线程关闭 driver 失败，执行进程树兜底：%s: %s", type(exc).__name__, str(exc)[:180])
-                try:
-                    driver.force_kill()
-                except Exception as kill_exc:
-                    logger.warning("[Cloak注册] 强制回收 driver 失败：%s: %s", type(kill_exc).__name__, str(kill_exc)[:180])
+            close_cloak_driver(driver)
 
 
 def _run_in_isolated_thread(fn: Callable, *args, **kwargs):
