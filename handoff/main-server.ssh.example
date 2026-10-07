@@ -1,0 +1,11 @@
+# 复制到 ~/.ssh/config.d/main-server 后，按本机 SSH 配置加载。
+# 私钥路径只写占位符，不把私钥提交到仓库。
+Host main-server
+    HostName 64.83.20.57
+    User harness-root
+    Port 22
+    IdentityFile ~/.ssh/REPLACE_WITH_MAIN_SERVER_PRIVATE_KEY
+    IdentitiesOnly yes
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    ConnectTimeout 15

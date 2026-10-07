@@ -1,0 +1,160 @@
+diff --git a/application/tasks.py b/application/tasks.py
+index 84200d2..fc59db6 100644
+--- a/application/tasks.py
++++ b/application/tasks.py
+@@ -1300,6 +1300,8 @@ def _auto_upload_cpa(task_logger: TaskLogger, account) -> None:
+                 with open(json_path, "r", encoding="utf-8-sig") as fh:
+                     token_data = json.load(fh)
+                 assert_workspace_cpa_json(token_data, workspace_id=str(workspace_id or ""))
++                # 已通过 workspace 校验的旧导出也属于 Codex；补齐分类字段后统一上传。
++                token_data.setdefault("type", "codex")
+                 ok, msg = upload_to_cpa(token_data, api_url=cpa_url, api_key=cpa_key)
+                 if ok:
+                     workspace_uploads += 1
+diff --git a/platforms/chatgpt/cpa_upload.py b/platforms/chatgpt/cpa_upload.py
+index 37fda2a..49de69b 100644
+--- a/platforms/chatgpt/cpa_upload.py
++++ b/platforms/chatgpt/cpa_upload.py
+@@ -5,6 +5,7 @@ CPA (Codex Protocol API) 上传功能
+ import json
+ import base64
+ import logging
++import re
+ from typing import Tuple
+ from datetime import datetime, timezone, timedelta
+
+@@ -55,6 +56,28 @@ def normalize_cpa_api_url(value: str) -> str:
+     return raw
+
+
++def _codex_auth_filename(email: str, plan_type: str = "") -> str:
++    """Build the Codex auth filename recognized by CPA."""
++    safe_email = re.sub(r"[^A-Za-z0-9.@+_-]+", "-", str(email or "").strip())
++    safe_email = safe_email.strip(".-")
++    if not safe_email:
++        raise ValueError("email 为空，无法生成 Codex 凭证文件名")
++    safe_plan = re.sub(r"[^A-Za-z0-9_-]+", "-", str(plan_type or "free").strip().lower())
++    safe_plan = safe_plan.strip("-") or "free"
++    return f"codex-{safe_email}-{safe_plan}.json"
++
++
++def _prepare_codex_upload(token_data: dict) -> dict:
++    """Reject non-Codex payloads without dropping valid Codex fields."""
++    if not isinstance(token_data, dict):
++        raise ValueError("Codex 凭证必须是对象")
++    if str(token_data.get("type") or "").strip().lower() != "codex":
++        raise ValueError("只允许上传 type=codex 的凭证")
++    payload = dict(token_data)
++    payload["type"] = "codex"
++    return payload
++
++
+ def _extract_credential(account, key: str) -> str:
+     """从 account 对象提取凭证，支持直接属性和 credentials 列表两种结构。"""
+     val = getattr(account, key, None)
+@@ -243,12 +266,23 @@ def upload_to_cpa(
+     if not api_key:
+         return False, "CPA Management Key 未配置"
+
+-    # 上传前检查 account_id
++    try:
++        token_data = _prepare_codex_upload(token_data)
++    except ValueError as exc:
++        return False, str(exc)
++
++    email = str(token_data.get("email") or "").strip()
++    if not email:
++        return False, "email 为空，无法上传 CPA"
+     if not token_data.get("account_id"):
+         return False, "account_id 为空，无法上传 CPA（JWT 和所有 fallback 均未获取到）"
+
+     upload_url = f"{api_url.rstrip('/')}/v0/management/auth-files"
+-    filename = f"{token_data['email']}.json"
++    plan_type = token_data.get("plan_type") or token_data.get("chatgpt_plan_type")
++    try:
++        filename = _codex_auth_filename(email, str(plan_type or ""))
++    except ValueError as exc:
++        return False, str(exc)
+     file_content = json.dumps(token_data, ensure_ascii=False, separators=(",", ":"))
+     headers = {
+         "Authorization": f"Bearer {api_key or ''}",
+@@ -259,7 +293,7 @@ def upload_to_cpa(
+         "Accept": "application/json",
+     }
+
+-    logger.info(f"[CPA] 上传: email={token_data['email']}, "
++    logger.info(f"[CPA] 上传: email={email}, filename={filename}, "
+                 f"account_id={token_data.get('account_id','')}")
+
+     try:
+diff --git a/tests/test_cpa_upload.py b/tests/test_cpa_upload.py
+index 357a5f0..ff48d6a 100644
+--- a/tests/test_cpa_upload.py
++++ b/tests/test_cpa_upload.py
+@@ -1,4 +1,6 @@
++import json
+ from types import SimpleNamespace
++from urllib.parse import parse_qs, urlparse
+
+
+ def test_normalize_cpa_api_url_removes_management_suffix_and_slashes():
+@@ -18,6 +20,7 @@ def test_upload_to_cpa_uses_single_slash_and_management_headers(monkeypatch):
+     def fake_post(url, **kwargs):
+         calls["url"] = url
+         calls["headers"] = kwargs["headers"]
++        calls["data"] = kwargs["data"]
+         return SimpleNamespace(status_code=201, text="", json=lambda: {})
+
+     monkeypatch.setattr(cpa_upload.cffi_requests, "post", fake_post)
+@@ -26,6 +29,8 @@ def test_upload_to_cpa_uses_single_slash_and_management_headers(monkeypatch):
+             "email": "probe@example.com",
+             "account_id": "acct-probe",
+             "access_token": "access",
++            "type": "codex",
++            "workspace_marker": "preserved",
+         },
+         api_url="https://cpa.example/",
+         api_key="management-key",
+@@ -38,6 +43,32 @@ def test_upload_to_cpa_uses_single_slash_and_management_headers(monkeypatch):
+     assert calls["headers"]["Authorization"] == "Bearer management-key"
+     assert calls["headers"]["X-API-Key"] == "management-key"
+     assert calls["headers"]["X-Management-Key"] == "management-key"
++    query = parse_qs(urlparse(calls["url"]).query)
++    assert query["name"] == ["codex-probe@example.com-free.json"]
++    uploaded = json.loads(calls["data"].decode("utf-8"))
++    assert uploaded["type"] == "codex"
++    assert uploaded["workspace_marker"] == "preserved"
++
++
++def test_upload_to_cpa_rejects_non_codex_payload(monkeypatch):
++    from platforms.chatgpt import cpa_upload
++
++    called = False
++
++    def fake_post(*args, **kwargs):
++        nonlocal called
++        called = True
++
++    monkeypatch.setattr(cpa_upload.cffi_requests, "post", fake_post)
++    ok, message = cpa_upload.upload_to_cpa(
++        {"email": "other@example.com", "account_id": "acct-other", "type": "other"},
++        api_url="https://cpa.example",
++        api_key="management-key",
++    )
++
++    assert ok is False
++    assert message == "只允许上传 type=codex 的凭证"
++    assert called is False
+
+
+ def test_cpa_connection_uses_read_only_authenticated_get(monkeypatch):
+diff --git a/tests/test_platform_action_task.py b/tests/test_platform_action_task.py
+index 235c01a..254c2c3 100644
+--- a/tests/test_platform_action_task.py
++++ b/tests/test_platform_action_task.py
+@@ -2086,6 +2086,7 @@ def test_auto_upload_cpa_prefers_workspace_json_exports(monkeypatch, tmp_path):
+     assert len(uploaded) == 1
+     assert uploaded[0]["access_token"] == "workspace-token"
+     assert uploaded[0]["account_id"] == "workspace-1"
++    assert uploaded[0]["type"] == "codex"
+     assert any("workspace JSON 自动上传完成" in str(event[1]) for event in logger.events)
