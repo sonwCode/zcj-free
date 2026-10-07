@@ -163,7 +163,20 @@ ssh main-server 'curl --compressed -sS -I http://127.0.0.1:5100/'
 ssh main-server 'cd /opt/turb-gpt-register && git -c safe.directory=/opt/turb-gpt-register status --short --branch && git -c safe.directory=/opt/turb-gpt-register rev-parse --short HEAD'
 ~~~
 
-历史文档记录过多次 active 和 MainPID，但这些是历史证据。接手 agent 必须重新执行上面的实时检查。
+生产现场只读核对结果（2026-10-07）：
+
+- hostname：ser427180673937。
+- SSH 用户：harness-root。
+- 服务：active。
+- 内部 HTTP：302。
+- 服务器工作树分支：master。
+- 服务器工作树 HEAD：36c1413。
+- 服务器 origin：https://github.com/sonwCode/zcj-free.git。
+- 工作树已有 11 个已修改源文件，变更摘要为 1518 insertions / 469 deletions：config/codex.py、core/browser_use_codex_oauth.py、core/cloakbrowser_driver.py、core/codex_oauth.py、core/db.py、core/registration_service.py、core/roxy_codex_oauth.py、core/sms_provider.py、webui/config_editor.py、webui/templates/index.html、webui/templates/index_legacy.html。
+- 工作树还有未跟踪目录：backups/、deploy-backups/、sentinel/。
+- 以上是接手前已存在的生产现场；本轮没有修改、清理、提交或覆盖它们。
+
+历史文档记录过多次 active 和 MainPID，但这些是历史证据。接手 agent 必须重新执行上面的实时检查；处理服务器 Git 前先备份并审阅 git diff，禁止直接 reset、clean 或全量 rsync。
 
 ## 6. 生产部署流程
 
