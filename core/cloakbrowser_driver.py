@@ -446,7 +446,7 @@ class CloakSeleniumDriver:
         except Exception as exc:
             msg = str(exc)
             if "Execution context was destroyed" in msg or "navigation" in msg.lower():
-                logger.info("[Cloak] JS 执行后页面发生跳转，忽略返回值读取失败：%s", msg[:160])
+                logger.info("[Cloak] JS 执行后页面发生跳转，忽略返回值读取失败：%s", str(msg)[:160])
                 return {"ok": True, "reason": "navigation_after_script"}
             raise
         finally:

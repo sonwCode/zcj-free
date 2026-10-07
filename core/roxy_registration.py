@@ -2295,6 +2295,8 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         if _has_access_token(driver):
             return None
         last = _password_page_state(driver)
+        if not isinstance(last, dict):
+            last = {"error": "invalid_password_page_state", "value": str(last)[:300]}
         is_signup_password = _is_signup_password_page(driver)
         is_login_password = _is_login_password_page(driver)
         if not (is_signup_password or is_login_password):
