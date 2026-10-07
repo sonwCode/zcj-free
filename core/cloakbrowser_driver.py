@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import signal
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +14,48 @@ from config import cloakbrowser as _cfg
 from core.stop_control import check_stop_requested as _check_stop_requested
 
 logger = logging.getLogger(__name__)
+
+
+def _process_children(pid: int) -> list[int]:
+    """Return descendants from procfs without adding a psutil dependency."""
+    children: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        child_pid = int(entry)
+        try:
+            with open(f"/proc/{child_pid}/stat", encoding="ascii") as stat_file:
+                stat = stat_file.read()
+            parent_pid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(parent_pid, []).append(child_pid)
+
+    result: list[int] = []
+    pending = [pid]
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, []):
+            result.append(child)
+            pending.append(child)
+    return result
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Stop a stuck Playwright driver and every Chromium child it spawned."""
+    for child in reversed(_process_children(pid)):
+        try:
+            os.kill(child, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
 
 
 @dataclass
@@ -257,6 +301,30 @@ class CloakSeleniumDriver:
         relay, self._proxy_relay = self._proxy_relay, None
         if relay is not None:
             relay.close()
+
+    def force_kill(self) -> None:
+        """Hard-stop a Playwright driver when graceful close is stuck."""
+        pids: list[int] = []
+        for owner in (self.browser, self.context):
+            impl = getattr(owner, "_impl_obj", None)
+            connection = getattr(impl, "_connection", None)
+            transport = getattr(connection, "_transport", None)
+            process = getattr(transport, "_proc", None)
+            pid = getattr(process, "pid", None)
+            if pid:
+                try:
+                    pids.append(int(pid))
+                except (TypeError, ValueError):
+                    pass
+        for pid in dict.fromkeys(pids):
+            logger.warning("[Cloak] 强制终止卡住的 Playwright driver pid=%s", pid)
+            _kill_process_tree(pid)
+        relay, self._proxy_relay = self._proxy_relay, None
+        if relay is not None:
+            try:
+                relay.close()
+            except Exception:
+                pass
 
     def find_elements(self, by: Any, selector: str) -> list[CloakElement]:
         loc = self._locator(by, selector)

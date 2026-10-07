@@ -61,7 +61,7 @@ def _clear_job_id() -> None:
         pass
 
 
-def _bounded_cleanup(label: str, callback):
+def _bounded_cleanup(label: str, callback, on_timeout=None):
     """清理卡住时让注册 worker 回到停止状态落库路径。"""
     result = []
     errors = []
@@ -77,6 +77,11 @@ def _bounded_cleanup(label: str, callback):
     thread.join(_STOP_CLEANUP_TIMEOUT_SECONDS)
     if thread.is_alive():
         logger.warning("[Cloak注册] 清理 %s 超时 %.1fs，继续停止流程", label, _STOP_CLEANUP_TIMEOUT_SECONDS)
+        if on_timeout is not None:
+            try:
+                on_timeout()
+            except BaseException as exc:
+                logger.debug("[Cloak注册] 清理 %s 超时兜底失败：%s: %s", label, type(exc).__name__, exc)
     elif errors:
         logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(errors[0]).__name__, errors[0])
     return result[0] if result else None
@@ -309,7 +314,7 @@ def _run_cloak_registration_impl(
             _bounded_cleanup("data_saver.stop", data_saver.stop)
         if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
             driver_quit = True
-            _bounded_cleanup("driver.quit", driver.quit)
+            _bounded_cleanup("driver.quit", driver.quit, on_timeout=driver.force_kill)
 
 
 def _run_in_isolated_thread(fn: Callable, *args, **kwargs):
