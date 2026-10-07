@@ -238,7 +238,11 @@ class RoxyCodexPhoneTests(unittest.TestCase):
 
     def test_sms_selection_updates_radio_react_state(self):
         source = self._function_source("_select_sms_channel_or_raise")
-        self.assertIn("sms.click()", source)
+        self.assertIn("_human_click(driver, target, label=\"codex_sms_channel\")", source)
+        page_state = self._function_source("_phone_page_state")
+        self.assertIn("visible:visible(el)", page_state)
+        self.assertNotIn(".filter(visible).map(el => ({\n          name: el.name", page_state)
+        self.assertIn("if (!sms.checked) sms.click();", source)
         self.assertIn("new Event('input', {bubbles:true})", source)
         self.assertIn("new Event('change', {bubbles:true})", source)
 
@@ -252,6 +256,13 @@ class RoxyCodexPhoneTests(unittest.TestCase):
         source = self._function_source("_select_phone_country")
         self.assertLess(source.index("const selects ="), source.index("const triggers ="))
         self.assertIn("hidden select", source)
+        self.assertIn("aliasScore", source)
+        self.assertIn("(b.score || 0) - (a.score || 0)", source)
+        self.assertIn("alias && (!code || code === expectedDialCode)", source)
+        self.assertIn("allowCodeOnly && code === expectedDialCode", source)
+        self.assertIn("item.alias && item.codeCompatible", source)
+        self.assertIn("codes.every(code => code === expectedCode)", source)
+        self.assertIn("matchedAlias && codesCompatible", source)
 
     def test_phone_continue_uses_real_element_click(self):
         source = self._function_source("_click_add_phone_continue_button")
@@ -264,13 +275,17 @@ class RoxyCodexPhoneTests(unittest.TestCase):
         self.assertIn("setNativeValue(hiddenPhoneNumberInput, e164)", source)
         self.assertIn('atomic_fill = getattr(phone_input, "fill", None)', source)
         self.assertIn("atomic_fill(visible_value", source)
+        self.assertIn("emit(phoneInput, String(arguments[0] || ''))", source)
+        self.assertIn("emit(hidden, String(arguments[1] || ''))", source)
         self.assertIn('"inputMethod": "native_page_fill"', source)
         self.assertNotIn("_human_type_text(driver, phone_input, visible_value)", source)
 
     def test_phone_react_sync_failure_stops_number_rotation(self):
         source = self._function_source("_do_phone_verification_if_present")
-        self.assertIn('if "phone_react_state_sync_failed" in err_text:', source)
-        self.assertIn("手机号 React 状态同步失败，已停止换号止损", source)
+        self.assertIn("phone_react_state_sync_failed", source)
+        self.assertIn("phone_otp_input_sync_failed", source)
+        self.assertIn("whatsapp_channel_reverted", source)
+        self.assertIn("手机号 React/OTP/SMS 状态同步失败，已停止换号止损", source)
 
     def test_phone_submit_waits_for_post_channel_react_state(self):
         source = self._function_source("_prepare_and_submit_add_phone")

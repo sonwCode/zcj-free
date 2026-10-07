@@ -921,6 +921,204 @@ def _set_codex_otp_dom_value(driver, code: str) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
+def _codex_otp_input_matches(driver, code: str) -> bool:
+    """Compare the rendered OTP fields with code without exposing the code in logs."""
+    try:
+        return bool(driver.execute_script(r"""
+        const expected = String(arguments[0] || '');
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const isOtp = el => /one-time|otp|code|numeric|tel/.test([
+          el.type, el.name, el.id, el.autocomplete, el.inputMode, el.getAttribute('aria-label') || ''
+        ].join(' ').toLowerCase());
+        const values = [...document.querySelectorAll('input')]
+          .filter(el => visible(el) && isOtp(el))
+          .map(el => String(el.value || ''));
+        if (!values.length) return false;
+        return values.length === 1 ? values[0] === expected : values.join('') === expected;
+        """, str(code or '')))
+    except Exception:
+        return False
+
+
+def _fill_phone_otp(driver, code: str) -> dict:
+    """Fill phone OTP through native Cloak Page.fill and verify the rendered value."""
+    from selenium.webdriver.common.by import By
+
+    normalized_code = str(code or "").strip()
+    if not normalized_code or not normalized_code.isdigit():
+        raise RuntimeError("phone_otp_input_sync_failed: 收到空或非数字手机验证码")
+    _clear_otp_inputs(driver)
+    selectors = [
+        "input[autocomplete='one-time-code']",
+        "input[name='code']",
+        "input[inputmode='numeric']",
+        "input[type='tel']",
+    ]
+    selected = []
+    mode = ""
+    input_deadline = time.time() + 8
+    while time.time() < input_deadline and not selected:
+        for selector in selectors:
+            try:
+                candidates = [e for e in driver.find_elements(By.CSS_SELECTOR, selector) if _visible(e)]
+            except Exception:
+                candidates = []
+            if len(candidates) == 1:
+                selected = candidates
+                mode = "single"
+                break
+        if selected:
+            break
+        try:
+            inputs = [e for e in driver.find_elements(By.CSS_SELECTOR, "input") if _visible(e)]
+        except Exception:
+            inputs = []
+        numeric = []
+        for element in inputs:
+            attrs = " ".join(
+                str(element.get_attribute(key) or "")
+                for key in ("inputmode", "autocomplete", "aria-label", "name", "id", "type")
+            ).lower()
+            if any(marker in attrs for marker in ("numeric", "one-time", "code", "otp", "tel")):
+                numeric.append(element)
+        if len(numeric) >= len(normalized_code):
+            selected = numeric[:len(normalized_code)]
+            mode = "multi"
+            break
+        _stop_sleep(0.2)
+    if not selected:
+        raise RuntimeError(
+            f"phone_otp_input_sync_failed: 找不到手机 OTP 输入框 state={_codex_otp_state_summary(_codex_otp_input_state(driver))}"
+        )
+
+    try:
+        if mode == "single":
+            fill = getattr(selected[0], "fill", None)
+            if callable(fill):
+                fill(normalized_code, timeout=5000)
+            else:
+                _human_type_text(driver, selected[0], normalized_code, clear=True)
+        else:
+            for element, digit in zip(selected, normalized_code):
+                fill = getattr(element, "fill", None)
+                if callable(fill):
+                    fill(digit, timeout=5000)
+                else:
+                    _human_type_text(driver, element, digit, clear=True)
+    except Exception as exc:
+        logger.debug("[Codex][Browser] 手机 OTP 原子填值失败，转 native setter：%s", str(exc)[:160])
+
+    _stop_sleep(0.25)
+    validate_state = _phone_otp_validate_snapshot(driver)
+    if validate_state.get("count", 0) > 0 or validate_state.get("pending", 0) > 0:
+        return {
+            "mode": mode,
+            "input_count": len(selected),
+            "auto_submitted": True,
+            "state": _codex_otp_state_summary(_codex_otp_input_state(driver)),
+        }
+    if not _is_phone_code_page(driver):
+        return {
+            "mode": mode,
+            "input_count": len(selected),
+            "auto_submitted": True,
+            "state": _codex_otp_state_summary(_codex_otp_input_state(driver)),
+        }
+    state = _codex_otp_input_state(driver)
+    matched = _codex_otp_input_matches(driver, normalized_code)
+    if not matched:
+        fallback = _set_codex_otp_dom_value(driver, normalized_code)
+        _stop_sleep(0.25)
+        state = _codex_otp_input_state(driver)
+        matched = bool(fallback.get("ok")) and _codex_otp_input_matches(driver, normalized_code)
+    if not matched or not _codex_otp_input_complete(state, normalized_code):
+        raise RuntimeError(
+            f"phone_otp_input_sync_failed: 手机 OTP 实际输入值未与验证码匹配 "
+            f"mode={mode} state={_codex_otp_state_summary(state)}"
+        )
+    return {
+        "mode": mode,
+        "input_count": len(selected),
+        "state": _codex_otp_state_summary(state),
+    }
+
+
+def _install_phone_otp_validate_hook(driver) -> None:
+    """Track phone OTP validation requests without recording code or body."""
+    try:
+        driver.execute_script(r"""
+        (() => {
+          window.__codexPhoneOtpValidateCount = 0;
+          window.__codexPhoneOtpValidatePending = 0;
+          if (window.__codexPhoneOtpValidateHooked) return true;
+          window.__codexPhoneOtpValidateHooked = true;
+          const hit = url => String(url || '').includes('/api/accounts/phone-otp/validate');
+          const started = () => {
+            window.__codexPhoneOtpValidateCount = Number(window.__codexPhoneOtpValidateCount || 0) + 1;
+            window.__codexPhoneOtpValidatePending = Number(window.__codexPhoneOtpValidatePending || 0) + 1;
+          };
+          const finished = () => {
+            window.__codexPhoneOtpValidatePending = Math.max(0, Number(window.__codexPhoneOtpValidatePending || 1) - 1);
+          };
+          const origFetch = window.fetch;
+          if (origFetch) {
+            window.fetch = function(input) {
+              const url = (typeof input === 'string') ? input : (input && input.url);
+              const tracked = hit(url);
+              if (tracked) started();
+              const request = origFetch.apply(this, arguments);
+              if (tracked) request.then(finished, finished);
+              return request;
+            };
+          }
+          const origOpen = XMLHttpRequest.prototype.open;
+          const origSend = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(method, url) {
+            this.__codexPhoneOtpValidateUrl = url;
+            return origOpen.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function() {
+            const tracked = hit(this.__codexPhoneOtpValidateUrl);
+            if (tracked) {
+              started();
+              this.addEventListener('loadend', finished, {once:true});
+            }
+            return origSend.apply(this, arguments);
+          };
+          return true;
+        })();
+        """)
+    except Exception as exc:
+        logger.debug("[Codex][Browser] 注入 phone-otp/validate 请求 hook 失败：%s", str(exc)[:160])
+
+
+def _phone_otp_validate_snapshot(driver) -> dict:
+    try:
+        return {
+            "count": int(driver.execute_script("return Number(window.__codexPhoneOtpValidateCount || 0);") or 0),
+            "pending": int(driver.execute_script("return Number(window.__codexPhoneOtpValidatePending || 0);") or 0),
+        }
+    except Exception:
+        return {"count": 0, "pending": 0}
+
+
+def _phone_otp_auto_submit_started(driver, baseline_count: int) -> bool:
+    snapshot = _phone_otp_validate_snapshot(driver)
+    if snapshot.get("count", 0) > int(baseline_count or 0) or snapshot.get("pending", 0) > 0:
+        return True
+    return not _is_phone_code_page(driver)
+
+
+def _wait_for_phone_otp_auto_submit(driver, baseline_count: int, timeout: float = 2.5) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if _phone_otp_auto_submit_started(driver, baseline_count):
+            return True
+        _stop_sleep(0.2)
+    return _phone_otp_auto_submit_started(driver, baseline_count)
+
+
 def _codex_auto_submit_started(driver, baseline_count: int) -> bool:
     snapshot = _email_otp_validate_snapshot(driver)
     if snapshot.get("count", 0) > int(baseline_count or 0) or snapshot.get("pending", 0) > 0:
@@ -1025,8 +1223,8 @@ def _phone_page_state(driver) -> dict:
     try:
         return driver.execute_script(r"""
         const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-        const radios = [...document.querySelectorAll('input[type=radio]')].filter(visible).map(el => ({
-          name: el.name || '', value: el.value || '', checked: !!el.checked, id: el.id || ''
+        const radios = [...document.querySelectorAll('input[type=radio]')].map(el => ({
+          name: el.name || '', value: el.value || '', checked: !!el.checked, id: el.id || '', visible:visible(el)
         }));
         const inputs = [...document.querySelectorAll('input,select,textarea')].filter(visible).map(el => ({
           tag: el.tagName, type: el.getAttribute('type') || '', name: el.getAttribute('name') || '',
@@ -1085,17 +1283,36 @@ def _select_sms_channel_or_raise(driver) -> None:
     # checked 状态，提交前若回到 WhatsApp 就立即释放当前激活并换号。
     last_state = state
     for selection_round in range(1, 4):
+        target_info = driver.execute_script(r"""
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const radios = [...document.querySelectorAll('input[type=radio]')];
+        const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
+        if (!sms) return null;
+        const label = sms.id ? [...document.querySelectorAll('label')].find(el => el.htmlFor === sms.id) : null;
+        const candidates = [label, sms.closest('label'), sms.closest('[role="radio"]'), sms].filter(Boolean);
+        return {radio:sms, target:candidates.find(visible) || sms};
+        """) or {}
+        radio = target_info.get("radio")
+        target = target_info.get("target") or radio
+        if not target:
+            logger.warning("[Codex][Browser] 当前页面找不到可点击的 SMS 通道控件")
+            continue
+        try:
+            _human_click(driver, target, label="codex_sms_channel")
+        except Exception as click_exc:
+            logger.debug("[Codex][Browser] SMS 真实控件点击失败，继续 native 状态更新：%s", str(click_exc)[:160])
         selected = driver.execute_script(r"""
         const radios = [...document.querySelectorAll('input[type=radio]')];
         const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
         if (!sms) return false;
-        sms.click();
+        if (!sms.checked) sms.click();
         sms.dispatchEvent(new Event('input', {bubbles:true}));
         sms.dispatchEvent(new Event('change', {bubbles:true}));
-        return true;
+        return !!sms.checked;
         """)
         if not selected:
-            logger.warning("[Codex][Browser] 当前页面找不到可点击的 SMS 通道控件")
+            logger.warning("[Codex][Browser] SMS 通道状态更新失败")
             continue
         _stop_sleep(0.5)
         last_state = _phone_page_state(driver)
@@ -1353,6 +1570,27 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
           || text.includes(' ' + target + ' ');
       }) || '';
     };
+    const aliasScore = el => {
+      const text = normalize(meta(el));
+      const tokens = new Set(text.split(/\s+/).filter(Boolean));
+      let best = 0;
+      for (const alias of aliases) {
+        const target = normalize(alias);
+        if (!target) continue;
+        if (target.length <= 3 && !target.includes(' ')) {
+          if (tokens.has(target)) best = Math.max(best, 3);
+        } else if (text === target) {
+          best = Math.max(best, 5);
+        } else if (text.startsWith(target + ' ')) {
+          best = Math.max(best, 4);
+        } else if (text.endsWith(' ' + target)) {
+          best = Math.max(best, 3);
+        } else if (text.includes(' ' + target + ' ')) {
+          best = Math.max(best, 1);
+        }
+      }
+      return best;
+    };
     // React-Aria 的 hidden select 持有完整国家集合，虚拟 listbox 通常只挂载
     // 当前可见项。参考项目优先按 E.164 前缀更新 select；这里再叠加国家别名，
     // 避免 +1 等共享区号选错国家。
@@ -1366,11 +1604,16 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
       for (const option of [...select.options]) {
         const code = findCode(option);
         const alias = findAlias(option);
-        if (alias) aliasMatches.push({select, option, code:expectedDialCode, alias});
-        else if (allowCodeOnly && code && digits.startsWith(code)) codeMatches.push({select, option, code, alias:''});
+        if (alias && (!code || code === expectedDialCode)) {
+          aliasMatches.push({select, option, code:code || expectedDialCode, alias, score:aliasScore(option)});
+        } else if (allowCodeOnly && code === expectedDialCode) {
+          codeMatches.push({select, option, code, alias:''});
+        }
       }
     }
-    const matches = aliasMatches.length ? aliasMatches : codeMatches.sort((a, b) => b.code.length - a.code.length);
+    const matches = aliasMatches.length
+      ? aliasMatches.sort((a, b) => (b.score || 0) - (a.score || 0) || b.code.length - a.code.length)
+      : codeMatches.sort((a, b) => b.code.length - a.code.length);
     if (matches.length) {
       const {select, option, code, alias} = matches[0];
       const changed = String(select.value) !== String(option.value);
@@ -1464,11 +1707,14 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
             const items = [...document.querySelectorAll('[role="option"], [role="listbox"] li')]
               .filter(visible).map(option => {
                 const text = meta(option);
-                const codes = [...text.matchAll(/\+(\d{1,4})\b/g)].map(m => m[1])
-                  .filter(code => digits.startsWith(code)).sort((a, b) => b.length - a.length);
-                return {option, text, code:codes[0] || '', alias:findAlias(text)};
+                const allCodes = [...text.matchAll(/\+(\d{1,4})\b/g)].map(m => m[1]);
+                const codes = allCodes.filter(code => code === expectedDialCode);
+                return {
+                  option, text, code:codes[0] || '', alias:findAlias(text),
+                  codeCompatible:!allCodes.length || allCodes.includes(expectedDialCode),
+                };
               });
-            const aliasMatches = items.filter(item => item.alias);
+            const aliasMatches = items.filter(item => item.alias && item.codeCompatible);
             const codeMatches = allowCodeOnly
               ? items.filter(item => item.code).sort((a, b) => b.code.length - a.code.length)
               : [];
@@ -1537,9 +1783,12 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
         || normalized.endsWith(' ' + target) || normalized.includes(' ' + target + ' ');
     }) || '';
     const codes = [...combined.matchAll(/\+(\d{1,4})\b/g)].map(m => m[1]);
+    const codesCompatible = !codes.length
+      || (codes.includes(expectedCode) && codes.every(code => code === expectedCode));
     return {
-      ok:!!matchedAlias || (allowCodeOnly && codes.includes(expectedCode)),
-      combined, codes, matchedAlias,
+      ok:(!!matchedAlias && codesCompatible)
+        || (allowCodeOnly && codesCompatible && codes.includes(expectedCode)),
+      combined, codes, matchedAlias, codesCompatible,
     };
     """, expected_dial_code, country_aliases, allow_code_only) or {}
     if not confirmed.get("ok"):
@@ -1642,7 +1891,8 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
         raise RuntimeError(f"{reason}: 手机号写入失败 result={result} state={_phone_page_state(driver)}")
 
     # Native setters establish the exact DOM values. Cloak then uses its saved
-    # native Page.fill so React receives the controlled input update atomically.
+    # native Page.fill so React receives the controlled input update atomically;
+    # a final native setter below restores the exact E.164 after formatting.
     phone_input = _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=2)
     atomic_fill = getattr(phone_input, "fill", None)
     if callable(atomic_fill):
@@ -1660,8 +1910,19 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
           || [...document.querySelectorAll('form')].find(f => /add-phone/i.test(f.getAttribute('action') || ''));
         const phoneInput = [...(form?.querySelectorAll('input[type="tel"], input[name="__reservedForPhoneNumberInput_tel"], input[autocomplete="tel"], input[name="phone"], input[name="phone_number"]') || [])].find(visible);
         const hidden = form?.querySelector('input[name="phoneNumber"]');
-        return {actualVisible: phoneInput?.value || '', hiddenValue: hidden?.value || '', hasHidden:!!hidden};
-        """) or {}
+        if (!phoneInput) return {actualVisible:'', hiddenValue:hidden?.value || '', hasHidden:!!hidden};
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const emit = (el, value) => {
+          if (!el) return;
+          if (setter) setter.call(el, String(value || '')); else el.value = String(value || '');
+          el.dispatchEvent(new Event('input', {bubbles:true}));
+          el.dispatchEvent(new Event('change', {bubbles:true}));
+        };
+        emit(phoneInput, String(arguments[0] || ''));
+        emit(hidden, String(arguments[1] || ''));
+        phoneInput.blur();
+        return {actualVisible: phoneInput.value || '', hiddenValue: hidden?.value || '', hasHidden:!!hidden};
+        """, visible_value, str(result.get("e164") or phone)) or {}
         result.update({
             "actualVisible": str(input_state.get("actualVisible") or ""),
             "hiddenValue": str(input_state.get("hiddenValue") or ""),
@@ -2220,12 +2481,22 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     activation_id, sms_provider._cfg.SMS_CODE_WAIT, sms_provider._cfg.SMS_POLL_INTERVAL
                 )
                 sms_code = sms_provider.wait_for_sms_code(activation_id, http)
-                logger.info("[Codex][Browser] 手机 OTP 收到：%s", sms_code)
-                _type_otp(driver, sms_code)
-                logger.info("[Codex][Browser] 已填写手机 OTP")
-                human_delay("otp_input")
-                if not _click_if_present(driver, ["button[type='submit']", "input[type='submit']"], timeout=10):
-                    raise RuntimeError(f"verify_submit_missing: phone verification submit not found state={_phone_page_state(driver)}")
+                logger.info("[Codex][Browser] 手机 OTP 收到：length=%s", len(str(sms_code or "")))
+                _install_phone_otp_validate_hook(driver)
+                phone_otp_baseline = _phone_otp_validate_snapshot(driver).get("count", 0)
+                phone_otp_info = _fill_phone_otp(driver, sms_code)
+                logger.info("[Codex][Browser] 已填写手机 OTP：%s", phone_otp_info)
+                auto_submitted = bool(phone_otp_info.get("auto_submitted"))
+                if not auto_submitted:
+                    auto_submitted = _wait_for_phone_otp_auto_submit(driver, phone_otp_baseline)
+                if not auto_submitted:
+                    human_delay("otp_input")
+                    auto_submitted = _phone_otp_auto_submit_started(driver, phone_otp_baseline)
+                if not auto_submitted:
+                    if not _click_if_present(driver, ["button[type='submit']", "input[type='submit']"], timeout=10):
+                        raise RuntimeError(f"verify_submit_missing: phone verification submit not found state={_phone_page_state(driver)}")
+                else:
+                    logger.info("[Codex][Browser] 手机 OTP 已由页面自动提交，不再重复点击")
                 logger.info("[Codex][Browser] 已提交手机 OTP，等待验证结果")
                 otp_outcome = _wait_after_phone_otp_submit(driver, timeout=25)
                 logger.info("[Codex][Browser] 手机 OTP 提交后状态：%s", otp_outcome)
@@ -2268,9 +2539,12 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                         "手机号流程进入 invalid_auth_step，说明授权状态还未从 email-verification 正常跳转或已失效；"
                         "已停止继续换号，避免继续消耗号码"
                     ) from exc
-                if "phone_react_state_sync_failed" in err_text:
+                if any(k in err_text for k in (
+                    "phone_react_state_sync_failed", "phone_otp_input_sync_failed",
+                    "whatsapp_channel_reverted",
+                )):
                     raise RuntimeError(
-                        f"手机号 React 状态同步失败，已停止换号止损：{err_text[:220]}"
+                        f"手机号 React/OTP/SMS 状态同步失败，已停止换号止损：{err_text[:220]}"
                     ) from exc
                 if any(k in err_text for k in (
                     "phone_country_sync_failed", "phone_country_mismatch",

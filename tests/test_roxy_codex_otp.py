@@ -129,6 +129,22 @@ class RoxyCodexOtpTests(unittest.TestCase):
         self.assertTrue(auto_submit(_Driver(current_url="https://auth.openai.com/u/add-phone"), 0))
         self.assertFalse(auto_submit(_Driver(), 0))
 
+    def test_phone_otp_uses_verified_native_fill(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("def _fill_phone_otp(driver, code: str) -> dict:", source)
+        self.assertIn("_codex_otp_input_matches(driver, normalized_code)", source)
+        self.assertIn("_set_codex_otp_dom_value(driver, normalized_code)", source)
+        phone_flow = source[source.index("def _do_phone_verification_if_present"):]
+        self.assertLess(
+            phone_flow.index("_install_phone_otp_validate_hook(driver)"),
+            phone_flow.index("phone_otp_info = _fill_phone_otp(driver, sms_code)"),
+        )
+        self.assertIn("_wait_for_phone_otp_auto_submit", phone_flow)
+        self.assertIn("if not auto_submitted:", phone_flow)
+        self.assertNotIn("_type_otp(driver, sms_code)", phone_flow)
+        self.assertIn("phone_otp_input_sync_failed", phone_flow)
+        self.assertIn("/api/accounts/phone-otp/validate", source)
+
     def test_hook_is_installed_before_typing_and_click_is_guarded(self):
         source = SOURCE.read_text(encoding="utf-8")
         flow = source[source.index("def _fill_email_and_otp"):source.index("def _wait_for_fresh_email_otp")]
