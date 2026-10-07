@@ -247,6 +247,11 @@ class RoxyCodexPhoneTests(unittest.TestCase):
         self.assertIn('_human_click(driver, trigger, label="codex_phone_country")', source)
         self.assertIn('_human_click(driver, option, label="codex_phone_country_option")', source)
 
+    def test_country_selection_prefers_complete_native_options_before_virtual_listbox(self):
+        source = self._function_source("_select_phone_country")
+        self.assertLess(source.index("const selects ="), source.index("const triggers ="))
+        self.assertIn("hidden select", source)
+
     def test_phone_continue_uses_real_element_click(self):
         source = self._function_source("_click_add_phone_continue_button")
         self.assertIn('_human_click(driver, btn, label="codex_phone_continue")', source)
