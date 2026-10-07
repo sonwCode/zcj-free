@@ -22,11 +22,11 @@ index 37fda2a..49de69b 100644
 +import re
  from typing import Tuple
  from datetime import datetime, timezone, timedelta
-
+ 
 @@ -55,6 +56,28 @@ def normalize_cpa_api_url(value: str) -> str:
      return raw
-
-
+ 
+ 
 +def _codex_auth_filename(email: str, plan_type: str = "") -> str:
 +    """Build the Codex auth filename recognized by CPA."""
 +    safe_email = re.sub(r"[^A-Za-z0-9.@+_-]+", "-", str(email or "").strip())
@@ -55,7 +55,7 @@ index 37fda2a..49de69b 100644
 @@ -243,12 +266,23 @@ def upload_to_cpa(
      if not api_key:
          return False, "CPA Management Key 未配置"
-
+ 
 -    # 上传前检查 account_id
 +    try:
 +        token_data = _prepare_codex_upload(token_data)
@@ -67,7 +67,7 @@ index 37fda2a..49de69b 100644
 +        return False, "email 为空，无法上传 CPA"
      if not token_data.get("account_id"):
          return False, "account_id 为空，无法上传 CPA（JWT 和所有 fallback 均未获取到）"
-
+ 
      upload_url = f"{api_url.rstrip('/')}/v0/management/auth-files"
 -    filename = f"{token_data['email']}.json"
 +    plan_type = token_data.get("plan_type") or token_data.get("chatgpt_plan_type")
@@ -81,11 +81,11 @@ index 37fda2a..49de69b 100644
 @@ -259,7 +293,7 @@ def upload_to_cpa(
          "Accept": "application/json",
      }
-
+ 
 -    logger.info(f"[CPA] 上传: email={token_data['email']}, "
 +    logger.info(f"[CPA] 上传: email={email}, filename={filename}, "
                  f"account_id={token_data.get('account_id','')}")
-
+ 
      try:
 diff --git a/tests/test_cpa_upload.py b/tests/test_cpa_upload.py
 index 357a5f0..ff48d6a 100644
@@ -95,8 +95,8 @@ index 357a5f0..ff48d6a 100644
 +import json
  from types import SimpleNamespace
 +from urllib.parse import parse_qs, urlparse
-
-
+ 
+ 
  def test_normalize_cpa_api_url_removes_management_suffix_and_slashes():
 @@ -18,6 +20,7 @@ def test_upload_to_cpa_uses_single_slash_and_management_headers(monkeypatch):
      def fake_post(url, **kwargs):
@@ -104,7 +104,7 @@ index 357a5f0..ff48d6a 100644
          calls["headers"] = kwargs["headers"]
 +        calls["data"] = kwargs["data"]
          return SimpleNamespace(status_code=201, text="", json=lambda: {})
-
+ 
      monkeypatch.setattr(cpa_upload.cffi_requests, "post", fake_post)
 @@ -26,6 +29,8 @@ def test_upload_to_cpa_uses_single_slash_and_management_headers(monkeypatch):
              "email": "probe@example.com",
@@ -145,8 +145,8 @@ index 357a5f0..ff48d6a 100644
 +    assert ok is False
 +    assert message == "只允许上传 type=codex 的凭证"
 +    assert called is False
-
-
+ 
+ 
  def test_cpa_connection_uses_read_only_authenticated_get(monkeypatch):
 diff --git a/tests/test_platform_action_task.py b/tests/test_platform_action_task.py
 index 235c01a..254c2c3 100644
@@ -158,3 +158,5 @@ index 235c01a..254c2c3 100644
      assert uploaded[0]["account_id"] == "workspace-1"
 +    assert uploaded[0]["type"] == "codex"
      assert any("workspace JSON 自动上传完成" in str(event[1]) for event in logger.events)
+ 
+ 
