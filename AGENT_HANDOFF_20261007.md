@@ -160,7 +160,7 @@ ssh main-server 'hostname && pwd'
 ~~~bash
 ssh main-server 'hostname; pwd; sudo -n systemctl status turb-gpt-register.service --no-pager -l; sudo -n systemctl show turb-gpt-register.service -p MainPID -p FragmentPath -p WorkingDirectory'
 ssh main-server 'curl --compressed -sS -I http://127.0.0.1:5100/'
-ssh main-server 'cd /opt/turb-gpt-register && git status --short --branch && git rev-parse --short HEAD'
+ssh main-server 'cd /opt/turb-gpt-register && git -c safe.directory=/opt/turb-gpt-register status --short --branch && git -c safe.directory=/opt/turb-gpt-register rev-parse --short HEAD'
 ~~~
 
 历史文档记录过多次 active 和 MainPID，但这些是历史证据。接手 agent 必须重新执行上面的实时检查。
@@ -251,7 +251,7 @@ git push origin main
 
 ## 9. 当前风险与未完成项
 
-- 服务器实时服务状态尚未在本轮重新读取；文档中的历史 MainPID 不能作为当前状态。
+- 本轮已只读验证 main-server：hostname=ser427180673937、用户=harness-root、服务状态=active、内部 HTTP=302；未执行部署或重启，历史 MainPID 仍不作为当前状态。
 - CPA 远程已有的“其他”文件没有删除动作，避免误删配置。
 - zcj 本地提交 90ee7dd 已完成；仍需在确认目标远程后决定是否推送到 zcj.git。
 - 生产 turb-gpt-register 当前没有本轮 CPA 上传源代码，因此不要把本补丁直接当作该服务已部署。
