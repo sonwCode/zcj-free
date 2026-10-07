@@ -236,10 +236,11 @@ class RoxyCodexPhoneTests(unittest.TestCase):
         node = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == name)
         return ast.get_source_segment(source, node) or ""
 
-    def test_sms_selection_uses_real_element_click(self):
+    def test_sms_selection_updates_radio_react_state(self):
         source = self._function_source("_select_sms_channel_or_raise")
-        self.assertIn('_human_click(driver, target, label="codex_sms_channel")', source)
-        self.assertNotIn("sms.click()", source)
+        self.assertIn("sms.click()", source)
+        self.assertIn("new Event('input', {bubbles:true})", source)
+        self.assertIn("new Event('change', {bubbles:true})", source)
 
     def test_country_selection_uses_native_and_real_controls(self):
         source = self._function_source("_select_phone_country")
@@ -257,17 +258,18 @@ class RoxyCodexPhoneTests(unittest.TestCase):
         self.assertIn('_human_click(driver, btn, label="codex_phone_continue")', source)
         self.assertIn('"method": "human_click"', source)
 
-    def test_phone_fill_uses_atomic_cloak_fill_for_react_state(self):
+    def test_phone_fill_does_not_overwrite_native_setter_result(self):
         source = self._function_source("_set_phone_value")
-        self.assertIn('getattr(phone_input, "fill", None)', source)
-        self.assertIn("phone_input.fill(visible_value)", source)
-        self.assertIn("_human_type_text(driver, phone_input, visible_value)", source)
-        self.assertIn("input_state = driver.execute_script", source)
+        self.assertIn("setNativeValue(phoneInput, visibleValue, true)", source)
+        self.assertIn("setNativeValue(hiddenPhoneNumberInput, e164)", source)
+        self.assertNotIn("phone_input.fill(visible_value)", source)
+        self.assertNotIn("_human_type_text(driver, phone_input, visible_value)", source)
 
-    def test_phone_submit_skips_long_post_channel_blur(self):
+    def test_phone_submit_waits_for_post_channel_react_state(self):
         source = self._function_source("_prepare_and_submit_add_phone")
-        self.assertNotIn('短信通道确认完成', source)
-        self.assertIn("_stop_sleep(0.25)", source)
+        self.assertIn('label="短信通道确认完成"', source)
+        self.assertGreaterEqual(source.count("_select_sms_channel_or_raise(driver)"), 2)
+        self.assertIn("_verify_add_phone_value_before_submit", source)
 
 
 if __name__ == "__main__":
