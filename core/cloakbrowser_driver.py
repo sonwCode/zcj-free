@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import signal
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def _process_children(pid: int) -> list[int]:
-    """Return descendants from procfs without adding a psutil dependency."""
+    """Return descendants from procfs without depending on psutil."""
     children: dict[int, list[int]] = {}
     try:
         entries = os.listdir("/proc")
@@ -47,7 +48,8 @@ def _process_children(pid: int) -> list[int]:
 
 def _kill_process_tree(pid: int) -> None:
     """Stop a stuck Playwright driver and every Chromium child it spawned."""
-    for child in reversed(_process_children(pid)):
+    descendants = _process_children(pid)
+    for child in reversed(descendants):
         try:
             os.kill(child, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
@@ -56,6 +58,24 @@ def _kill_process_tree(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+def _force_kill_cloak_owners(*owners) -> None:
+    pids: list[int] = []
+    for owner in owners:
+        impl = getattr(owner, "_impl_obj", None)
+        connection = getattr(impl, "_connection", None)
+        transport = getattr(connection, "_transport", None)
+        process = getattr(transport, "_proc", None)
+        pid = getattr(process, "pid", None)
+        if pid:
+            try:
+                pids.append(int(pid))
+            except (TypeError, ValueError):
+                pass
+    for pid in dict.fromkeys(pids):
+        logger.warning("[Cloak] 强制终止卡住的 Playwright driver pid=%s", pid)
+        _kill_process_tree(pid)
 
 
 @dataclass
@@ -235,6 +255,8 @@ class CloakSeleniumDriver:
         self.context = context
         self.page = page
         self._proxy_relay = proxy_relay
+        self._force_kill_owners = (browser, context)
+        self._closed = False
         self._page_load_timeout_ms = int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90) * 1000
         self.switch_to = _SwitchTo(self)
 
@@ -289,42 +311,49 @@ class CloakSeleniumDriver:
         self.page.reload(wait_until="domcontentloaded", timeout=self._page_load_timeout_ms)
 
     def quit(self) -> None:
+        if self._closed:
+            return
+        errors: list[BaseException] = []
+        context = self.context
+        browser = self.browser
         try:
-            if self.context is not None:
-                self.context.close()
-        except Exception:
-            pass
-        try:
-            self.browser.close()
-        except Exception:
-            pass
-        relay, self._proxy_relay = self._proxy_relay, None
-        if relay is not None:
-            relay.close()
+            if context is not None:
+                try:
+                    context.close()
+                except BaseException as exc:
+                    errors.append(exc)
+            if browser is not None and browser is not context:
+                try:
+                    browser.close()
+                except BaseException as exc:
+                    errors.append(exc)
+        finally:
+            relay, self._proxy_relay = self._proxy_relay, None
+            if relay is not None:
+                try:
+                    relay.close()
+                except Exception:
+                    pass
+        if errors:
+            raise RuntimeError(
+                f"Cloak graceful close failed: {type(errors[0]).__name__}: {str(errors[0])[:180]}"
+            ) from errors[0]
+        self.context = None
+        self.browser = None
+        self._closed = True
 
     def force_kill(self) -> None:
-        """Hard-stop a Playwright driver when graceful close is stuck."""
-        pids: list[int] = []
-        for owner in (self.browser, self.context):
-            impl = getattr(owner, "_impl_obj", None)
-            connection = getattr(impl, "_connection", None)
-            transport = getattr(connection, "_transport", None)
-            process = getattr(transport, "_proc", None)
-            pid = getattr(process, "pid", None)
-            if pid:
-                try:
-                    pids.append(int(pid))
-                except (TypeError, ValueError):
-                    pass
-        for pid in dict.fromkeys(pids):
-            logger.warning("[Cloak] 强制终止卡住的 Playwright driver pid=%s", pid)
-            _kill_process_tree(pid)
+        """Hard-stop a Playwright driver when its graceful close is stuck."""
+        _force_kill_cloak_owners(*getattr(self, "_force_kill_owners", (self.browser, self.context)))
         relay, self._proxy_relay = self._proxy_relay, None
         if relay is not None:
             try:
                 relay.close()
             except Exception:
                 pass
+        self.context = None
+        self.browser = None
+        self._closed = True
 
     def find_elements(self, by: Any, selector: str) -> list[CloakElement]:
         loc = self._locator(by, selector)
@@ -479,6 +508,39 @@ class CloakSeleniumDriver:
         return self._unwrap_js_result(self.page, handle)
 
 
+def close_cloak_driver(driver, timeout_seconds: float = 2.0) -> bool:
+    """Close on the owning thread, with a process-tree watchdog fallback."""
+    if driver is None:
+        return True
+    completed = threading.Event()
+    timed_out = threading.Event()
+
+    def _watchdog() -> None:
+        if completed.wait(max(0.1, float(timeout_seconds or 2.0))):
+            return
+        timed_out.set()
+        try:
+            driver.force_kill()
+        except Exception as exc:
+            logger.warning("[Cloak] 强制回收 driver 失败：%s: %s", type(exc).__name__, str(exc)[:180])
+
+    watchdog = threading.Thread(target=_watchdog, name="cloak-driver-watchdog", daemon=True)
+    watchdog.start()
+    try:
+        driver.quit()
+    except BaseException as exc:
+        logger.warning("[Cloak] 关闭 driver 失败：%s: %s", type(exc).__name__, str(exc)[:180])
+        try:
+            driver.force_kill()
+        except Exception as kill_exc:
+            logger.warning("[Cloak] 强制回收 driver 失败：%s: %s", type(kill_exc).__name__, str(kill_exc)[:180])
+        return False
+    finally:
+        completed.set()
+        watchdog.join(0.05)
+    return not timed_out.is_set()
+
+
 def _normalize_proxy(proxy: str | None) -> str | None:
     proxy = str(proxy or "").strip()
     if not proxy:
@@ -555,90 +617,113 @@ def _build_cloak_locale_options(proxy_url: str | None = None) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
-def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
-    """启动 CloakBrowser 并返回 Selenium 风格 driver。
+def _rollback_cloak_resources(browser=None, context=None, proxy_relay=None) -> None:
+    """Best-effort rollback for resources acquired before a driver is returned."""
+    seen: set[int] = set()
+    close_failed = False
+    for resource in (context, browser):
+        if resource is None or id(resource) in seen:
+            continue
+        seen.add(id(resource))
+        try:
+            resource.close()
+        except Exception as exc:
+            close_failed = True
+            logger.warning("[Cloak] 回滚部分浏览器资源失败：%s: %s", type(exc).__name__, str(exc)[:180])
+    if close_failed:
+        _force_kill_cloak_owners(browser, context)
+    if proxy_relay is not None:
+        try:
+            proxy_relay.close()
+        except Exception as exc:
+            logger.warning("[Cloak] 回滚代理 relay 失败：%s: %s", type(exc).__name__, str(exc)[:180])
 
-    proxy=None  时按 config.proxy.PROXY_POOL 随机抽取；
-    proxy=""    时显式禁用代理；
-    proxy="..." 时使用指定代理。
-    """
+
+def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
+    """启动 CloakBrowser；返回前的任何失败都会回滚已取得资源。"""
     proxy_relay = None
     proxy_pool_target = ""
-    if proxy is None and bool(getattr(_cfg, "CLOAK_USE_PROXY", True)):
-        try:
-            from config.proxy import pick_proxy
-        except Exception:
-            proxy = None
-        else:
-            from core.proxy_chain import open_proxy_pool_proxy
-            proxy_pool_target = str(pick_proxy() or "").strip()
-            proxy, proxy_relay = open_proxy_pool_proxy(proxy_pool_target)
+    browser = None
+    context = None
+    driver = None
     try:
-        from cloakbrowser import launch, launch_persistent_context
-    except ImportError as exc:
-        raise RuntimeError("未安装 cloakbrowser，请执行：pip install cloakbrowser") from exc
+        if proxy is None and bool(getattr(_cfg, "CLOAK_USE_PROXY", True)):
+            try:
+                from config.proxy import pick_proxy
+            except Exception:
+                proxy = None
+            else:
+                from core.proxy_chain import open_proxy_pool_proxy
+                proxy_pool_target = str(pick_proxy() or "").strip()
+                proxy, proxy_relay = open_proxy_pool_proxy(proxy_pool_target)
 
-    launch_args = list(getattr(_cfg, "CLOAK_EXTRA_ARGS", []) or [])
-    seed = str(getattr(_cfg, "CLOAK_FINGERPRINT_SEED", "") or "").strip()
-    if seed:
-        launch_args.append(f"--fingerprint={seed}")
+        try:
+            from cloakbrowser import launch, launch_persistent_context
+        except ImportError as exc:
+            raise RuntimeError("未安装 cloakbrowser，请执行：pip install cloakbrowser") from exc
 
-    proxy_url = _normalize_proxy(proxy) if bool(getattr(_cfg, "CLOAK_USE_PROXY", True)) else None
-    locale_opts = _build_cloak_locale_options(proxy_url)
-    # geoip=True 交给 CloakBrowser 根据当前出口 IP 自动匹配 timezone/locale/WebRTC。
-    # 之前只有显式 proxy_url 时才开启；如果用户走系统代理/VPN/透明代理，代码层面
-    # 看不到 proxy_url，会误关 geoip，导致语言/时区不跟随出口。这里改为完全尊重配置。
-    opts = {
-        "headless": bool(getattr(_cfg, "CLOAK_HEADLESS", False)),
-        "humanize": bool(getattr(_cfg, "CLOAK_HUMANIZE", True)),
-        "geoip": bool(getattr(_cfg, "CLOAK_GEOIP", True)),
-    }
-    if locale_opts.get("locale"):
-        opts["locale"] = locale_opts["locale"]
-    if locale_opts.get("timezone"):
-        opts["timezone"] = locale_opts["timezone"]
-    if proxy_url:
-        opts["proxy"] = proxy_url
-    if launch_args:
-        opts["args"] = launch_args
-    license_key = str(getattr(_cfg, "CLOAK_LICENSE_KEY", "") or "").strip()
-    if license_key:
-        opts["license_key"] = license_key
+        launch_args = list(getattr(_cfg, "CLOAK_EXTRA_ARGS", []) or [])
+        seed = str(getattr(_cfg, "CLOAK_FINGERPRINT_SEED", "") or "").strip()
+        if seed:
+            launch_args.append(f"--fingerprint={seed}")
 
-    user_data_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
-    logger.info(
-        "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
-        opts.get("headless"), opts.get("humanize"), opts.get("geoip"),
-        proxy_url or "无", opts.get("locale") or "自动/默认", opts.get("timezone") or "自动/默认",
-        locale_opts.get("accept_language") or "自动/默认", bool(user_data_dir),
-    )
-    context_kwargs = {}
-    if locale_opts.get("locale"):
-        context_kwargs["locale"] = locale_opts["locale"]
-    if locale_opts.get("timezone"):
-        context_kwargs["timezone_id"] = locale_opts["timezone"]
-    if locale_opts.get("accept_language"):
-        context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
+        proxy_url = _normalize_proxy(proxy) if bool(getattr(_cfg, "CLOAK_USE_PROXY", True)) else None
+        locale_opts = _build_cloak_locale_options(proxy_url)
+        opts = {
+            "headless": bool(getattr(_cfg, "CLOAK_HEADLESS", False)),
+            "humanize": bool(getattr(_cfg, "CLOAK_HUMANIZE", True)),
+            "geoip": bool(getattr(_cfg, "CLOAK_GEOIP", True)),
+        }
+        if locale_opts.get("locale"):
+            opts["locale"] = locale_opts["locale"]
+        if locale_opts.get("timezone"):
+            opts["timezone"] = locale_opts["timezone"]
+        if proxy_url:
+            opts["proxy"] = proxy_url
+        if launch_args:
+            opts["args"] = launch_args
+        license_key = str(getattr(_cfg, "CLOAK_LICENSE_KEY", "") or "").strip()
+        if license_key:
+            opts["license_key"] = license_key
 
-    if user_data_dir:
-        context = launch_persistent_context(user_data_dir, **opts)
-        page = context.new_page()
-        browser = getattr(context, "browser", None) or context
-        # persistent context 的 locale/timezone 已通过 launch_persistent_context 参数传入。
-    else:
-        browser = launch(**opts)
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
+        user_data_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+        logger.info(
+            "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
+            opts.get("headless"), opts.get("humanize"), opts.get("geoip"),
+            proxy_url or "无", opts.get("locale") or "自动/默认", opts.get("timezone") or "自动/默认",
+            locale_opts.get("accept_language") or "自动/默认", bool(user_data_dir),
+        )
+        context_kwargs = {}
+        if locale_opts.get("locale"):
+            context_kwargs["locale"] = locale_opts["locale"]
+        if locale_opts.get("timezone"):
+            context_kwargs["timezone_id"] = locale_opts["timezone"]
+        if locale_opts.get("accept_language"):
+            context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
 
-    driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
-    # Roxy/Cloak 共用部分页面操作函数；给共享函数一个显式日志前缀，
-    # 避免 Cloak 注册流程里出现 `[Roxy注册]`。
-    driver._registration_log_prefix = "[Cloak注册]"
-    driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
-    return driver, CloakOpenResult(raw={
-        "driver": "cloakbrowser",
-        "proxy": proxy_url,
-        "proxy_pool_target": proxy_pool_target or proxy_url,
-        "locale": locale_opts,
-        "options": {k: v for k, v in opts.items() if k != "license_key"},
-    })
+        if user_data_dir:
+            context = launch_persistent_context(user_data_dir, **opts)
+            page = context.new_page()
+            browser = getattr(context, "browser", None) or context
+        else:
+            browser = launch(**opts)
+            context = browser.new_context(**context_kwargs)
+            page = context.new_page()
+
+        driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
+        proxy_relay = None
+        driver._registration_log_prefix = "[Cloak注册]"
+        driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
+        return driver, CloakOpenResult(raw={
+            "driver": "cloakbrowser",
+            "proxy": proxy_url,
+            "proxy_pool_target": proxy_pool_target or proxy_url,
+            "locale": locale_opts,
+            "options": {k: v for k, v in opts.items() if k != "license_key"},
+        })
+    except BaseException:
+        if driver is not None:
+            close_cloak_driver(driver)
+        else:
+            _rollback_cloak_resources(browser=browser, context=context, proxy_relay=proxy_relay)
+        raise

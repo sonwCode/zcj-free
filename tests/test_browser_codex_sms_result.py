@@ -117,7 +117,17 @@ def _run_browser_use(code):
 
     class _Client:
         def open_session(self):
-            return types.SimpleNamespace(connect_url="", proxy_country_code="", profile_id="")
+            return types.SimpleNamespace(connect_url="", proxy_country_code="", profile_id="", session_id="session-fixture")
+
+    class _Lease:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close_browser(self, *args, **kwargs):
+            pass
+
+        def close_remote(self, *args, **kwargs):
+            pass
 
     class _StepTimer:
         def __init__(self, *args, **kwargs):
@@ -131,6 +141,8 @@ def _run_browser_use(code):
             "_cfg": types.SimpleNamespace(ENABLE_CODEX_AUTO=True, BROWSER_USE_KEEP_BROWSER_OPEN=False),
             "BrowserUseClient": _Client,
             "_StepTimer": _StepTimer,
+            "CloudBrowserLease": _Lease,
+            "_cloud_keep_open": lambda provider: False,
             "_set_log_provider_label": lambda label: None,
         }
     )

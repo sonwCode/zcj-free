@@ -41,13 +41,16 @@ def close_browser_session(session) -> None:
     """Close a BrowserSession while retaining compatibility with test doubles."""
     if session is None:
         return
-    close = getattr(type(session), "close", None)
-    if callable(close):
-        close(session)
-        return
-    raw_session = getattr(session, "session", None)
-    if raw_session is not None:
-        raw_session.close()
+    try:
+        close = getattr(type(session), "close", None)
+        if callable(close):
+            close(session)
+            return
+        raw_session = getattr(session, "session", None)
+        if raw_session is not None:
+            raw_session.close()
+    except Exception as exc:
+        logger.warning("关闭 BrowserSession 失败：%s: %s", type(exc).__name__, str(exc)[:180])
 
 
 def _seed_uuid(seed: str, salt: str) -> str:
@@ -105,18 +108,18 @@ class BrowserSession:
         # proxy=""    → 禁用代理（直连）
         # proxy="..." → 使用指定代理，不套用代理池上游
         self._proxy_pool_relay = None
+        self.session = None
+        self._closed = False
         if proxy is None:
             self.proxy = pick_proxy()
             self.proxy_target = self.proxy
-            if self.proxy:
-                from core.proxy_chain import open_proxy_pool_proxy
-                transport_proxy, self._proxy_pool_relay = open_proxy_pool_proxy(self.proxy)
-            else:
-                transport_proxy = ""
+            transport_proxy = self.proxy or ""
+            use_proxy_pool_relay = bool(self.proxy)
         else:
             self.proxy = proxy
             self.proxy_target = proxy
             transport_proxy = proxy
+            use_proxy_pool_relay = False
 
         self.fingerprint_seed = str(fingerprint_seed or "").strip()
 
@@ -182,51 +185,50 @@ class BrowserSession:
             self.react_container_key = "__reactContainer$" + uuid.uuid4().hex[:11]
         self.react_resources_key = "__reactResources$" + self.react_container_key.split("$", 1)[1]
 
-        # 创建 curl_cffi 会话
-        self.session = Session(impersonate=IMPERSONATE)
+        try:
+            # 代理 relay 延迟到受保护区内创建，避免画像初始化失败时遗留监听端口。
+            if use_proxy_pool_relay:
+                from core.proxy_chain import open_proxy_pool_proxy
+                transport_proxy, self._proxy_pool_relay = open_proxy_pool_proxy(self.proxy)
+            self.session = Session(impersonate=IMPERSONATE)
 
-        # 设置代理
-        if transport_proxy:
-            self.session.proxies = {
-                "http": transport_proxy,
-                "https": transport_proxy,
-            }
+            if transport_proxy:
+                self.session.proxies = {
+                    "http": transport_proxy,
+                    "https": transport_proxy,
+                }
+            self.session.timeout = REQUEST_TIMEOUT
 
-        # 设置超时
-        self.session.timeout = REQUEST_TIMEOUT
+            # 会话级熔断：收到 403/429 后停止继续打后续接口，避免异常状态下扩大误伤。
+            self.blocked_until = 0.0
+            self.blocked_reason = ""
 
-        # 会话级熔断：收到 403/429 后停止继续打后续接口，避免异常状态下扩大误伤。
-        self.blocked_until = 0.0
-        self.blocked_reason = ""
+            # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
+            self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
+            self._enforce_proxy_quality()
+            if browser_profile:
+                self.browser_profile = dict(browser_profile)
+            else:
+                self.browser_profile = dict(_seeded_browser_profile(self.fingerprint_seed, self.exit_geo))
+            self.browser_profile["react_listening_key"] = self.react_listening_key
+            self.browser_profile["react_container_key"] = self.react_container_key
+            self.browser_profile["react_resources_key"] = self.react_resources_key
+            issues = validate_browser_profile(self.browser_profile)
+            if issues:
+                logger.warning("[指纹] 浏览器画像存在不一致: %s", "; ".join(issues))
 
-        # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
-        # 这样 Accept-Language / navigator.language / timezone 可自动跟随出口地区。
-        self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
-        self._enforce_proxy_quality()
-        if browser_profile:
-            self.browser_profile = dict(browser_profile)
-        else:
-            self.browser_profile = dict(_seeded_browser_profile(self.fingerprint_seed, self.exit_geo))
-        self.browser_profile["react_listening_key"] = self.react_listening_key
-        self.browser_profile["react_container_key"] = self.react_container_key
-        self.browser_profile["react_resources_key"] = self.react_resources_key
-        issues = validate_browser_profile(self.browser_profile)
-        if issues:
-            logger.warning("[指纹] 浏览器画像存在不一致: %s", "; ".join(issues))
+            # HTTP Cookie、OAuth 参数与 Sentinel 共用同一个设备上下文。
+            for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
+                self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
+            locale = self.navigator_language()
+            for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
+                self.session.cookies.set("oai-locale", locale, domain=domain, path="/")
 
-        # 让 HTTP Cookie、OAuth 参数 ext-oai-did、Sentinel 里的 id 三者一致。
-        # 浏览器里 oai-did 通常会作为一方 Cookie 存在；协议层主动补齐可减少同一会话内
-        # “头部/参数/JS 指纹有设备 ID，但 Cookie Jar 为空”的不一致。
-        for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
-            self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
-        # 参考真实前端会话：语言不仅体现在 Accept-Language/oai-language，也写入
-        # 同一个 Cookie Jar，避免代理为 JP 但 Cookie 仍泄漏默认地区。
-        locale = self.navigator_language()
-        for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
-            self.session.cookies.set("oai-locale", locale, domain=domain, path="/")
-
-        # Cloudflare 状态只能来自真实响应 Set-Cookie；这里仅记录变化，不主动伪造/覆盖。
-        self._cf_cookie_seen = self.cf_cookie_snapshot()
+            # Cloudflare 状态只能来自真实响应 Set-Cookie。
+            self._cf_cookie_seen = self.cf_cookie_snapshot()
+        except BaseException:
+            close_browser_session(self)
+            raise
 
     def cf_cookie_snapshot(self) -> dict:
         """返回当前 CookieJar 中的 Cloudflare 关键 Cookie 摘要，便于确认同 IP/同会话连续性。"""
@@ -241,13 +243,22 @@ class BrowserSession:
         return out
 
     def close(self) -> None:
-        """Close the HTTP session and any proxy-pool relay owned by this session."""
-        try:
-            self.session.close()
-        finally:
-            relay, self._proxy_pool_relay = self._proxy_pool_relay, None
-            if relay is not None:
+        """Close owned resources exactly once, including partial construction."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        raw_session, self.session = getattr(self, "session", None), None
+        if raw_session is not None:
+            try:
+                raw_session.close()
+            except Exception as exc:
+                logger.warning("关闭 HTTP session 失败：%s: %s", type(exc).__name__, str(exc)[:180])
+        relay, self._proxy_pool_relay = getattr(self, "_proxy_pool_relay", None), None
+        if relay is not None:
+            try:
                 relay.close()
+            except Exception as exc:
+                logger.warning("关闭代理 relay 失败：%s: %s", type(exc).__name__, str(exc)[:180])
 
     def __enter__(self):
         return self

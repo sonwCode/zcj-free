@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import ExitStack
 import time
 from urllib.parse import urlparse
 
@@ -12,6 +13,7 @@ from config import roxybrowser as _roxy_cfg
 from core import sms_provider
 from core import codex_oauth as _codex_proto
 from core.browser_use_client import BrowserUseClient
+from core.cloud_browser_lifecycle import CloudBrowserLease
 from core.openai_auth import AccountUnusableError, detect_account_unusable_response_body
 from core.browser_use_registration import (
     _timeout_ms,
@@ -23,6 +25,7 @@ from core.browser_use_registration import (
     _clear_otp_inputs,
     _wait_after_otp,
     _click_passwordless_signup_if_present,
+    _cloud_keep_open,
 )
 from core.humanize import delay as human_delay
 from core.stop_control import (
@@ -1592,7 +1595,18 @@ def _run_browser_use_codex_oauth_once(
 
     _set_log_provider_label(provider_label)
     _t_all = _StepTimer(f"Codex {provider_label} 全流程")
-    session_info = client.open_session()
+    try:
+        session_info = client.open_session()
+    except BaseException:
+        _set_log_provider_label("BrowserUse")
+        raise
+    lease = CloudBrowserLease(
+        client,
+        session_info,
+        provider_label=provider_label,
+        keep_open=_cloud_keep_open("skyvern" if provider in ("skyvern", "sv") else "browser_use"),
+        logger=logger,
+    )
     browser = None
     context = None
     page = None
@@ -1623,12 +1637,15 @@ def _run_browser_use_codex_oauth_once(
             session_info.profile_id or "-",
             "yes" if proxy else "no",
         )
-        with sync_playwright() as p:
+        with ExitStack() as stack:
+            p = stack.enter_context(sync_playwright())
+            stack.callback(lease.close)
             _t_cdp = _StepTimer("连接 Browser Use CDP")
             connect_kwargs = {}
             if provider in ("skyvern", "sv") and hasattr(client, "cdp_headers"):
                 connect_kwargs["headers"] = client.cdp_headers()
             browser = p.chromium.connect_over_cdp(session_info.connect_url, **connect_kwargs)
+            lease.attach_browser(browser)
             _t_cdp.done()
             context = browser.contexts[0] if browser.contexts else browser.new_context()
             page = context.pages[0] if context.pages else context.new_page()
@@ -1731,24 +1748,8 @@ def _run_browser_use_codex_oauth_once(
             phone_activation=phone_activation,
         )
     finally:
-        keep_open = bool(getattr(_cfg, "BROWSER_USE_KEEP_BROWSER_OPEN", False))
-        if provider in ("skyvern", "sv"):
-            try:
-                from config import skyvern as _skyvern_cfg
-                keep_open = bool(getattr(_skyvern_cfg, "SKYVERN_KEEP_BROWSER_OPEN", False))
-            except Exception:
-                keep_open = False
-        if not keep_open:
-            try:
-                if browser is not None:
-                    browser.close()
-            except Exception:
-                pass
-            if provider in ("skyvern", "sv") and hasattr(client, "close_browser_session") and getattr(session_info, "session_id", ""):
-                try:
-                    client.close_browser_session(session_info.session_id)
-                except Exception:
-                    pass
+        # ExitStack 在 Playwright 退出前关闭 browser；远端 session 在连接清理后停止。
+        lease.close()
         _set_log_provider_label("BrowserUse")
 
 

@@ -14,7 +14,7 @@ from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import PlaywrightTrafficTracker
-from core.cloakbrowser_driver import build_cloak_driver
+from core.cloakbrowser_driver import build_cloak_driver, close_cloak_driver
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 
@@ -84,6 +84,11 @@ def _bounded_cleanup(label: str, callback, on_timeout=None):
                 logger.debug("[Cloak注册] 清理 %s 超时兜底失败：%s: %s", label, type(exc).__name__, exc)
     elif errors:
         logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(errors[0]).__name__, errors[0])
+        if on_timeout is not None:
+            try:
+                on_timeout()
+            except BaseException as exc:
+                logger.debug("[Cloak注册] 清理 %s 报错兜底失败：%s: %s", label, type(exc).__name__, exc)
     return result[0] if result else None
 
 
@@ -314,7 +319,7 @@ def _run_cloak_registration_impl(
             _bounded_cleanup("data_saver.stop", data_saver.stop)
         if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
             driver_quit = True
-            _bounded_cleanup("driver.quit", driver.quit, on_timeout=driver.force_kill)
+            close_cloak_driver(driver)
 
 
 def _run_in_isolated_thread(fn: Callable, *args, **kwargs):

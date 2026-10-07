@@ -17,7 +17,7 @@ from config import email as _email_cfg
 from config import roxybrowser as _roxy_cfg
 from config import openai_protocol as _protocol_cfg
 from config import register as _register_cfg
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
 from core.stop_control import sleep as _stop_sleep
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
@@ -276,47 +276,45 @@ def run_registration(
         fingerprint_seed=fingerprint_seed,
     )
 
-    # 从代理 URL 中抽取 sid 段做日志，避免把账号密码完整打印
-    proxy_label = "无"
-    if session.proxy:
-        # 形如 socks5h://user-region-JP-sid-XXXX-t-5:pass@host:port
-        try:
-            sid_part = next(
-                (seg for seg in session.proxy.split("@")[0].split("-") if len(seg) == 8),
-                "***",
-            )
-            proxy_label = f"{session.proxy.split('://')[0]}://...sid-{sid_part}...@{session.proxy.split('@')[-1]}"
-        except Exception:
-            proxy_label = "已配置"
-
-    if not birthday:
-        birthday = generate_random_birthday()
-
-    logger.info(f"[注册] 开始：{email}，代理={proxy_label}")
-    logger.info(
-        "[指纹] 生命周期模式：%s",
-        "同邮箱保持" if reuse_fingerprint else "每次任务重新创建",
-    )
-    logger.info(f"[注册] 本次随机生日: {birthday}")
-    fp = session.fingerprint_summary()
-    logger.info(
-        "[指纹] 协议注册统一上下文: device_id=%s oai_session_id=%s auth_session_logging_id=%s "
-        "ua=%s lang=%s tz=%s(%s) screen=%sx%s@%s cpu=%s mem=%s geo=%s:%s",
-        session.device_id[:12] + "...",
-        session.oai_session_id[:12] + "...",
-        session.auth_session_logging_id[:12] + "...",
-        BrowserSession._short_value(fp.get("user_agent"), 72),
-        fp.get("accept_language"),
-        fp.get("timezone_iana"),
-        fp.get("timezone_offset_minutes"),
-        fp.get("screen_width"), fp.get("screen_height"), fp.get("device_pixel_ratio"),
-        fp.get("hardware_concurrency"), fp.get("device_memory"),
-        fp.get("geo_country") or "?", fp.get("geo_city") or "?",
-    )
-
     create_acknowledged = False
     registration_password = None
     try:
+        # 从代理 URL 中抽取 sid 段做日志，避免把账号密码完整打印。
+        proxy_label = "无"
+        if session.proxy:
+            try:
+                sid_part = next(
+                    (seg for seg in session.proxy.split("@")[0].split("-") if len(seg) == 8),
+                    "***",
+                )
+                proxy_label = f"{session.proxy.split('://')[0]}://...sid-{sid_part}...@{session.proxy.split('@')[-1]}"
+            except Exception:
+                proxy_label = "已配置"
+
+        if not birthday:
+            birthday = generate_random_birthday()
+
+        logger.info(f"[注册] 开始：{email}，代理={proxy_label}")
+        logger.info(
+            "[指纹] 生命周期模式：%s",
+            "同邮箱保持" if reuse_fingerprint else "每次任务重新创建",
+        )
+        logger.info(f"[注册] 本次随机生日: {birthday}")
+        fp = session.fingerprint_summary()
+        logger.info(
+            "[指纹] 协议注册统一上下文: device_id=%s oai_session_id=%s auth_session_logging_id=%s "
+            "ua=%s lang=%s tz=%s(%s) screen=%sx%s@%s cpu=%s mem=%s geo=%s:%s",
+            session.device_id[:12] + "...",
+            session.oai_session_id[:12] + "...",
+            session.auth_session_logging_id[:12] + "...",
+            BrowserSession._short_value(fp.get("user_agent"), 72),
+            fp.get("accept_language"),
+            fp.get("timezone_iana"),
+            fp.get("timezone_offset_minutes"),
+            fp.get("screen_width"), fp.get("screen_height"), fp.get("device_pixel_ratio"),
+            fp.get("hardware_concurrency"), fp.get("device_memory"),
+            fp.get("geo_country") or "?", fp.get("geo_city") or "?",
+        )
         # 网络预检必须在 signin/follow_authorize 之前完成；预检不带邮箱，不会触发 OTP。
         network_preflight(session)
         human_delay("navigate")
@@ -666,6 +664,8 @@ def run_registration(
             "email": email,
             "error": str(e),
         }
+    finally:
+        close_browser_session(session)
 
 
 def main():

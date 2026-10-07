@@ -37,6 +37,7 @@ from core.roxy_registration import (
     _type_otp,
     _clear_otp_inputs,
     _visible,
+    _bounded_stop_cleanup,
     _email_otp_page_state,
     _is_email_verification_page,
     _is_login_password_page,
@@ -2401,7 +2402,12 @@ def _run_roxy_codex_oauth_once(
     phone_activation = dict(_phone_activation or {})
 
     client = None if reuse_existing_profile else RoxyBrowserClient()
-    opened = existing_opened if reuse_existing_profile else client.open_profile()
+    try:
+        opened = existing_opened if reuse_existing_profile else client.open_profile()
+    except BaseException:
+        if client is not None:
+            client.close()
+        raise
     browser_kind_token = _CODEX_BROWSER_KIND.set(_detect_browser_kind(opened))
     driver = existing_driver if reuse_existing_profile else None
     owns_driver = not reuse_existing_profile
@@ -2495,7 +2501,10 @@ def _run_roxy_codex_oauth_once(
         if not code_verifier:
             raise RuntimeError("[Codex][Browser] local 模式缺少 code_verifier")
         session = proto.BrowserSession(proxy=proxy, fingerprint_seed=f"account:{email.lower()}")
-        token_resp = proto.exchange_codex_token(session, code, code_verifier)
+        try:
+            token_resp = proto.exchange_codex_token(session, code, code_verifier)
+        finally:
+            proto.close_browser_session(session)
         id_claims = proto._parse_id_token(token_resp.get("id_token", ""))
         effective_email = id_claims.get("email") or email
         storage = proto.build_codex_storage(token_resp, id_claims)
@@ -2545,12 +2554,15 @@ def _run_roxy_codex_oauth_once(
         # 注册后复用窗口时，driver/profile 生命周期由注册流程统一清理，
         # 这里不能 quit/delete，否则会提前销毁注册环境。
         if owns_driver and driver and not bool(_roxy_cfg.ROXY_KEEP_BROWSER_OPEN):
-            try:
-                driver.quit()
-            except Exception:
-                pass
-        if owns_driver and client and not bool(_roxy_cfg.ROXY_KEEP_BROWSER_OPEN):
-            client.cleanup_profile(opened)
+            _bounded_stop_cleanup("codex.driver.quit", driver.quit, always=True)
+        if owns_driver and client:
+            if not bool(_roxy_cfg.ROXY_KEEP_BROWSER_OPEN):
+                try:
+                    _bounded_stop_cleanup("codex.client.cleanup_profile", lambda: client.cleanup_profile(opened))
+                finally:
+                    client.close()
+            else:
+                client.close(keep_proxy_relay=True)
         try:
             _CODEX_BROWSER_KIND.reset(browser_kind_token)
         except Exception:

@@ -17,15 +17,15 @@ from config.env_loader import env_str, apply_env_overrides
 BROWSER_USE_API_KEY: str = env_str("BROWSER_USE_API_KEY", "")
 
 # 连接方式：
-#   "cdp_url" = 直接用官方 CDP websocket（推荐，最简单）
-#   "sdk"     = 先调 REST 创建 session（预留；默认仍走 cdp_url）
-BROWSER_USE_CONNECT_MODE: str = "cdp_url"
+#   "api_v4" = 通过官方 V4 API 显式创建并在结束时停止 session（默认）
+#   "cdp_url" = 旧版直连 websocket；无法可靠取得 session ID，仅用于兼容
+BROWSER_USE_CONNECT_MODE: str = "api_v4"
 
 # CDP 连接地址模板。{api_key}/{proxy_country_code}/{profile_id} 会按需替换或追加 query。
 BROWSER_USE_CDP_BASE: str = "wss://connect.browser-use.com"
 
-# 可选 REST API 根地址（以后若改走显式 create/stop session 用）
-BROWSER_USE_API_BASE: str = "https://api.browser-use.com/api/v2"
+# Browser Use V4 create/stop REST API 根地址。
+BROWSER_USE_API_BASE: str = "https://api.browser-use.com/api/v4"
 
 # 代理国家代码，两位小写，例如 jp / us / sg / de；留空则用 Browser Use 默认出口
 BROWSER_USE_PROXY_COUNTRY_CODE: str = "jp"
@@ -60,7 +60,7 @@ SKYVERN_PROFILE_TIMEOUT: int = 45
 BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT: int = 18
 SKYVERN_SESSION_ACCESS_TOKEN_TIMEOUT: int = 35
 
-# 任务结束后是否主动断开 CDP
+# 任务结束后是否保留云端 browser session；False 会关闭 CDP 并显式 stop。
 BROWSER_USE_KEEP_BROWSER_OPEN: bool = False
 
 # 额外 CDP query 参数，会合并到 connect URL；同名字段会覆盖上面的 BROWSER_USE_SESSION_TIMEOUT。
@@ -71,4 +71,4 @@ BROWSER_USE_EXTRA_QUERY: dict = {}
 BROWSER_USE_START_URL: str = "https://chatgpt.com/auth/login"
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'BROWSER_USE_API_KEY': 'str', 'BROWSER_USE_PROXY_COUNTRY_CODE': 'str', 'BROWSER_USE_USE_PROXY': 'bool', 'BROWSER_USE_PROFILE_ID': 'str', 'BROWSER_USE_CDP_BASE': 'str', 'BROWSER_USE_TIMEOUT': 'int', 'BROWSER_USE_SESSION_TIMEOUT': 'int', 'BROWSER_USE_FAST_MODE': 'bool', 'BROWSER_USE_LOG_TIMING': 'bool', 'BROWSER_USE_PROFILE_TIMEOUT': 'int', 'SKYVERN_PROFILE_TIMEOUT': 'int', 'BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT': 'int', 'SKYVERN_SESSION_ACCESS_TOKEN_TIMEOUT': 'int', 'BROWSER_USE_KEEP_BROWSER_OPEN': 'bool', 'BROWSER_USE_START_URL': 'str'})
+apply_env_overrides(globals(), {'BROWSER_USE_API_KEY': 'str', 'BROWSER_USE_CONNECT_MODE': 'str', 'BROWSER_USE_API_BASE': 'str', 'BROWSER_USE_PROXY_COUNTRY_CODE': 'str', 'BROWSER_USE_USE_PROXY': 'bool', 'BROWSER_USE_PROFILE_ID': 'str', 'BROWSER_USE_CDP_BASE': 'str', 'BROWSER_USE_TIMEOUT': 'int', 'BROWSER_USE_SESSION_TIMEOUT': 'int', 'BROWSER_USE_FAST_MODE': 'bool', 'BROWSER_USE_LOG_TIMING': 'bool', 'BROWSER_USE_PROFILE_TIMEOUT': 'int', 'SKYVERN_PROFILE_TIMEOUT': 'int', 'BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT': 'int', 'SKYVERN_SESSION_ACCESS_TOKEN_TIMEOUT': 'int', 'BROWSER_USE_KEEP_BROWSER_OPEN': 'bool', 'BROWSER_USE_START_URL': 'str'})

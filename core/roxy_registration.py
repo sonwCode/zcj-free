@@ -30,9 +30,9 @@ logger = logging.getLogger(__name__)
 _ROXY_STOP_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
-def _bounded_stop_cleanup(label: str, callback):
-    """停止信号到达后限制浏览器清理等待，确保任务能落库为 stopped。"""
-    if not _is_stop_requested():
+def _bounded_stop_cleanup(label: str, callback, *, always: bool = False):
+    """Bound driver cleanup always and other cleanup only after a stop request."""
+    if not always and not _is_stop_requested():
         return callback()
 
     result: list[object] = []
@@ -52,7 +52,7 @@ def _bounded_stop_cleanup(label: str, callback):
     )
     thread.join(timeout)
     if thread.is_alive():
-        logger.warning("[Roxy注册] 停止清理 %s 超时 %.1fs，继续状态收尾", label, timeout)
+        logger.warning("[Roxy注册] 清理 %s 超时 %.1fs，继续资源收尾", label, timeout)
     elif errors:
         logger.debug("[Roxy注册] 停止清理 %s 失败：%s: %s", label, type(errors[0]).__name__, errors[0])
     return result[0] if result else None
@@ -2954,7 +2954,11 @@ def run_roxy_registration(
 ) -> dict:
     """Roxy 指纹浏览器自动化注册入口。"""
     client = RoxyBrowserClient()
-    opened = client.open_profile()
+    try:
+        opened = client.open_profile()
+    except BaseException:
+        client.close()
+        raise
     driver = None
     create_acknowledged = False
     openai_password: str | None = None
@@ -3329,7 +3333,7 @@ def run_roxy_registration(
         if driver and not driver_quit and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
             driver_quit = True
             try:
-                _bounded_stop_cleanup("driver.quit", driver.quit)
+                _bounded_stop_cleanup("driver.quit", driver.quit, always=True)
             except Exception:
                 pass
         if not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
@@ -3345,11 +3349,16 @@ def run_roxy_registration(
                     "[Roxy] 检测到停止信号，使用停止期清理超时 %.1fs（单次请求）",
                     cleanup_timeout,
                 )
-            _bounded_stop_cleanup(
-                "client.cleanup_profile",
-                lambda: client.cleanup_profile(
-                    opened,
-                    timeout_seconds=cleanup_timeout,
-                    max_attempts=cleanup_attempts,
-                ),
-            )
+            try:
+                _bounded_stop_cleanup(
+                    "client.cleanup_profile",
+                    lambda: client.cleanup_profile(
+                        opened,
+                        timeout_seconds=cleanup_timeout,
+                        max_attempts=cleanup_attempts,
+                    ),
+                )
+            finally:
+                client.close()
+        else:
+            client.close(keep_proxy_relay=True)

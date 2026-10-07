@@ -116,6 +116,20 @@ EDITABLE_FIELDS = [
         "storage": "env", "secret": True,
     },
     {
+        "key": "BROWSER_USE_CONNECT_MODE", "file": "browser_use.py", "type": "str", "group": "Browser Use",
+        "label": "连接模式", "help": "api_v4 会显式创建并停止远端 session；cdp_url 仅用于旧版回退",
+        "storage": "env",
+        "choices": [
+            {"value": "api_v4", "label": "API V4（可显式停止会话）"},
+            {"value": "cdp_url", "label": "旧版 CDP URL（兼容）"},
+        ],
+    },
+    {
+        "key": "BROWSER_USE_API_BASE", "file": "browser_use.py", "type": "str", "group": "Browser Use",
+        "label": "V4 API 地址", "help": "默认 https://api.browser-use.com/api/v4",
+        "storage": "env",
+    },
+    {
         "key": "BROWSER_USE_PROXY_COUNTRY_CODE", "file": "browser_use.py", "type": "str", "group": "Browser Use",
         "label": "代理国家代码", "help": "两位国家码，如 jp/us/sg；配合 Browser Use 内置 residential proxy",
     },

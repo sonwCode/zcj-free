@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import random
+from contextlib import ExitStack
 import threading
 import string
 import time
@@ -23,6 +24,7 @@ from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, _post_register_dwell_seconds
 from core.browser_use_client import BrowserUseClient
+from core.cloud_browser_lifecycle import CloudBrowserLease
 from core.email_provider import acquire_email_after_input, resolve_email_source, wait_for_otp
 from core.humanize import delay as human_delay
 from core.stop_control import StopRequested, sleep as _stop_sleep
@@ -46,6 +48,16 @@ def _set_cloud_provider(prefix: str) -> None:
 
 def _cloud_provider_prefix() -> str:
     return str(getattr(_LOG_CONTEXT, "provider_prefix", "browser_use") or "browser_use")
+
+
+def _cloud_keep_open(provider_prefix: str) -> bool:
+    if provider_prefix == "skyvern":
+        try:
+            from config import skyvern as _skyvern_cfg
+            return bool(getattr(_skyvern_cfg, "SKYVERN_KEEP_BROWSER_OPEN", False))
+        except Exception:
+            return False
+    return bool(getattr(_cfg, "BROWSER_USE_KEEP_BROWSER_OPEN", False))
 
 
 def _skyvern_human_mode() -> bool:
@@ -89,22 +101,6 @@ def _cloud_typing_delay(kind: str = "normal") -> tuple[int, int]:
     if kind == "name":
         return (55, 130) if _fast_mode() else (85, 200)
     return (55, 140) if _fast_mode() else (90, 220)
-
-
-def _close_browser_use_session(browser, *, reason: str = "") -> None:
-    """关闭 Browser Use 注册阶段 CDP 会话。
-
-    Codex OAuth 会重新打开自己的干净 session；注册成功后若直接跑 Codex，
-    必须先断开注册阶段的 Browser Use 会话，避免两个远端浏览器 session 同时占用资源。
-    """
-    if browser is None:
-        return
-    label = f"：{reason}" if reason else ""
-    try:
-        logger.info("[BrowserUse] 关闭注册浏览器 session%s", label)
-        browser.close()
-    except Exception as exc:
-        logger.warning("[BrowserUse] 关闭注册浏览器 session 失败%s：%s: %s", label, type(exc).__name__, str(exc)[:180])
 
 
 def _bu_delay(kind: str, seconds: float | None = None) -> None:
@@ -2578,7 +2574,19 @@ def run_browser_use_registration(
     _set_log_provider_label(cloud_label)
     _set_cloud_provider(provider_prefix)
     _t_all = _StepTimer(f"{cloud_label} 注册全流程")
-    session_info_open = client.open_session()
+    try:
+        session_info_open = client.open_session()
+    except BaseException:
+        _set_log_provider_label("BrowserUse")
+        _set_cloud_provider("browser_use")
+        raise
+    lease = CloudBrowserLease(
+        client,
+        session_info_open,
+        provider_label=cloud_label,
+        keep_open=_cloud_keep_open(provider_prefix),
+        logger=logger,
+    )
     create_acknowledged = False
     openai_password: str | None = None
     browser = None
@@ -2596,13 +2604,16 @@ def run_browser_use_registration(
     )
 
     try:
-        with sync_playwright() as p:
+        with ExitStack() as stack:
+            p = stack.enter_context(sync_playwright())
+            stack.callback(lease.close)
             logger.info("[%s] 连接 CDP ...", cloud_label)
             _t_cdp = _StepTimer(f"连接 {cloud_label} CDP")
             connect_kwargs = {}
             if provider_prefix == "skyvern" and hasattr(client, "cdp_headers"):
                 connect_kwargs["headers"] = client.cdp_headers()
             browser = p.chromium.connect_over_cdp(session_info_open.connect_url, **connect_kwargs)
+            lease.attach_browser(browser)
             _t_cdp.done()
             # Browser Use 通常已有默认 context/page
             if browser.contexts:
@@ -2836,13 +2847,7 @@ def run_browser_use_registration(
                     )
                     # Codex OAuth 会创建自己的授权 session。先关闭注册阶段的 Browser Use
                     # CDP 连接，避免注册浏览器继续占用远端会话/代理资源并干扰后续 OAuth。
-                    _close_browser_use_session(browser, reason="即将执行 Codex OAuth")
-                    if provider_prefix == "skyvern" and hasattr(client, "close_browser_session") and getattr(session_info_open, "session_id", ""):
-                        try:
-                            client.close_browser_session(session_info_open.session_id)
-                            logger.info("[Skyvern] 已关闭注册 browser session：%s", session_info_open.session_id)
-                        except Exception as exc:
-                            logger.warning("[Skyvern] 关闭注册 browser session 失败：%s: %s", type(exc).__name__, str(exc)[:180])
+                    lease.close(force=True, reason="即将执行 Codex OAuth")
                     browser = None
                     context = None
                     page = None
@@ -2927,16 +2932,7 @@ def run_browser_use_registration(
             "error": f"{type(exc).__name__}: {str(exc)[:300]}",
         }
     finally:
-        # 任务结束统一关闭连接，避免云浏览器/CDP 残留占用。
-        try:
-            if browser is not None:
-                browser.close()
-        except Exception:
-            pass
-        if provider_prefix == "skyvern" and 'client' in locals() and hasattr(client, "close_browser_session") and getattr(session_info_open, "session_id", ""):
-            try:
-                client.close_browser_session(session_info_open.session_id)
-            except Exception:
-                pass
+        # ExitStack 会在 Playwright 退出前关闭 browser；这里处理连接前失败和远端 session。
+        lease.close()
         _set_log_provider_label("BrowserUse")
         _set_cloud_provider("browser_use")

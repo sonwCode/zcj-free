@@ -32,7 +32,7 @@ import pyotp
 # 协议级常量（CLIENT_ID/URL/SCOPE/OUTPUT_DIRNAME）虽然不会改，统一从 _cfg 读，
 # 这样 reload 后立即生效，不用再分两套导入。
 from config import codex as _cfg
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
 from core.humanize import delay as human_delay
 from core.stop_control import sleep as _stop_sleep
 from core.openai_auth import (
@@ -2128,7 +2128,7 @@ def _run_codex_oauth_with_driver(
 
     if driver_name == "cloak":
         from config import cloakbrowser as _cloak_cfg
-        from core.cloakbrowser_driver import build_cloak_driver
+        from core.cloakbrowser_driver import build_cloak_driver, close_cloak_driver
         from core.roxy_codex_oauth import run_roxy_codex_oauth
         browser = opened = None
         try:
@@ -2156,10 +2156,7 @@ def _run_codex_oauth_with_driver(
             raise
         finally:
             if browser is not None and not bool(getattr(_cloak_cfg, "CLOAK_KEEP_BROWSER_OPEN", False)):
-                try:
-                    browser.quit()
-                except Exception:
-                    pass
+                close_cloak_driver(browser)
 
     if driver_name != "protocol":
         raise RuntimeError(
@@ -2470,6 +2467,7 @@ def run_codex_oauth(
                 "[Codex][CPA] callback 返回 Timeout waiting for OAuth callback，重新开启第 %s/2 轮 Codex 授权：%s",
                 _cpa_reauth_round + 1, email,
             )
+            close_browser_session(session)
             return run_codex_oauth(
                 email,
                 otp_provider=otp_provider,
@@ -2496,3 +2494,5 @@ def run_codex_oauth(
             message=f"{type(exc).__name__}: {str(exc)[:200]}",
             phone_activation=phone_activation,
         )
+    finally:
+        close_browser_session(session)

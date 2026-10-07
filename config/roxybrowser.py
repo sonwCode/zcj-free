@@ -72,7 +72,7 @@ ROXY_LOCAL_ASSET_CACHE_MAX_ITEM_BYTES: int = 25 * 1024 * 1024
 # Roxy API transient 错误重试。create 接口默认不重试，避免超时后重复创建孤儿环境；open/close/delete 会重试。
 ROXY_API_RETRIES: int = 3
 ROXY_API_RETRY_DELAY: int = 2
-ROXY_CREATE_RETRIES: int = 3
+ROXY_CREATE_RETRIES: int = 1
 ROXY_CREATE_RETRY_DELAY: int = 3
 
 # 多线程注册时，所有 worker 共用的 /browser/create 请求起始间隔（秒）。
