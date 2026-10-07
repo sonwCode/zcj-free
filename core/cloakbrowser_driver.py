@@ -158,18 +158,27 @@ class CloakElement:
             self.page.keyboard.press("Backspace")
 
     def fill(self, value: str, timeout: int = 10000) -> None:
-        """Set a complete input value through the Playwright locator/handle.
+        """Set a complete value through Playwright's saved native Page.fill.
 
-        ``send_keys`` intentionally preserves Selenium's append semantics. The
-        registration flow also needs an atomic write for React-controlled fields;
-        keeping that operation separate avoids turning every key event into a
-        replacement while still allowing callers to bypass stale element handles.
+        ``send_keys`` preserves Selenium's append semantics. Cloak humanize
+        patches both Locator.fill and ElementHandle.fill, so React-controlled
+        fields use the original Page.fill retained by Cloak before patching.
         """
         _check_stop_requested()
-        target = self.locator if self.locator is not None else self.handle
-        if target is None or not hasattr(target, "fill"):
-            raise RuntimeError("Cloak 元素不支持完整值填充")
-        target.fill(str(value), timeout=timeout)
+        # Cloak humanize patches both Locator.fill and ElementHandle.fill. The
+        # original Page.fill is retained on page._original before patching.
+        originals = getattr(self.page, "_original", None)
+        raw_fill = getattr(originals, "fill", None)
+        selector = getattr(getattr(self.locator, "_impl_obj", None), "_selector", None)
+        if originals is not None:
+            if not callable(raw_fill) or not selector:
+                raise RuntimeError("Cloak 元素缺少未 patch 的 Page.fill 原始入口")
+            raw_fill(selector, str(value), timeout=timeout)
+        else:
+            target = self.locator if self.locator is not None else self.handle
+            if target is None or not hasattr(target, "fill"):
+                raise RuntimeError("Cloak 元素不支持完整值填充")
+            target.fill(str(value), timeout=timeout)
         _check_stop_requested()
 
     @property

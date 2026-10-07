@@ -1630,6 +1630,7 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
       visibleValue,
       actualVisible: phoneInput.value || '',
       hiddenValue: hiddenPhoneNumberInput ? (hiddenPhoneNumberInput.value || '') : '',
+      hasHidden:!!hiddenPhoneNumberInput,
       dialCode:expectedDialCode,
       inputName: phoneInput.getAttribute('name') || '',
       inputId: phoneInput.id || '',
@@ -1639,6 +1640,37 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
     if not result or not result.get("ok"):
         reason = "phone_country_mismatch" if (result or {}).get("error") == "phone_country_mismatch" else "phone_value_write_failed"
         raise RuntimeError(f"{reason}: 手机号写入失败 result={result} state={_phone_page_state(driver)}")
+
+    # Native setters establish the exact DOM values. Cloak then uses its saved
+    # native Page.fill so React receives the controlled input update atomically.
+    phone_input = _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=2)
+    atomic_fill = getattr(phone_input, "fill", None)
+    if callable(atomic_fill):
+        visible_value = str(result.get("visibleValue") or "")
+        try:
+            atomic_fill(visible_value, timeout=max(1000, int(timeout) * 1000))
+        except Exception as exc:
+            raise RuntimeError(
+                f"phone_react_state_sync_failed: 原子填值失败: {type(exc).__name__}: {exc}"
+            ) from exc
+        _stop_sleep(0.2)
+        input_state = driver.execute_script(r"""
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const form = document.querySelector('form[action*="/add-phone" i]')
+          || [...document.querySelectorAll('form')].find(f => /add-phone/i.test(f.getAttribute('action') || ''));
+        const phoneInput = [...(form?.querySelectorAll('input[type="tel"], input[name="__reservedForPhoneNumberInput_tel"], input[autocomplete="tel"], input[name="phone"], input[name="phone_number"]') || [])].find(visible);
+        const hidden = form?.querySelector('input[name="phoneNumber"]');
+        return {actualVisible: phoneInput?.value || '', hiddenValue: hidden?.value || '', hasHidden:!!hidden};
+        """) or {}
+        result.update({
+            "actualVisible": str(input_state.get("actualVisible") or ""),
+            "hiddenValue": str(input_state.get("hiddenValue") or ""),
+            "hasHidden": bool(input_state.get("hasHidden")),
+            "inputMethod": "native_page_fill",
+        })
+    else:
+        result["inputMethod"] = "native_setter"
+
     result.update({
         "countryMode": country.get("mode"),
         "selectedText": country.get("selectedText"),
@@ -1666,8 +1698,8 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
         raise RuntimeError(f"phone_country_mismatch: 号码前缀与国家控件不一致 result={result} state={_phone_page_state(driver)}")
     if not expected_visible_ok:
         raise RuntimeError(f"phone_value_mismatch: 手机号可见输入框校验失败 expected_digits={visible_digits or e164_digits} actual={actual} result={result} state={_phone_page_state(driver)}")
-    if hidden_value and hidden_digits != e164_digits:
-        raise RuntimeError(f"手机号隐藏字段校验失败 expected={e164} actual={hidden_value} result={result} state={_phone_page_state(driver)}")
+    if result.get("hasHidden") and hidden_digits != e164_digits:
+        raise RuntimeError(f"phone_react_state_sync_failed: 隐藏字段校验失败 expected={e164} actual={hidden_value} result={result} state={_phone_page_state(driver)}")
     return result
 
 
@@ -1928,9 +1960,9 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
     _ensure_add_phone_input(driver, reason=f"add-phone{label}")
     phone_fill = _set_phone_value(driver, e164, timeout=10)
     logger.info(
-        "[Codex][Browser] 已重新设置手机号：e164=%s visible=%s hidden=%s dialCode=%s country=%s",
+        "[Codex][Browser] 已重新设置手机号：e164=%s visible=%s hidden=%s inputMethod=%s dialCode=%s country=%s",
         phone_fill.get("e164"), phone_fill.get("actualVisible"), phone_fill.get("hiddenValue") or "-",
-        phone_fill.get("dialCode") or "-",
+        phone_fill.get("inputMethod") or "native_setter", phone_fill.get("dialCode") or "-",
         (str(phone_fill.get("selectedText") or "-") + (" [changed]" if phone_fill.get("selectedChanged") else "")),
     )
     _blur_active_input_and_wait(driver, label="手机号输入完成")
@@ -2235,6 +2267,10 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     raise RuntimeError(
                         "手机号流程进入 invalid_auth_step，说明授权状态还未从 email-verification 正常跳转或已失效；"
                         "已停止继续换号，避免继续消耗号码"
+                    ) from exc
+                if "phone_react_state_sync_failed" in err_text:
+                    raise RuntimeError(
+                        f"手机号 React 状态同步失败，已停止换号止损：{err_text[:220]}"
                     ) from exc
                 if any(k in err_text for k in (
                     "phone_country_sync_failed", "phone_country_mismatch",

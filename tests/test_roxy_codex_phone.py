@@ -258,12 +258,19 @@ class RoxyCodexPhoneTests(unittest.TestCase):
         self.assertIn('_human_click(driver, btn, label="codex_phone_continue")', source)
         self.assertIn('"method": "human_click"', source)
 
-    def test_phone_fill_does_not_overwrite_native_setter_result(self):
+    def test_phone_fill_syncs_react_through_atomic_adapter_fill(self):
         source = self._function_source("_set_phone_value")
         self.assertIn("setNativeValue(phoneInput, visibleValue, true)", source)
         self.assertIn("setNativeValue(hiddenPhoneNumberInput, e164)", source)
-        self.assertNotIn("phone_input.fill(visible_value)", source)
+        self.assertIn('atomic_fill = getattr(phone_input, "fill", None)', source)
+        self.assertIn("atomic_fill(visible_value", source)
+        self.assertIn('"inputMethod": "native_page_fill"', source)
         self.assertNotIn("_human_type_text(driver, phone_input, visible_value)", source)
+
+    def test_phone_react_sync_failure_stops_number_rotation(self):
+        source = self._function_source("_do_phone_verification_if_present")
+        self.assertIn('if "phone_react_state_sync_failed" in err_text:', source)
+        self.assertIn("手机号 React 状态同步失败，已停止换号止损", source)
 
     def test_phone_submit_waits_for_post_channel_react_state(self):
         source = self._function_source("_prepare_and_submit_add_phone")

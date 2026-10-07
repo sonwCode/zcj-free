@@ -5,10 +5,15 @@ from core.cloakbrowser_driver import CloakElement, CloakSeleniumDriver
 from core.stop_control import StopRequested
 
 
+class _LocatorImpl:
+    _selector = "input[type='tel'] >> nth=0"
+
+
 class _Locator:
     def __init__(self, value):
         self.value = value
         self.calls = []
+        self._impl_obj = _LocatorImpl()
 
     def evaluate(self, expression, arg=None, timeout=None):
         self.calls.append((expression, arg, timeout))
@@ -23,7 +28,7 @@ class _Locator:
 
     def fill(self, text, timeout=None):
         self.value = text
-        self.calls.append(("fill", text, timeout))
+        self.calls.append(("locator_fill", text, timeout))
 
 
 class _Keyboard:
@@ -34,9 +39,19 @@ class _Keyboard:
         self.presses.append(key)
 
 
+class _OriginalPageMethods:
+    def __init__(self, page):
+        self.page = page
+
+    def fill(self, selector, text, timeout=None):
+        self.page.calls.append(("raw_page_fill", selector, text, timeout))
+
+
 class _Page:
     def __init__(self):
         self.keyboard = _Keyboard()
+        self.calls = []
+        self._original = _OriginalPageMethods(self)
 
 
 class _ElementHandle:
@@ -102,13 +117,28 @@ class CloakElementCompatibilityTests(unittest.TestCase):
         self.assertEqual(locator.value, "mail@example.test")
 
     def test_fill_writes_complete_value_atomically(self):
+        page = _Page()
         locator = _Locator("partial")
-        element = CloakElement(page=_Page(), locator=locator)
+        element = CloakElement(page=page, locator=locator)
 
         element.fill("mail@example.test")
 
-        self.assertEqual(locator.value, "mail@example.test")
-        self.assertIn(("fill", "mail@example.test", 10000), locator.calls)
+        self.assertIn(
+            ("raw_page_fill", "input[type='tel'] >> nth=0", "mail@example.test", 10000),
+            page.calls,
+        )
+        self.assertNotIn(("locator_fill", "mail@example.test", 10000), locator.calls)
+
+    def test_fill_fails_without_cloak_native_hook(self):
+        page = _Page()
+        page._original = object()
+        locator = _Locator("partial")
+        element = CloakElement(page=page, locator=locator)
+
+        with self.assertRaisesRegex(RuntimeError, "Page.fill 原始入口"):
+            element.fill("mail@example.test")
+
+        self.assertNotIn(("locator_fill", "mail@example.test", 10000), locator.calls)
 
     def test_send_keys_dispatches_backspace_as_a_key(self):
         page = _Page()
