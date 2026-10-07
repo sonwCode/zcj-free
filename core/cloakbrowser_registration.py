@@ -14,7 +14,7 @@ from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import PlaywrightTrafficTracker
-from core.cloakbrowser_driver import build_cloak_driver, close_cloak_driver
+from core.cloakbrowser_driver import build_cloak_driver
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 
@@ -319,7 +319,15 @@ def _run_cloak_registration_impl(
             _bounded_cleanup("data_saver.stop", data_saver.stop)
         if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
             driver_quit = True
-            close_cloak_driver(driver)
+            try:
+                # Playwright sync objects must be closed on this same worker thread.
+                driver.quit()
+            except BaseException as exc:
+                logger.warning("[Cloak注册] 同线程关闭 driver 失败，执行进程树兜底：%s: %s", type(exc).__name__, str(exc)[:180])
+                try:
+                    driver.force_kill()
+                except Exception as kill_exc:
+                    logger.warning("[Cloak注册] 强制回收 driver 失败：%s: %s", type(kill_exc).__name__, str(kill_exc)[:180])
 
 
 def _run_in_isolated_thread(fn: Callable, *args, **kwargs):
