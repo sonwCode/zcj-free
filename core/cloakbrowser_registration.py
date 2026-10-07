@@ -27,7 +27,7 @@ from core.roxy_registration import (  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)
-
+_CLOAK_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 def _current_job_id() -> int | None:
@@ -60,22 +60,50 @@ def _clear_job_id() -> None:
         pass
 
 
-def _bounded_cleanup(label: str, callback, on_timeout=None):
-    """在 Playwright owner 线程直接完成清理。
+def _bounded_cleanup(
+    label: str,
+    callback,
+    on_timeout=None,
+    timeout_seconds: float = _CLOAK_CLEANUP_TIMEOUT_SECONDS,
+):
+    """在 Playwright owner 线程清理，并由 watchdog 解除同步 API 卡死。
 
-    同步 Playwright API 带有 greenlet 线程亲和性；把 callback 放入辅助线程
-    会在线程退出后触发 "cannot switch to a different thread"。
+    同步 Playwright API 带有 greenlet 线程亲和性；callback 仍在 owner 线程
+    执行。watchdog 只负责在超时后终止 driver，让阻塞中的 CDP 调用返回异常，
+    避免把隔离线程和外层任务永久锁在 join()。
     """
+    if on_timeout is None:
+        try:
+            return callback()
+        except BaseException as exc:
+            logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(exc).__name__, exc)
+            return None
+
+    completed = threading.Event()
+    timed_out = threading.Event()
+    timeout = max(0.5, float(timeout_seconds or _CLOAK_CLEANUP_TIMEOUT_SECONDS))
+
+    def _watchdog() -> None:
+        if completed.wait(timeout):
+            return
+        timed_out.set()
+        logger.warning("[Cloak注册] 清理 %s 超时 %.1fs，强制回收浏览器并继续任务收尾", label, timeout)
+        try:
+            on_timeout()
+        except BaseException as fallback_exc:
+            logger.debug("[Cloak注册] 清理 %s 兜底失败：%s: %s", label, type(fallback_exc).__name__, fallback_exc)
+
+    watchdog = threading.Thread(target=_watchdog, name=f"cloak-cleanup-watchdog-{label}", daemon=True)
+    watchdog.start()
     try:
         return callback()
     except BaseException as exc:
-        logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(exc).__name__, exc)
-        if on_timeout is not None:
-            try:
-                on_timeout()
-            except BaseException as fallback_exc:
-                logger.debug("[Cloak注册] 清理 %s 兜底失败：%s: %s", label, type(fallback_exc).__name__, fallback_exc)
+        if not timed_out.is_set():
+            logger.debug("[Cloak注册] 清理 %s 失败：%s: %s", label, type(exc).__name__, exc)
         return None
+    finally:
+        completed.set()
+        watchdog.join(0.05)
 
 
 def _run_cloak_registration_impl(
@@ -238,10 +266,18 @@ def _run_cloak_registration_impl(
         post_register_dwell(email, label="Cloak注册")
         if traffic_tracker is not None and not traffic_tracker_stopped:
             traffic_tracker_stopped = True
-            network_traffic = _bounded_cleanup("traffic_tracker.stop", traffic_tracker.stop)
+            network_traffic = _bounded_cleanup(
+                "traffic_tracker.stop",
+                traffic_tracker.stop,
+                on_timeout=getattr(driver, "force_kill", None),
+            )
         if data_saver is not None and not data_saver_stopped:
             data_saver_stopped = True
-            _bounded_cleanup("data_saver.stop", data_saver.stop)
+            _bounded_cleanup(
+                "data_saver.stop",
+                data_saver.stop,
+                on_timeout=getattr(driver, "force_kill", None),
+            )
         account_id = save_account_data(
             email=email,
             access_token=access_token,
@@ -306,10 +342,18 @@ def _run_cloak_registration_impl(
     finally:
         if traffic_tracker is not None and not traffic_tracker_stopped:
             traffic_tracker_stopped = True
-            _bounded_cleanup("traffic_tracker.stop", traffic_tracker.stop)
+            _bounded_cleanup(
+                "traffic_tracker.stop",
+                traffic_tracker.stop,
+                on_timeout=getattr(driver, "force_kill", None),
+            )
         if data_saver is not None and not data_saver_stopped:
             data_saver_stopped = True
-            _bounded_cleanup("data_saver.stop", data_saver.stop)
+            _bounded_cleanup(
+                "data_saver.stop",
+                data_saver.stop,
+                on_timeout=getattr(driver, "force_kill", None),
+            )
         if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
             driver_quit = True
             close_cloak_driver(driver)

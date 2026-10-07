@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import main
 from core import session as session_mod
+from core import cloakbrowser_registration as cloak_registration
 from core.browser_use_client import BrowserUseClient
 from core.cloakbrowser_driver import CloakSeleniumDriver, build_cloak_driver
 from core.cloud_browser_lifecycle import CloudBrowserLease
@@ -64,6 +65,28 @@ class _Response:
 class DriverLifecycleTests(unittest.TestCase):
     def setUp(self):
         _ProtocolSession.created = []
+
+    def test_cloak_cleanup_watchdog_unblocks_stuck_callback(self):
+        release = threading.Event()
+        timed_out = threading.Event()
+
+        def callback():
+            release.wait(1.0)
+            return "released"
+
+        def force_kill():
+            timed_out.set()
+            release.set()
+
+        result = cloak_registration._bounded_cleanup(
+            "traffic_tracker.stop",
+            callback,
+            on_timeout=force_kill,
+            timeout_seconds=0.01,
+        )
+
+        self.assertEqual(result, "released")
+        self.assertTrue(timed_out.is_set())
 
     def test_protocol_registration_closes_session_after_error(self):
         with patch.object(main._roxy_cfg, "REGISTRATION_DRIVER", "protocol"), \
