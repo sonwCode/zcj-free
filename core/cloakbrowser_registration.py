@@ -14,7 +14,7 @@ from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import PlaywrightTrafficTracker
-from core.cloakbrowser_driver import build_cloak_driver, close_cloak_driver
+from core.cloakbrowser_driver import build_cloak_driver
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 
@@ -28,6 +28,25 @@ from core.roxy_registration import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 _CLOAK_CLEANUP_TIMEOUT_SECONDS = 5.0
+_ACTIVE_CLOAK_DRIVERS_LOCK = threading.RLock()
+_ACTIVE_CLOAK_DRIVERS: dict[int, object] = {}
+
+
+def _register_active_cloak_driver(driver) -> None:
+    with _ACTIVE_CLOAK_DRIVERS_LOCK:
+        _ACTIVE_CLOAK_DRIVERS[threading.get_ident()] = driver
+
+
+def _unregister_active_cloak_driver() -> None:
+    with _ACTIVE_CLOAK_DRIVERS_LOCK:
+        _ACTIVE_CLOAK_DRIVERS.pop(threading.get_ident(), None)
+
+
+def _active_cloak_driver(thread_id: int | None):
+    if thread_id is None:
+        return None
+    with _ACTIVE_CLOAK_DRIVERS_LOCK:
+        return _ACTIVE_CLOAK_DRIVERS.get(thread_id)
 
 
 def _current_job_id() -> int | None:
@@ -131,6 +150,7 @@ def _run_cloak_registration_impl(
     hard_cleanup = False
     try:
         driver, opened = build_cloak_driver(proxy=proxy)
+        _register_active_cloak_driver(driver)
         try:
             traffic_tracker = PlaywrightTrafficTracker(driver.context, label="Cloak")
         except Exception as exc:
@@ -280,18 +300,13 @@ def _run_cloak_registration_impl(
         post_register_dwell(email, label="Cloak注册")
         if traffic_tracker is not None and not traffic_tracker_stopped:
             traffic_tracker_stopped = True
-            network_traffic = _bounded_cleanup(
-                "traffic_tracker.stop",
-                traffic_tracker.stop,
-                on_timeout=getattr(driver, "force_kill", None),
-            )
+            try:
+                network_traffic = traffic_tracker.snapshot_without_browser()
+            except Exception as exc:
+                logger.warning("[Cloak注册] 非阻塞流量快照失败：%s: %s", type(exc).__name__, str(exc)[:180])
+                network_traffic = None
         if data_saver is not None and not data_saver_stopped:
             data_saver_stopped = True
-            _bounded_cleanup(
-                "data_saver.stop",
-                data_saver.stop,
-                on_timeout=getattr(driver, "force_kill", None),
-            )
         account_id = save_account_data(
             email=email,
             access_token=access_token,
@@ -355,6 +370,7 @@ def _run_cloak_registration_impl(
             "error": f"{type(exc).__name__}: {str(exc)[:300]}",
         }
     finally:
+        _unregister_active_cloak_driver()
         if hard_cleanup:
             # 失败时 Playwright pipe 可能已经断开；跳过 tracker/data-saver/quit，
             # 直接杀掉 driver 进程树，避免异常任务在收尾阶段再次阻塞。
@@ -366,23 +382,14 @@ def _run_cloak_registration_impl(
                 except BaseException as exc:
                     logger.debug("[Cloak注册] 失败路径硬回收浏览器失败：%s: %s", type(exc).__name__, exc)
         else:
-            if traffic_tracker is not None and not traffic_tracker_stopped:
-                traffic_tracker_stopped = True
-                _bounded_cleanup(
-                    "traffic_tracker.stop",
-                    traffic_tracker.stop,
-                    on_timeout=getattr(driver, "force_kill", None),
-                )
-            if data_saver is not None and not data_saver_stopped:
-                data_saver_stopped = True
-                _bounded_cleanup(
-                    "data_saver.stop",
-                    data_saver.stop,
-                    on_timeout=getattr(driver, "force_kill", None),
-                )
-            if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
+            # 成功路径统计已完成，直接硬回收浏览器，避免再次触碰可能阻塞的 Playwright API。
+            if driver and not driver_quit:
                 driver_quit = True
-                close_cloak_driver(driver)
+                try:
+                    logger.info("[Cloak注册] 成功路径硬回收浏览器，跳过可能阻塞的 tracker/context stop")
+                    driver.force_kill()
+                except BaseException as exc:
+                    logger.debug("[Cloak注册] 成功路径硬回收浏览器失败：%s: %s", type(exc).__name__, exc)
 
 
 def _run_in_isolated_thread(fn: Callable, *args, **kwargs):

@@ -715,6 +715,14 @@ class _TrafficAccumulator:
                 self._final_snapshot = self._build_snapshot()
             return dict(self._final_snapshot)
 
+    def snapshot_without_browser(self) -> dict[str, Any]:
+        """Finalize the in-memory snapshot without calling browser/CDP APIs."""
+        with self._lock:
+            self._stopped = True
+        snapshot = self._finish_snapshot()
+        self._log_snapshot(snapshot)
+        return snapshot
+
     def _log_snapshot(self, snapshot: dict[str, Any]) -> None:
         if self._reported:
             return
