@@ -1,6 +1,8 @@
 import ast
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 
 ROOT = Path(__file__).parents[1]
@@ -15,10 +17,32 @@ def source(path, name):
     return ast.get_source_segment(text, node) or ""
 
 
+def load_email_flow(stubs):
+    text = CODEX.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_fill_email_and_otp")
+    namespace = {
+        "time": time,
+        "logger": Mock(),
+        "human_delay": Mock(),
+        "_maybe_accept": Mock(),
+        "_type_email_address": Mock(),
+        "_submit_email_step": Mock(),
+        "_fill_login_password_if_present": Mock(return_value=None),
+        "_is_login_password_page": lambda driver: False,
+        "_is_email_verification_page": lambda driver: False,
+        "_is_mfa_challenge_page": lambda driver: False,
+        "_fill_mfa_challenge_if_present": Mock(),
+    }
+    namespace.update(stubs)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(CODEX), "exec"), namespace)
+    return namespace["_fill_email_and_otp"], namespace
+
+
 class ReferenceAuthContractTests(unittest.TestCase):
     def test_reference_codex_auth_flow_order(self):
         body = source(CODEX, "_fill_email_and_otp")
-        self.assertLess(body.index("_submit_email_step(driver)"), body.index("_fill_login_password_if_present(driver, email, timeout=18)"))
+        self.assertLess(body.index("_submit_email_step(driver)"), body.index("_fill_login_password_if_present("))
         self.assertIn("_maybe_click_passwordless_after_email", body)
         self.assertIn("_wait_for_fresh_email_otp", body)
 
@@ -35,6 +59,61 @@ class ReferenceAuthContractTests(unittest.TestCase):
         self.assertIn("_REGISTRATION_PASSWORD_CACHE", text)
         self.assertIn("db.get_pool_password(email)", text)
         self.assertIn("remember_registration_password", text)
+
+    def test_email_submit_race_on_password_page_retries_password_step(self):
+        submit = Mock(side_effect=RuntimeError("email_submit_stalled: still at login page"))
+        password = Mock(return_value="next_step")
+        flow, _ = load_email_flow({
+            "_submit_email_step": submit,
+            "_fill_login_password_if_present": password,
+            "_is_login_password_page": lambda driver: True,
+        })
+
+        class Driver:
+            current_url = "https://auth.openai.com/log-in/password"
+
+            def get(self, url):
+                self.current_url = url
+
+        driver = Driver()
+        flow(driver, "user@example.test", Mock(), "https://auth.openai.com/oauth/authorize", registration_password="secret")
+
+        password.assert_called_once_with(
+            driver,
+            "user@example.test",
+            timeout=18,
+            registration_password="secret",
+        )
+
+    def test_email_submit_error_on_otp_page_continues_otp_flow(self):
+        submit = Mock(side_effect=RuntimeError("email_submit_stalled: delayed navigation"))
+        wait_for_code = Mock(return_value="123456")
+        wait_after_submit = Mock(return_value="accepted")
+        flow, _ = load_email_flow({
+            "_submit_email_step": submit,
+            "_is_login_password_page": lambda driver: False,
+            "_is_email_verification_page": lambda driver: True,
+            "_wait_for_fresh_email_otp": wait_for_code,
+            "_wait_for_otp_input": Mock(),
+            "_clear_otp_inputs": Mock(),
+            "_install_email_otp_validate_hook": Mock(),
+            "_email_otp_validate_snapshot": Mock(return_value={"count": 0}),
+            "_type_otp": Mock(),
+            "_wait_for_codex_auto_submit": Mock(return_value=True),
+            "_wait_after_email_otp_submit": wait_after_submit,
+        })
+
+        class Driver:
+            current_url = "https://auth.openai.com/email-verification"
+
+            def get(self, url):
+                self.current_url = url
+
+        driver = Driver()
+        flow(driver, "user@example.test", Mock(), "https://auth.openai.com/oauth/authorize")
+
+        wait_for_code.assert_called_once()
+        wait_after_submit.assert_called_once_with(driver, timeout=45)
 
     def test_registration_and_sms_modules_remain_present(self):
         self.assertTrue(REG.exists())

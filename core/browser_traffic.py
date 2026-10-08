@@ -623,8 +623,42 @@ class _TrafficAccumulator:
             len(details),
             json.dumps(dict(sorted(type_totals.items())), ensure_ascii=False, separators=(",", ":")),
         )
+        # 资源明细保留逐请求统计，但日志按稳定资源签名合并显示；
+        # 这样同一页面反复加载的相同脚本不会淹没真正的异常记录。
+        grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+        byte_fields = (
+            "upload_bytes",
+            "download_bytes",
+            "response_body_bytes",
+            "response_header_bytes",
+            "websocket_payload_upload_bytes",
+            "websocket_payload_download_bytes",
+        )
+        for item in details:
+            key = (
+                item.get("type"),
+                item.get("method"),
+                item.get("status"),
+                item.get("url"),
+                bool(item.get("failed")),
+                bool(item.get("blocked")),
+                bool(item.get("unfinished")),
+                item.get("cache_status", "unknown"),
+                item.get("mime_type", ""),
+            )
+            group = grouped.get(key)
+            if group is None:
+                group = dict(item)
+                group["occurrences"] = 0
+                for field in byte_fields:
+                    group[field] = 0
+                grouped[key] = group
+            group["occurrences"] += 1
+            for field in byte_fields:
+                group[field] = int(group.get(field, 0) or 0) + int(item.get(field, 0) or 0)
+
         ranked = sorted(
-            details,
+            grouped.values(),
             key=lambda item: (
                 int(item["download_bytes"]) + int(item["upload_bytes"]),
                 int(item["download_bytes"]),
@@ -632,18 +666,20 @@ class _TrafficAccumulator:
             reverse=True,
         )[: self._detail_log_max_entries]
         logger.info(
-            "[%s] 浏览器资源明细开始：按单请求总字节降序，输出 %s/%s 条（URL 查询值已脱敏）",
+            "[%s] 浏览器资源明细开始：按资源签名合并、按总字节降序，输出 %s/%s 组（原始记录 %s，URL 查询值已脱敏）",
             self.label,
             len(ranked),
+            len(grouped),
             len(details),
         )
         for index, item in enumerate(ranked, 1):
             logger.info(
-                "[%s] [资源明细] #%s %s %s status=%s upload=%sB download=%sB "
+                "[%s] [资源明细] #%s count=%s %s %s status=%s upload=%sB download=%sB "
                 "body=%sB headers=%sB failed=%s blocked=%s unfinished=%s cache=%s "
                 "mime=%s ws_upload=%sB ws_download=%sB url=%s",
                 self.label,
                 index,
+                item.get("occurrences", 1),
                 item["type"],
                 item["method"],
                 item["status"] if item["status"] is not None else "-",

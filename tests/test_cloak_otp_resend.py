@@ -57,6 +57,14 @@ class CloakOtpResendTests(unittest.TestCase):
         self.assertIn("点击“重新发送电子邮件”后继续等待", body)
         self.assertNotIn("重新提交邮箱触发 OTP", body)
 
+    def test_success_path_uses_bounded_graceful_close(self):
+        body = _function_source("_run_cloak_registration_impl")
+        self.assertIn("close_cloak_driver(driver, timeout_seconds=_CLOAK_CLEANUP_TIMEOUT_SECONDS)", body)
+        self.assertIn("成功路径开始有界优雅关闭浏览器", body)
+        self.assertLess(body.index("close_cloak_driver(driver"), body.index("snapshot_without_browser()"))
+        self.assertLess(body.index("snapshot_without_browser()"), body.index("account_id = save_account_data("))
+        self.assertIn("if hard_cleanup:", body)
+
 
 if __name__ == "__main__":
     unittest.main()

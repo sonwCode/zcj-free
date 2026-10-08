@@ -416,6 +416,30 @@ class BrowserTrafficTests(unittest.TestCase):
         self.assertNotIn("do-not-log", line)
         self.assertEqual(result["detail_recorded_count"], 1)
 
+    def test_playwright_groups_duplicate_resource_log_lines_without_changing_totals(self):
+        context = _Emitter()
+        context.pages = []
+        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True):
+            tracker = PlaywrightTrafficTracker(context, label="duplicate")
+            first = _DetailedRequest()
+            second = _DetailedRequest()
+            context.emit("request", first)
+            context.emit("requestfinished", first)
+            context.emit("request", second)
+            context.emit("requestfinished", second)
+            # The two distinct request objects represent two identical resource loads.
+            with self.assertLogs("core.browser_traffic", level="INFO") as captured:
+                result = tracker.stop()
+
+        detail_lines = [line for line in captured.output if "[资源明细]" in line]
+        self.assertEqual(len(detail_lines), 1)
+        self.assertIn("count=2", detail_lines[0])
+        self.assertEqual(result["request_count"], 2)
+        self.assertEqual(result["completed_request_count"], 2)
+        self.assertEqual(result["detail_recorded_count"], 2)
+        self.assertEqual(result["http_upload_bytes"], 24)
+        self.assertEqual(result["http_download_bytes"], 56)
+
     def test_playwright_requestfailed_does_not_reenter_sync_api(self):
         context = _Emitter()
         context.pages = []

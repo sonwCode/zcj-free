@@ -14,7 +14,7 @@ from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import PlaywrightTrafficTracker
-from core.cloakbrowser_driver import build_cloak_driver
+from core.cloakbrowser_driver import build_cloak_driver, close_cloak_driver
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 
@@ -287,8 +287,20 @@ def _run_cloak_registration_impl(
         except Exception as exc:
             codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
 
-        # 统计注册浏览器关闭前的完整会话；注册后停留期间的网络请求也计入。
+        # 让 OAuth 收尾请求完成；浏览器关闭有 5 秒 watchdog，超时仍会强制回收。
         post_register_dwell(email, label="Cloak注册")
+        if driver and not driver_quit:
+            driver_quit = True
+            logger.info("[Cloak注册] 成功路径开始有界优雅关闭浏览器")
+            try:
+                if not close_cloak_driver(driver, timeout_seconds=_CLOAK_CLEANUP_TIMEOUT_SECONDS):
+                    logger.warning("[Cloak注册] 优雅关闭未在时限内完成，浏览器已强制回收")
+            except Exception as exc:
+                logger.warning("[Cloak注册] 有界优雅关闭异常，改为强制回收：%s: %s", type(exc).__name__, str(exc)[:180])
+                try:
+                    driver.force_kill()
+                except Exception as kill_exc:
+                    logger.debug("[Cloak注册] 强制回收浏览器失败：%s: %s", type(kill_exc).__name__, str(kill_exc)[:180])
         if traffic_tracker is not None and not traffic_tracker_stopped:
             traffic_tracker_stopped = True
             try:

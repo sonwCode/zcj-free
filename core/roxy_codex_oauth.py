@@ -568,20 +568,37 @@ def _fill_email_and_otp(
         pw_result = _fill_login_password_if_present(
             driver, email, timeout=18, registration_password=registration_password
         )
-        if pw_result == "next_step":
-            if _is_mfa_challenge_page(driver):
-                _fill_mfa_challenge_if_present(driver, email, timeout=15)
-            logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
-            return
-        if pw_result == "email_otp":
-            logger.info("[Codex][Browser] 密码登录后仍进入邮箱 OTP 页面")
-        else:
-            _maybe_click_passwordless_after_email(driver, email, timeout=18)
     except Exception as exc:
-        if "codex_password_step_stalled" in str(exc):
+        message = str(exc)
+        if "codex_password_step_stalled" in message:
             raise
-        logger.info("[Codex][Browser] 未检测到邮箱输入框，可能已登录或进入下一步：%s", str(exc)[:120])
+        if "email_submit_stalled" in message and _is_login_password_page(driver):
+            logger.warning(
+                "[Codex][Browser] 邮箱提交等待结束时已到达登录密码页，继续处理密码步骤：%s",
+                message[:180],
+            )
+            pw_result = _fill_login_password_if_present(
+                driver, email, timeout=18, registration_password=registration_password
+            )
+        elif _is_email_verification_page(driver):
+            logger.info(
+                "[Codex][Browser] 邮箱提交阶段报告异常，但页面已到达邮箱 OTP，继续验证码流程：%s",
+                message[:160],
+            )
+            pw_result = "email_otp"
+        else:
+            logger.info("[Codex][Browser] 未检测到邮箱输入框，可能已登录或进入下一步：%s", message[:120])
+            return
+
+    if pw_result == "next_step":
+        if _is_mfa_challenge_page(driver):
+            _fill_mfa_challenge_if_present(driver, email, timeout=15)
+        logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
         return
+    if pw_result == "email_otp":
+        logger.info("[Codex][Browser] 密码登录后仍进入邮箱 OTP 页面")
+    else:
+        _maybe_click_passwordless_after_email(driver, email, timeout=18)
 
     # 提交邮箱后不再执行任何全局“继续/授权/分支”兜底点击；后续只等待验证码页。
     # 避免页面已进入 OAuth consent 时误点授权按钮。
