@@ -22,7 +22,7 @@ class CloakOtpResendTests(unittest.TestCase):
     def test_both_retry_branches_click_resend(self):
         body = _function_source("_run_cloak_registration_impl")
         otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
-        self.assertEqual(otp_loop.count("_click_resend_email_otp(driver, timeout=25)"), 3)
+        self.assertEqual(otp_loop.count("_click_resend_email_otp(driver, timeout=25)"), 2)
 
     def test_otp_loop_never_restarts_login_flow(self):
         body = _function_source("_run_cloak_registration_impl")
@@ -40,8 +40,6 @@ class CloakOtpResendTests(unittest.TestCase):
         otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
         self.assertIn("used_otps: set[str] = set()", otp_loop)
         self.assertIn("exclude_codes=used_otps", otp_loop)
-        self.assertIn("current_otp in used_otps", otp_loop)
-        self.assertIn("取到已提交的旧验证码", otp_loop)
         self.assertNotIn("max_wait=30 if used_otps else None", otp_loop)
 
     def test_failed_registration_skips_broken_pipe_cleanup(self):
