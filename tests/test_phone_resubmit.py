@@ -34,6 +34,13 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn("after_ts=0.0, max_wait=15, poll_interval=3", source)
         self.assertIn("_wait_after_email_otp_submit(driver, timeout=30)", source)
 
+    def test_cloak_isolated_worker_timeout_returns_terminal_result(self):
+        source = (ROOT / "core" / "cloakbrowser_registration.py").read_text(encoding="utf-8")
+        self.assertIn("thread.join(timeout)", source)
+        self.assertIn('"error_code": "cloak_worker_join_timeout"', source)
+        self.assertIn('"task_status": "failed"', source)
+        self.assertIn("threading.Thread(target=_target, name=parent_thread_name, daemon=True)", source)
+
     def test_same_activation_resubmit_helper_is_removed(self):
         self.assertNotIn("_is_repeatable_phone_submit_error", TEXT)
         self.assertNotIn("submit_rounds", TEXT)

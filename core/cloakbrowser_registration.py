@@ -371,7 +371,7 @@ def _run_cloak_registration_impl(
 
 
 def _run_in_isolated_thread(fn: Callable, *args, **kwargs):
-    """在没有外部 asyncio loop 的独立线程运行同步 Playwright 流程。"""
+    """在独立线程运行同步 Playwright，并限制线程收尾等待时间。"""
     result_box: dict[str, object] = {}
     error_box: dict[str, BaseException] = {}
     parent_thread_name = threading.current_thread().name
@@ -389,9 +389,23 @@ def _run_in_isolated_thread(fn: Callable, *args, **kwargs):
             if job_id is not None:
                 _clear_job_id()
 
-    thread = threading.Thread(target=_target, name=parent_thread_name, daemon=False)
+    thread = threading.Thread(target=_target, name=parent_thread_name, daemon=True)
     thread.start()
-    thread.join()
+    timeout = max(30.0, float(getattr(_cfg, "CLOAK_WORKER_JOIN_TIMEOUT", 240.0) or 240.0))
+    thread.join(timeout)
+    if thread.is_alive():
+        logger.error("[Cloak注册] 隔离线程收尾超时 %.1fs，返回失败结果避免任务永久 running", timeout)
+        return {
+            "success": False,
+            "task_status": "failed",
+            "account_status": "failed",
+            "codex_status": "failed",
+            "phase": "cleanup",
+            "error_code": "cloak_worker_join_timeout",
+            "retryable": True,
+            "email": kwargs.get("email"),
+            "error": f"Cloak 隔离线程收尾超时（{timeout:.1f}s）",
+        }
     if "error" in error_box:
         raise error_box["error"]
     return result_box.get("value")
