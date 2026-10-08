@@ -277,6 +277,10 @@ def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 18)
         except Exception as exc:
             logger.debug("[Codex][Browser] 密码页一次性验证码入口探测失败：%s", str(exc)[:140])
         time.sleep(0.5)
+    if _is_login_password_page(driver):
+        raise RuntimeError(
+            "codex_password_step_stalled: 邮箱提交后仍停留 /log-in/password，未能进入密码提交或邮箱 OTP 页面"
+        )
     if clicked:
         logger.info("[Codex][Browser] 已点击一次性验证码入口，未立即检测到 OTP 页，继续后续 OTP 轮询")
 
@@ -458,9 +462,14 @@ def _human_type_password_by_selector(driver, password: str) -> None:
     raise RuntimeError("missing_password_input: 登录密码页未找到可输入的密码框")
 
 
-def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> str | None:
-    """Codex OAuth 若账号有密码，优先在登录密码页输入密码。返回 next_step / email_otp / None。"""
-    password = _account_password_for_email(email)
+def _fill_login_password_if_present(
+    driver,
+    email: str,
+    timeout: int = 18,
+    registration_password: str | None = None,
+) -> str | None:
+    """Codex OAuth 登录密码页优先使用本次注册密码，再回退账号存储。"""
+    password = str(registration_password or "").strip() or _account_password_for_email(email)
     if not password:
         return None
     end = time.time() + timeout
@@ -533,7 +542,13 @@ def _wait_for_codex_auth_entry_state(driver, timeout: int = 12) -> str:
     return "unknown"
 
 
-def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None:
+def _fill_email_and_otp(
+    driver,
+    email: str,
+    otp_provider,
+    auth_url: str,
+    registration_password: str | None = None,
+) -> None:
     otp_after_ts = time.time()
     logger.info("[Codex][Browser] 打开授权地址")
     logger.info("[Codex][Browser] 完整授权地址: %s", auth_url)
@@ -550,7 +565,9 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         human_delay("form")
         _submit_email_step(driver)
         logger.info("[Codex][Browser] 已提交邮箱，等待邮箱 OTP 页面")
-        pw_result = _fill_login_password_if_present(driver, email, timeout=18)
+        pw_result = _fill_login_password_if_present(
+            driver, email, timeout=18, registration_password=registration_password
+        )
         if pw_result == "next_step":
             if _is_mfa_challenge_page(driver):
                 _fill_mfa_challenge_if_present(driver, email, timeout=15)
@@ -561,6 +578,8 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         else:
             _maybe_click_passwordless_after_email(driver, email, timeout=18)
     except Exception as exc:
+        if "codex_password_step_stalled" in str(exc):
+            raise
         logger.info("[Codex][Browser] 未检测到邮箱输入框，可能已登录或进入下一步：%s", str(exc)[:120])
         return
 
@@ -583,7 +602,9 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             human_delay("form")
             _submit_email_step(driver)
             logger.info("[Codex][Browser] 已重新提交邮箱触发 OTP")
-            pw_result = _fill_login_password_if_present(driver, email, timeout=12)
+            pw_result = _fill_login_password_if_present(
+                driver, email, timeout=12, registration_password=registration_password
+            )
             if pw_result == "next_step":
                 if _is_mfa_challenge_page(driver):
                     _fill_mfa_challenge_if_present(driver, email, timeout=15)
@@ -2697,7 +2718,9 @@ def _run_roxy_codex_oauth_once(
         if reuse_existing_profile and clear_existing_state:
             clear_roxy_browser_auth_state(driver)
 
-        _fill_email_and_otp(driver, email, otp_provider, auth_url)
+        _fill_email_and_otp(
+            driver, email, otp_provider, auth_url, registration_password=registration_password
+        )
         human_delay("api")
         logger.info("[Codex][Browser] 检查是否需要手机号验证")
         current_phone_activation = _do_phone_verification_if_present(driver) or {}

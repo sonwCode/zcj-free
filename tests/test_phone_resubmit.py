@@ -41,6 +41,12 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn('"task_status": "failed"', source)
         self.assertIn("threading.Thread(target=_target, name=parent_thread_name, daemon=True)", source)
 
+    def test_codex_password_uses_registration_password_and_fails_fast(self):
+        self.assertIn("registration_password: str | None = None", TEXT)
+        self.assertIn("registration_password=registration_password", TEXT)
+        self.assertIn("codex_password_step_stalled", TEXT)
+        self.assertIn("if \"codex_password_step_stalled\" in str(exc):", TEXT)
+
     def test_same_activation_resubmit_helper_is_removed(self):
         self.assertNotIn("_is_repeatable_phone_submit_error", TEXT)
         self.assertNotIn("submit_rounds", TEXT)
