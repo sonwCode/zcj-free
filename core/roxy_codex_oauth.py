@@ -1301,20 +1301,10 @@ def _select_sms_channel_or_raise(driver) -> None:
         try:
             _human_click(driver, target, label="codex_sms_channel")
         except Exception as click_exc:
-            logger.debug("[Codex][Browser] SMS 真实控件点击失败，继续 native 状态更新：%s", str(click_exc)[:160])
-        selected = driver.execute_script(r"""
-        const radios = [...document.querySelectorAll('input[type=radio]')];
-        const sms = radios.find(el => /^(sms|text|text_message|text-message)$/i.test(el.value || ''));
-        if (!sms) return false;
-        if (!sms.checked) sms.click();
-        sms.dispatchEvent(new Event('input', {bubbles:true}));
-        sms.dispatchEvent(new Event('change', {bubbles:true}));
-        return !!sms.checked;
-        """)
-        if not selected:
-            logger.warning("[Codex][Browser] SMS 通道状态更新失败")
+            logger.warning("[Codex][Browser] SMS 真实控件点击失败：%s", str(click_exc)[:160])
             continue
-        _stop_sleep(0.5)
+        # 只读取真实点击后的 React 状态，不再用 JS click/input/change 二次改写。
+        _stop_sleep(0.8)
         last_state = _phone_page_state(driver)
         last_radios = last_state.get("radios") or []
         sms_checked = any(
@@ -2532,7 +2522,7 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     "暂无可用号码", "没有可用号码", "insufficient", "not enough balance",
                 )):
                     raise RuntimeError(
-                        f"接码平台余额不足或无可用号码，已停止换号止损：{err_text[:180]}"
+                        f"接码平台余额不足或无可用号码，已停止换号：{err_text[:180]}"
                     ) from exc
                 if "invalid_auth_step" in str(exc):
                     raise RuntimeError(
@@ -2543,9 +2533,10 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     "phone_react_state_sync_failed", "phone_otp_input_sync_failed",
                     "whatsapp_channel_reverted",
                 )):
-                    raise RuntimeError(
-                        f"手机号 React/OTP/SMS 状态同步失败，已停止换号止损：{err_text[:220]}"
-                    ) from exc
+                    logger.info(
+                        "[Codex][Browser] 页面状态同步失败，已释放当前号码并按设置继续换号：attempt=%s/%s reason=%s",
+                        attempt, max_retries, err_text[:180],
+                    )
                 if any(k in err_text for k in (
                     "phone_country_sync_failed", "phone_country_mismatch",
                     "phone_value_write_failed", "phone_value_mismatch", "phone_number_required",

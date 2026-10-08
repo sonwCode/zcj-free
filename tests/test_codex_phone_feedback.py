@@ -116,6 +116,7 @@ def _load_phone_function(provider, responses, max_retries=1):
         "BrowserSession": object,
         "sms_provider": provider,
         "_sms_provider_name": lambda: "fixture",
+        "_mask_phone_for_log": lambda value: "****1111",
         "_sleep_before_phone_retry": lambda *args, **kwargs: None,
         "_post_json": post_json,
         "_response_text": lambda response: response.text,
