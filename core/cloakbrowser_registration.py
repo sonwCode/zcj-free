@@ -128,6 +128,7 @@ def _run_cloak_registration_impl(
     traffic_tracker_stopped = False
     data_saver_stopped = False
     driver_quit = False
+    hard_cleanup = False
     try:
         driver, opened = build_cloak_driver(proxy=proxy)
         try:
@@ -170,12 +171,18 @@ def _run_cloak_registration_impl(
         _check_manual_stop()
 
         current_otp = otp_code
+        used_otps: set[str] = set()
         max_otp_attempts = 3
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
                 try:
-                    current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                    current_otp = wait_for_otp(
+                        email,
+                        after_ts=otp_after_ts,
+                        max_wait=30 if used_otps else None,
+                        exclude_codes=used_otps,
+                    )
                 except Exception as exc:
                     if otp_attempt >= max_otp_attempts:
                         raise
@@ -191,6 +198,19 @@ def _run_cloak_registration_impl(
                     human_delay("api")
                     current_otp = None
                     continue
+            current_otp = str(current_otp or "").strip()
+            if not current_otp:
+                raise RuntimeError("邮箱验证码为空")
+            if current_otp in used_otps:
+                if otp_attempt >= max_otp_attempts:
+                    raise RuntimeError("邮箱验证码重复，已达到最大重试次数")
+                logger.warning("[Cloak注册][OTP] 取到已提交的旧验证码，跳过提交并重新发送：%s", current_otp)
+                otp_after_ts = time.time()
+                _click_resend_email_otp(driver, timeout=25)
+                human_delay("api")
+                current_otp = None
+                continue
+            used_otps.add(current_otp)
             logger.info("[Cloak注册][OTP] 收到验证码：%s", current_otp)
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
@@ -309,6 +329,7 @@ def _run_cloak_registration_impl(
             "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
         }
     except Exception as exc:
+        hard_cleanup = True
         logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)
         try:
@@ -335,23 +356,34 @@ def _run_cloak_registration_impl(
             "error": f"{type(exc).__name__}: {str(exc)[:300]}",
         }
     finally:
-        if traffic_tracker is not None and not traffic_tracker_stopped:
-            traffic_tracker_stopped = True
-            _bounded_cleanup(
-                "traffic_tracker.stop",
-                traffic_tracker.stop,
-                on_timeout=getattr(driver, "force_kill", None),
-            )
-        if data_saver is not None and not data_saver_stopped:
-            data_saver_stopped = True
-            _bounded_cleanup(
-                "data_saver.stop",
-                data_saver.stop,
-                on_timeout=getattr(driver, "force_kill", None),
-            )
-        if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
-            driver_quit = True
-            close_cloak_driver(driver)
+        if hard_cleanup:
+            # 失败时 Playwright pipe 可能已经断开；跳过 tracker/data-saver/quit，
+            # 直接杀掉 driver 进程树，避免异常任务在收尾阶段再次阻塞。
+            if driver and not driver_quit:
+                driver_quit = True
+                try:
+                    logger.info("[Cloak注册] 失败路径硬回收浏览器，跳过断开 pipe 的优雅清理")
+                    driver.force_kill()
+                except BaseException as exc:
+                    logger.debug("[Cloak注册] 失败路径硬回收浏览器失败：%s: %s", type(exc).__name__, exc)
+        else:
+            if traffic_tracker is not None and not traffic_tracker_stopped:
+                traffic_tracker_stopped = True
+                _bounded_cleanup(
+                    "traffic_tracker.stop",
+                    traffic_tracker.stop,
+                    on_timeout=getattr(driver, "force_kill", None),
+                )
+            if data_saver is not None and not data_saver_stopped:
+                data_saver_stopped = True
+                _bounded_cleanup(
+                    "data_saver.stop",
+                    data_saver.stop,
+                    on_timeout=getattr(driver, "force_kill", None),
+                )
+            if driver and not driver_quit and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
+                driver_quit = True
+                close_cloak_driver(driver)
 
 
 def _run_in_isolated_thread(fn: Callable, *args, **kwargs):

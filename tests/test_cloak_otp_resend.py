@@ -22,7 +22,7 @@ class CloakOtpResendTests(unittest.TestCase):
     def test_both_retry_branches_click_resend(self):
         body = _function_source("_run_cloak_registration_impl")
         otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
-        self.assertEqual(otp_loop.count("_click_resend_email_otp(driver, timeout=25)"), 2)
+        self.assertEqual(otp_loop.count("_click_resend_email_otp(driver, timeout=25)"), 3)
 
     def test_otp_loop_never_restarts_login_flow(self):
         body = _function_source("_run_cloak_registration_impl")
@@ -34,14 +34,25 @@ class CloakOtpResendTests(unittest.TestCase):
     def test_obsolete_restart_helper_is_removed(self):
         self.assertNotIn("def _restart_cloak_email_otp", TEXT)
 
-    def test_same_value_from_new_mail_is_allowed(self):
-        """OpenAI resend 可能发送新邮件但沿用同一个六码；只按 after_ts 判断新旧。"""
+    def test_repeated_otp_is_excluded_before_retry(self):
+        """Remail 可能在 resend 后短暂返回旧邮件，旧码不能再次提交。"""
         body = _function_source("_run_cloak_registration_impl")
         otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
-        self.assertIn("wait_for_otp(email, after_ts=otp_after_ts)", otp_loop)
-        self.assertNotIn("used_otps", otp_loop)
-        self.assertNotIn("exclude_codes=", otp_loop)
-        self.assertNotIn("取码接口仍返回已提交的旧验证码", otp_loop)
+        self.assertIn("used_otps: set[str] = set()", otp_loop)
+        self.assertIn("exclude_codes=used_otps", otp_loop)
+        self.assertIn("current_otp in used_otps", otp_loop)
+        self.assertIn("取到已提交的旧验证码", otp_loop)
+        self.assertIn("max_wait=30 if used_otps else None", otp_loop)
+
+    def test_failed_registration_skips_broken_pipe_cleanup(self):
+        body = _function_source("_run_cloak_registration_impl")
+        self.assertIn("hard_cleanup = True", body)
+        self.assertIn("if hard_cleanup:", body)
+        hard_branch = body[body.index("if hard_cleanup:"):body.index("else:", body.index("if hard_cleanup:"))]
+        self.assertIn("driver.force_kill()", hard_branch)
+        self.assertNotIn("traffic_tracker.stop", hard_branch)
+        self.assertNotIn("data_saver.stop", hard_branch)
+        self.assertNotIn("close_cloak_driver(driver)", hard_branch)
 
     def test_log_describes_actual_resend_action(self):
         body = _function_source("_run_cloak_registration_impl")

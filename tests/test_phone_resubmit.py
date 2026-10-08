@@ -31,7 +31,9 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
     def test_cloak_email_otp_matches_reference_retry_contract(self):
         source = (ROOT / "core" / "cloakbrowser_registration.py").read_text(encoding="utf-8")
         self.assertIn("max_otp_attempts = 3", source)
-        self.assertIn("current_otp = wait_for_otp(email, after_ts=otp_after_ts)", source)
+        self.assertIn("after_ts=otp_after_ts", source)
+        self.assertIn("exclude_codes=used_otps", source)
+        self.assertIn("max_wait=30 if used_otps else None", source)
         self.assertIn("outcome = _wait_after_email_otp_submit(driver, timeout=10)", source)
         self.assertNotIn("after_ts=0.0, max_wait=15, poll_interval=3", source)
         self.assertNotIn("_bounded_email_otp_submit_wait", source)
