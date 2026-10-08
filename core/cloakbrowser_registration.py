@@ -106,34 +106,6 @@ def _bounded_cleanup(
         watchdog.join(0.05)
 
 
-def _bounded_email_otp_submit_wait(driver, timeout: float = 35.0) -> str:
-    """等待邮箱 OTP 结果；浏览器 API 卡住时先终止 driver 解除 owner 线程。"""
-    completed = threading.Event()
-    result: list[str] = []
-    errors: list[BaseException] = []
-
-    def _watchdog() -> None:
-        if completed.wait(max(1.0, float(timeout))):
-            return
-        logger.warning("[Cloak注册][OTP] 提交结果等待超时 %.1fs，强制终止浏览器", timeout)
-        try:
-            driver.force_kill()
-        except BaseException as exc:
-            logger.debug("[Cloak注册][OTP] 超时强制终止浏览器失败：%s", exc)
-
-    watchdog = threading.Thread(target=_watchdog, name="cloak-email-otp-watchdog", daemon=True)
-    watchdog.start()
-    try:
-        result.append(_wait_after_email_otp_submit(driver, timeout=int(timeout)))
-    except BaseException as exc:
-        errors.append(exc)
-    finally:
-        completed.set()
-        watchdog.join(0.05)
-    if errors:
-        raise errors[0]
-    return result[0] if result else "invalid"
-
 
 def _run_cloak_registration_impl(
     email: str | None,
@@ -198,34 +170,17 @@ def _run_cloak_registration_impl(
         _check_manual_stop()
 
         current_otp = otp_code
-        used_otps: set[str] = set()
         max_otp_attempts = 3
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
                 try:
-                    candidate_otp = wait_for_otp(
-                        email, after_ts=otp_after_ts, exclude_codes=used_otps
-                    )
-                    if candidate_otp and str(candidate_otp) in used_otps:
-                        raise RuntimeError("重复验证码，等待重新发送")
-                    current_otp = candidate_otp
+                    current_otp = wait_for_otp(email, after_ts=otp_after_ts)
                 except Exception as exc:
                     if otp_attempt >= max_otp_attempts:
                         raise
-                    # 重发邮件可能复用同一封邮件的时间戳；参考 Roxy 流程先
-                    # 宽松读取最新验证码，避免无谓地再点 resend 后长时间等待。
-                    fallback_otp = None
-                    try:
-                        fallback_otp = wait_for_otp(email, after_ts=0.0, max_wait=15, poll_interval=3)
-                    except Exception:
-                        fallback_otp = None
-                    if fallback_otp and str(fallback_otp) not in used_otps:
-                        logger.info("[Cloak注册][OTP] 严格取码超时，宽松取得最新验证码，直接重试提交")
-                        current_otp = fallback_otp
-                        continue
                     logger.warning(
-                        "[Cloak注册][OTP] 未收到新验证码，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
+                        "[Cloak注册][OTP] 一直未收到验证码，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
                         otp_attempt + 1,
                         max_otp_attempts,
                         type(exc).__name__,
@@ -236,7 +191,6 @@ def _run_cloak_registration_impl(
                     human_delay("api")
                     current_otp = None
                     continue
-            used_otps.add(str(current_otp))
             logger.info("[Cloak注册][OTP] 收到验证码：%s", current_otp)
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
@@ -244,19 +198,14 @@ def _run_cloak_registration_impl(
             human_delay("otp_input")
             try:
                 _click_continue(driver)
-                logger.info("[Cloak注册][OTP] 已提交邮箱验证码，等待资料页或登录态")
             except Exception as exc:
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
-            outcome = _bounded_email_otp_submit_wait(driver, timeout=35)
+            outcome = _wait_after_email_otp_submit(driver, timeout=10)
             if outcome == "accepted":
                 break
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
-            logger.warning(
-                "[Cloak注册][OTP] 验证码错误/过期，准备重新发送并重新获取验证码（%s/%s）",
-                otp_attempt + 1, max_otp_attempts,
-            )
             otp_after_ts = time.time()
             _click_resend_email_otp(driver, timeout=25)
             human_delay("api")

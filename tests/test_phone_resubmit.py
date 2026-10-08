@@ -31,10 +31,10 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
     def test_cloak_email_otp_matches_reference_retry_contract(self):
         source = (ROOT / "core" / "cloakbrowser_registration.py").read_text(encoding="utf-8")
         self.assertIn("max_otp_attempts = 3", source)
-        self.assertIn("after_ts=0.0, max_wait=15, poll_interval=3", source)
-        self.assertIn("_wait_after_email_otp_submit(driver, timeout=int(timeout))", source)
-        self.assertIn("_bounded_email_otp_submit_wait(driver, timeout=35)", source)
-        self.assertIn("已提交邮箱验证码，等待资料页或登录态", source)
+        self.assertIn("current_otp = wait_for_otp(email, after_ts=otp_after_ts)", source)
+        self.assertIn("outcome = _wait_after_email_otp_submit(driver, timeout=10)", source)
+        self.assertNotIn("after_ts=0.0, max_wait=15, poll_interval=3", source)
+        self.assertNotIn("_bounded_email_otp_submit_wait", source)
 
     def test_cloak_isolated_worker_timeout_returns_terminal_result(self):
         source = (ROOT / "core" / "cloakbrowser_registration.py").read_text(encoding="utf-8")
