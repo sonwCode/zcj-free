@@ -41,6 +41,7 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
     def test_cloak_isolated_worker_timeout_returns_terminal_result(self):
         source = (ROOT / "core" / "cloakbrowser_registration.py").read_text(encoding="utf-8")
         self.assertIn("thread.join(timeout)", source)
+        self.assertIn("configured_timeout + max(0.0, otp_wait) * 3.0", source)
         self.assertIn('"error_code": "cloak_worker_join_timeout"', source)
         self.assertIn('"task_status": "failed"', source)
         self.assertIn("threading.Thread(target=_target, name=parent_thread_name, daemon=True)", source)
