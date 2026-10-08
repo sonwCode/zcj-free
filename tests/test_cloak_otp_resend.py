@@ -42,7 +42,7 @@ class CloakOtpResendTests(unittest.TestCase):
         self.assertIn("exclude_codes=used_otps", otp_loop)
         self.assertIn("current_otp in used_otps", otp_loop)
         self.assertIn("取到已提交的旧验证码", otp_loop)
-        self.assertIn("max_wait=30 if used_otps else None", otp_loop)
+        self.assertNotIn("max_wait=30 if used_otps else None", otp_loop)
 
     def test_failed_registration_skips_broken_pipe_cleanup(self):
         body = _function_source("_run_cloak_registration_impl")

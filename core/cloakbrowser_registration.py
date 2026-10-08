@@ -180,7 +180,6 @@ def _run_cloak_registration_impl(
                     current_otp = wait_for_otp(
                         email,
                         after_ts=otp_after_ts,
-                        max_wait=30 if used_otps else None,
                         exclude_codes=used_otps,
                     )
                 except Exception as exc:
