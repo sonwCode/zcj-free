@@ -38,13 +38,14 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertNotIn("after_ts=0.0, max_wait=15, poll_interval=3", source)
         self.assertNotIn("_bounded_email_otp_submit_wait", source)
 
-    def test_cloak_isolated_worker_timeout_returns_terminal_result(self):
+    def test_cloak_isolated_worker_waits_indefinitely(self):
+        """隔离线程无限等待任务自然完成，不设置硬超时避免打断长流程（如 Codex 手机验证多次重试）。"""
         source = (ROOT / "core" / "cloakbrowser_registration.py").read_text(encoding="utf-8")
-        self.assertIn("thread.join(timeout)", source)
-        self.assertIn("configured_timeout + max(0.0, otp_wait) * 3.0", source)
-        self.assertIn('"error_code": "cloak_worker_join_timeout"', source)
-        self.assertIn('"task_status": "failed"', source)
+        self.assertIn("thread.join()", source)
         self.assertIn("threading.Thread(target=_target, name=parent_thread_name, daemon=True)", source)
+        # 确认已移除固定超时计算
+        self.assertNotIn("configured_timeout + max(0.0, otp_wait) * 3.0", source)
+        self.assertNotIn("CLOAK_WORKER_JOIN_TIMEOUT", source)
 
     def test_codex_password_uses_registration_password_and_fails_fast(self):
         self.assertIn("registration_password: str | None = None", TEXT)

@@ -404,28 +404,9 @@ def _run_in_isolated_thread(fn: Callable, *args, **kwargs):
 
     thread = threading.Thread(target=_target, name=parent_thread_name, daemon=True)
     thread.start()
-    configured_timeout = float(getattr(_cfg, "CLOAK_WORKER_JOIN_TIMEOUT", 240.0) or 240.0)
-    # 总超时覆盖注册基础流程与三轮 OTP 等待，避免最后一轮被外层 join 截断。
-    try:
-        from config import email as _email_cfg
-        otp_wait = float(getattr(_email_cfg, "OTP_MAX_WAIT", 90) or 90)
-    except (ImportError, TypeError, ValueError):
-        otp_wait = 90.0
-    timeout = max(30.0, configured_timeout + max(0.0, otp_wait) * 3.0)
-    thread.join(timeout)
-    if thread.is_alive():
-        logger.error("[Cloak注册] 隔离线程收尾超时 %.1fs，返回失败结果避免任务永久 running", timeout)
-        return {
-            "success": False,
-            "task_status": "failed",
-            "account_status": "failed",
-            "codex_status": "failed",
-            "phase": "cleanup",
-            "error_code": "cloak_worker_join_timeout",
-            "retryable": True,
-            "email": kwargs.get("email"),
-            "error": f"Cloak 隔离线程收尾超时（{timeout:.1f}s）",
-        }
+    # 无限等待任务自然完成（成功或异常），避免硬超时打断 Codex 手机验证等长流程。
+    # 参考项目也是直接同步执行，无超时限制。
+    thread.join()
     if "error" in error_box:
         raise error_box["error"]
     return result_box.get("value")
