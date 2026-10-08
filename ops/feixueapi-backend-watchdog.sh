@@ -57,7 +57,7 @@ check_one() {
   if [[ "$name" == "register" ]]; then
     register_queue_state
     local queue_state=$?
-    if (( queue_state == 0 )); then
+    if (( queue_state == 0 )) && /usr/bin/systemctl is-active --quiet turb-gpt-register.service; then
       log "$name HTTP probe failed $failures times; active registration jobs detected, deferring restart"
       return 0
     fi

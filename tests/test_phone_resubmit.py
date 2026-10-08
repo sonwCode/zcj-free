@@ -34,8 +34,10 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn("after_ts=otp_after_ts", source)
         self.assertIn("exclude_codes=used_otps", source)
         self.assertNotIn("max_wait=30 if used_otps else None", source)
-        self.assertIn("outcome = _wait_after_email_otp_submit(driver, timeout=10)", source)
-        self.assertNotIn("after_ts=0.0, max_wait=15, poll_interval=3", source)
+        self.assertIn("outcome = _wait_after_email_otp_submit(driver, timeout=30)", source)
+        self.assertIn("after_ts=0.0", source)
+        self.assertIn("max_wait=15", source)
+        self.assertIn("poll_interval=3", source)
         self.assertNotIn("_bounded_email_otp_submit_wait", source)
 
     def test_cloak_isolated_worker_waits_indefinitely(self):
@@ -51,7 +53,7 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn("registration_password: str | None = None", TEXT)
         self.assertIn("registration_password=registration_password", TEXT)
         self.assertIn("codex_password_step_stalled", TEXT)
-        self.assertIn("if \"codex_password_step_stalled\" in str(exc):", TEXT)
+        self.assertIn("if \"codex_password_step_stalled\" in message:", TEXT)
 
     def test_same_activation_resubmit_helper_is_removed(self):
         self.assertNotIn("_is_repeatable_phone_submit_error", TEXT)

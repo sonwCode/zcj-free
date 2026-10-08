@@ -42,6 +42,16 @@ class CloakOtpResendTests(unittest.TestCase):
         self.assertIn("exclude_codes=used_otps", otp_loop)
         self.assertNotIn("max_wait=30 if used_otps else None", otp_loop)
 
+    def test_otp_wait_matches_reference_and_has_timestamp_fallback(self):
+        body = _function_source("_run_cloak_registration_impl")
+        otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
+        self.assertIn("after_ts=0.0", otp_loop)
+        self.assertIn("max_wait=15", otp_loop)
+        self.assertIn("poll_interval=3", otp_loop)
+        self.assertIn("fallback", otp_loop)
+        self.assertIn("_wait_after_email_otp_submit(driver, timeout=30)", otp_loop)
+        self.assertIn("已提交邮箱验证码，等待资料页或登录态", otp_loop)
+
     def test_failed_registration_skips_broken_pipe_cleanup(self):
         body = _function_source("_run_cloak_registration_impl")
         self.assertIn("hard_cleanup = True", body)

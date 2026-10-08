@@ -205,6 +205,26 @@ def _run_cloak_registration_impl(
                 except Exception as exc:
                     if otp_attempt >= max_otp_attempts:
                         raise
+                    # 参考 Roxy 流程：after_ts 过滤可能漏掉同一封被重发/时间戳异常的验证码，
+                    # 先短暂宽松读取一次最新验证码，再执行 resend，避免无效地多等 90 秒。
+                    fallback_otp = None
+                    try:
+                        fallback_otp = wait_for_otp(
+                            email,
+                            after_ts=0.0,
+                            max_wait=15,
+                            poll_interval=3,
+                            exclude_codes=used_otps,
+                        )
+                    except Exception:
+                        fallback_otp = None
+                    if fallback_otp:
+                        logger.info(
+                            "[Cloak注册][OTP] 取码超时但宽松取到最新验证码，直接重试提交：%s (fallback)",
+                            fallback_otp,
+                        )
+                        current_otp = fallback_otp
+                        continue
                     logger.warning(
                         "[Cloak注册][OTP] 一直未收到验证码，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
                         otp_attempt + 1,
@@ -228,10 +248,11 @@ def _run_cloak_registration_impl(
             human_delay("otp_input")
             try:
                 _click_continue(driver)
+                logger.info("[Cloak注册][OTP] 已提交邮箱验证码，等待资料页或登录态")
             except Exception as exc:
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
-            outcome = _wait_after_email_otp_submit(driver, timeout=10)
+            outcome = _wait_after_email_otp_submit(driver, timeout=30)
             if outcome == "accepted":
                 break
             if otp_attempt >= max_otp_attempts:
