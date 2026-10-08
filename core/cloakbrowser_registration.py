@@ -106,6 +106,35 @@ def _bounded_cleanup(
         watchdog.join(0.05)
 
 
+def _bounded_email_otp_submit_wait(driver, timeout: float = 35.0) -> str:
+    """等待邮箱 OTP 结果；浏览器 API 卡住时先终止 driver 解除 owner 线程。"""
+    completed = threading.Event()
+    result: list[str] = []
+    errors: list[BaseException] = []
+
+    def _watchdog() -> None:
+        if completed.wait(max(1.0, float(timeout))):
+            return
+        logger.warning("[Cloak注册][OTP] 提交结果等待超时 %.1fs，强制终止浏览器", timeout)
+        try:
+            driver.force_kill()
+        except BaseException as exc:
+            logger.debug("[Cloak注册][OTP] 超时强制终止浏览器失败：%s", exc)
+
+    watchdog = threading.Thread(target=_watchdog, name="cloak-email-otp-watchdog", daemon=True)
+    watchdog.start()
+    try:
+        result.append(_wait_after_email_otp_submit(driver, timeout=int(timeout)))
+    except BaseException as exc:
+        errors.append(exc)
+    finally:
+        completed.set()
+        watchdog.join(0.05)
+    if errors:
+        raise errors[0]
+    return result[0] if result else "invalid"
+
+
 def _run_cloak_registration_impl(
     email: str | None,
     name: str,
@@ -211,17 +240,23 @@ def _run_cloak_registration_impl(
             logger.info("[Cloak注册][OTP] 收到验证码：%s", current_otp)
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
+            _check_manual_stop()
             human_delay("otp_input")
             try:
                 _click_continue(driver)
+                logger.info("[Cloak注册][OTP] 已提交邮箱验证码，等待资料页或登录态")
             except Exception as exc:
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
-            outcome = _wait_after_email_otp_submit(driver, timeout=30)
+            outcome = _bounded_email_otp_submit_wait(driver, timeout=35)
             if outcome == "accepted":
                 break
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
+            logger.warning(
+                "[Cloak注册][OTP] 验证码错误/过期，准备重新发送并重新获取验证码（%s/%s）",
+                otp_attempt + 1, max_otp_attempts,
+            )
             otp_after_ts = time.time()
             _click_resend_email_otp(driver, timeout=25)
             human_delay("api")
