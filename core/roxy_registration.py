@@ -2258,7 +2258,14 @@ def _fill_login_password_on_page(driver, password: str, *, timeout: int = 12) ->
     return {"ok": True, "reason": "login_password_submitted"}
 
 
-def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str | None:
+def _fill_password_page_if_present(
+    driver,
+    email: str,
+    timeout: int = 25,
+    *,
+    _recovery_round: int = 0,
+    _password_value: str | None = None,
+) -> str | None:
     """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。"""
     end = time.time() + timeout
     verification_wait_end = min(end, time.time() + 10)
@@ -2341,7 +2348,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             raise EmailAlreadyRegistered(
                 f"邮箱在 OpenAI 侧已存在账号（登录密码页，素材中{'有' if known_password else '无'}已保存密码）: {email}"
             )
-        password = _registration_password()
+        password = _password_value or _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
         result = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
@@ -2439,6 +2446,8 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         # 会在 /create-account/password 上查找验证码框。这里给足提交/导航时间。
         wait_end = time.time() + 60
         retried_submit = False
+        empty_form_since: float | None = None
+        empty_shell_reload_requested = False
         while time.time() < wait_end:
             if _is_email_verification_page(driver):
                 logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
@@ -2446,6 +2455,11 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             if _has_access_token(driver):
                 logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
                 return password
+            current_url = str(getattr(driver, "current_url", "") or "")
+            if _is_navigation_error_url(current_url):
+                raise RuntimeError(f"密码提交后浏览器导航失败: url={current_url}")
+
+            error_state = None
             if _is_signup_password_page(driver):
                 error_state = _password_page_state(driver)
                 errors = error_state.get("errors") or []
@@ -2453,23 +2467,82 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                     error_text = "；".join(str(item) for item in errors[:3])
                     raise RuntimeError(
                         f"密码页提交被拒绝: {error_text} "
-                        f"url={error_state.get('url') or getattr(driver, 'current_url', '')}"
+                        f"url={error_state.get('url') or current_url}"
                     )
+                if _password_state_has_form(error_state):
+                    empty_form_since = None
+                elif empty_form_since is None:
+                    empty_form_since = time.time()
+                elif time.time() - empty_form_since >= 10:
+                    if _recovery_round >= 1:
+                        raise RuntimeError(
+                            f"密码提交后跳转被截断，有限恢复后仍无密码表单: "
+                            f"url={current_url} state={error_state}"
+                        )
+                    if not empty_shell_reload_requested:
+                        empty_shell_reload_requested = True
+                        logger.warning(
+                            "%s 密码路由持续无表单，异步重载一次并重新判定：url=%s",
+                            _log_prefix(driver), current_url,
+                        )
+                        try:
+                            driver.execute_script("window.location.reload()")
+                        except Exception as exc:
+                            logger.info(
+                                "%s 重载触发时页面正在导航，继续观察状态：%s: %s",
+                                _log_prefix(driver), type(exc).__name__, str(exc)[:120],
+                            )
+                        recovery_end = min(wait_end, time.time() + 12)
+                        while time.time() < recovery_end:
+                            if _is_email_verification_page(driver):
+                                logger.info("%s 重载后已进入邮箱验证码页", _log_prefix(driver))
+                                return password
+                            if _has_access_token(driver):
+                                logger.info("%s 重载后已检测到登录态", _log_prefix(driver))
+                                return password
+                            current_url = str(getattr(driver, "current_url", "") or "")
+                            if _is_navigation_error_url(current_url):
+                                raise RuntimeError(f"密码提交后重载落入浏览器导航错误页: url={current_url}")
+                            if not _is_signup_password_page(driver):
+                                return password
+                            recovered_state = _password_page_state(driver)
+                            if _password_state_has_form(recovered_state):
+                                logger.info("%s 重载后密码表单已恢复，复用原密码重新提交", _log_prefix(driver))
+                                recovered_password = _fill_password_page_if_present(
+                                    driver,
+                                    email,
+                                    timeout=timeout,
+                                    _recovery_round=_recovery_round + 1,
+                                    _password_value=password,
+                                )
+                                return recovered_password or password
+                            _stop_aware_sleep(0.5)
+                        final_state = _password_page_state(driver)
+                        raise RuntimeError(
+                            f"密码提交后跳转被截断，重载后仍停留在空密码页: "
+                            f"url={getattr(driver, 'current_url', '')} state={final_state}"
+                        )
+
             if not retried_submit and time.time() > wait_end - 42 and _is_signup_password_page(driver):
                 retried_submit = True
-                retry_result = _resubmit_signup_password_form(driver)
-                logger.info("%s 密码页点击后仍未跳转，原生表单补交一次：%s", _log_prefix(driver), retry_result)
-                if retry_result.get("reason") == "page_errors":
-                    raise RuntimeError(f"密码页提交被页面拒绝: {retry_result}")
+                if error_state and _password_state_has_form(error_state):
+                    retry_result = _resubmit_signup_password_form(driver)
+                    logger.info("%s 密码页点击后仍未跳转，原生表单补交一次：%s", _log_prefix(driver), retry_result)
+                    if retry_result.get("reason") == "page_errors":
+                        raise RuntimeError(f"密码页提交被页面拒绝: {retry_result}")
+                else:
+                    logger.info("%s 密码表单已消失，跳过无效的原生补交", _log_prefix(driver))
             if not _is_signup_password_page(driver):
                 return password
-            time.sleep(0.5)
-        # 密码提交超时仍停留在注册密码页时，不能把“已设置密码”当成成功并
-        # 直接交给后续 OTP 阶段；此时 OTP 输入框必然不存在。明确失败并保留
-        # 当前 URL/DOM 诊断，避免无意义地刷新密码页三次。
+            _stop_aware_sleep(0.5)
         if _is_signup_password_page(driver):
             current_url = str(getattr(driver, "current_url", "") or "")
-            raise RuntimeError(f"密码提交后仍停留在注册密码页: url={current_url} state={_password_page_state(driver)}")
+            final_state = _password_page_state(driver)
+            if not _password_state_has_form(final_state):
+                raise RuntimeError(
+                    f"密码提交后跳转被截断，密码路由仍无表单: url={current_url} state={final_state}"
+                )
+            raise RuntimeError(f"密码提交后仍停留在注册密码页: url={current_url} state={final_state}")
         return password
     # 如果已经请求切换到密码方式，不允许在导航竞态中静默进入 OTP 阶段。
     # 最后再读取一次浏览器 URL；已抵达密码路由但 DOM 尚未就绪时明确报错，

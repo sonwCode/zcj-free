@@ -30,12 +30,13 @@ class NavigationErrorUrlTests(unittest.TestCase):
         for url in ("https://chatgpt.com/auth/login", "https://auth.openai.com/create-account/password", ""):
             self.assertFalse(is_error(url), url)
 
-    def test_reference_password_flow_keeps_navigation_guard(self):
+    def test_password_flow_bounds_recovery_and_keeps_navigation_guard(self):
         tree = ast.parse(TEXT)
         node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_fill_password_page_if_present")
         body = ast.get_source_segment(TEXT, node) or ""
-        self.assertNotIn("_recovery_round", body)
+        self.assertIn("_recovery_round >= 1", body)
         self.assertIn("password_route_requested and any", body)
+        self.assertIn("_is_navigation_error_url(current_url)", body)
 
 
 if __name__ == "__main__":
