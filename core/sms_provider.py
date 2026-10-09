@@ -576,7 +576,8 @@ def _classify_failure(reason: object) -> str:
         return "code_rejected"
     if any(marker in text for marker in (
         "invalid_phone", "not a valid phone", "phone number is not valid", "phone_in_use",
-        "already used", "voip", "号码无效", "手机号无效", "手机号已被使用", "whatsapp_channel",
+        "already used", "voip", "voip_phone_disallowed", "fraud_guard",
+        "suspicious behavior from phone", "号码无效", "手机号无效", "手机号已被使用", "whatsapp_channel",
     )):
         return "number_rejected"
     if any(marker in text for marker in (

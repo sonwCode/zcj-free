@@ -627,6 +627,20 @@ class SmsProviderStrategyTests(unittest.TestCase):
             sms_provider.wait_for_sms_code("missing", http=http, max_wait=0, poll_interval=0)
         self.assertEqual(http.calls, [])
 
+    def test_openai_phone_rejection_codes_are_number_quality_failures(self):
+        self.assertEqual(
+            sms_provider._classify_failure(
+                "add_phone_response=detail={\"code\":\"fraud_guard\"}"
+            ),
+            "number_rejected",
+        )
+        self.assertEqual(
+            sms_provider._classify_failure(
+                "add_phone_response=detail={\"code\":\"voip_phone_disallowed\"}"
+            ),
+            "number_rejected",
+        )
+
     def test_smsbower_default_tier_never_cools_entire_provider(self):
         codex_config.SMS_TIER_FAILURE_THRESHOLD = 1
         sms_provider._remember_activation(

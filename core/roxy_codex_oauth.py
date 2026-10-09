@@ -2234,9 +2234,9 @@ def _start_add_phone_response_watch(driver):
         return None
 
 
-def _finish_add_phone_response_watch(watch) -> None:
+def _finish_add_phone_response_watch(watch) -> str | None:
     if not watch:
-        return
+        return None
     page = watch.get("page")
     callback = watch.get("callback")
     try:
@@ -2245,6 +2245,7 @@ def _finish_add_phone_response_watch(watch) -> None:
             remover("response", callback)
     except Exception:
         pass
+    last_diagnostic = None
     for response in list(watch.get("responses") or []):
         try:
             status = int(getattr(response, "status", 0) or 0)
@@ -2267,7 +2268,10 @@ def _finish_add_phone_response_watch(watch) -> None:
                 detail = " ".join(str(response.text() or "").split())[:600]
             except Exception:
                 detail = "response_body_unavailable"
-        logger.warning("[Codex][Browser] add-phone/send 响应诊断：status=%s detail=%s", status, detail or "-")
+        diagnostic = f"status={status} detail={detail or '-'}"
+        logger.warning("[Codex][Browser] add-phone/send 响应诊断：%s", diagnostic)
+        last_diagnostic = diagnostic
+    return last_diagnostic
 
 
 def _phone_state_digest(state: dict) -> str:
@@ -2549,6 +2553,7 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 e164 = f"+{phone}"
                 # 号码尝试只允许一次：任何未进入验证码页的失败都立即释放，
                 # 不再用同一个激活反复提交，避免平台继续计费或状态失控。
+                response_diagnostic = None
                 response_watch = _start_add_phone_response_watch(driver)
                 try:
                     _prepare_and_submit_add_phone(
@@ -2556,7 +2561,7 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                     )
                     _wait_after_phone_send(driver, timeout=15)
                 finally:
-                    _finish_add_phone_response_watch(response_watch)
+                    response_diagnostic = _finish_add_phone_response_watch(response_watch)
                 logger.info("[Codex][Browser] 已进入手机验证码页")
 
                 sms_provider.set_status(activation_id, 1, http=http)
@@ -2603,7 +2608,11 @@ def _do_phone_verification_if_present(driver) -> dict | None:
             except Exception as exc:
                 last_err = exc
                 err_text = str(exc) or ""
-                logger.warning("[Codex][Browser] 手机验证尝试失败：%s", err_text[:240])
+                if response_diagnostic and response_diagnostic not in err_text:
+                    err_text = f"{err_text}; add_phone_response={response_diagnostic}"
+                    exc = RuntimeError(err_text)
+                    last_err = exc
+                logger.warning("[Codex][Browser] 手机验证尝试失败：%s", err_text[:420])
                 if activation_id:
                     try:
                         sms_provider.cancel_and_report_failure(activation_id, http, exc)
