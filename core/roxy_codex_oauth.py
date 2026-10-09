@@ -519,6 +519,18 @@ def _fill_login_password_if_present(
             if not _is_login_password_page(driver):
                 return "next_step"
             time.sleep(0.5)
+        if _is_login_password_page(driver):
+            passwordless = _click_passwordless_signup_if_present(driver)
+            if passwordless.get("ok"):
+                logger.info(
+                    "[Codex][Browser] 登录密码提交未离开密码页，改用一次性验证码：%s",
+                    passwordless,
+                )
+                return "email_otp"
+            raise RuntimeError(
+                "codex_password_step_stalled: 登录密码提交后仍停留在密码页 "
+                f"url={str(getattr(driver, 'current_url', '') or '')[:240]}"
+            )
         return "next_step"
     return None
 
@@ -670,6 +682,8 @@ def _fill_email_and_otp(
             if pw_result != "email_otp":
                 _maybe_click_passwordless_after_email(driver, email, timeout=12)
         except Exception as exc:
+            if "codex_password_step_stalled" in str(exc):
+                raise
             # 如果重进授权地址后已经停在验证码/下一步页面，就不要再强行提交。
             if not _is_email_verification_page(driver):
                 logger.warning("[Codex][Browser] 重新提交邮箱失败，继续按当前页面轮询：%s", str(exc)[:180])
