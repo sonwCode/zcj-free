@@ -572,14 +572,54 @@ def _fill_email_and_otp(
         message = str(exc)
         if "codex_password_step_stalled" in message:
             raise
-        if "email_submit_stalled" in message and _is_login_password_page(driver):
-            logger.warning(
-                "[Codex][Browser] 邮箱提交等待结束时已到达登录密码页，继续处理密码步骤：%s",
-                message[:180],
-            )
-            pw_result = _fill_login_password_if_present(
-                driver, email, timeout=18, registration_password=registration_password
-            )
+        if "email_submit_stalled" in message:
+            if _is_login_password_page(driver):
+                logger.warning(
+                    "[Codex][Browser] 邮箱提交等待结束时已到达登录密码页，继续处理密码步骤：%s",
+                    message[:180],
+                )
+                pw_result = _fill_login_password_if_present(
+                    driver, email, timeout=18, registration_password=registration_password
+                )
+            elif _is_email_verification_page(driver):
+                logger.info(
+                    "[Codex][Browser] 邮箱提交阶段报告异常，但页面已到达邮箱 OTP，继续验证码流程：%s",
+                    message[:160],
+                )
+                pw_result = "email_otp"
+            else:
+                # /log-in 可能只是提交后的短暂过渡态；不能把它当成“已登录”，
+                # 否则页面稍后进入 /log-in/password 时会直接落入 callback 超时。
+                entry_state = _wait_for_codex_auth_entry_state(driver, timeout=24)
+                if entry_state == "password":
+                    logger.warning(
+                        "[Codex][Browser] 邮箱提交后延迟进入登录密码页，继续处理密码步骤：%s",
+                        message[:180],
+                    )
+                    pw_result = _fill_login_password_if_present(
+                        driver, email, timeout=18, registration_password=registration_password
+                    )
+                elif entry_state == "email_otp":
+                    logger.info("[Codex][Browser] 邮箱提交后延迟进入邮箱 OTP 页面")
+                    pw_result = "email_otp"
+                elif entry_state == "mfa":
+                    _fill_mfa_challenge_if_present(driver, email, timeout=15)
+                    return
+                else:
+                    current_url = str(getattr(driver, "current_url", "") or "")
+                    lower_url = current_url.lower()
+                    if any(marker in lower_url for marker in (
+                        "/oauth/authorize", "/consent", "/workspace", "/phone", "localhost:1455",
+                    )):
+                        logger.info(
+                            "[Codex][Browser] 邮箱提交异常后已进入后续授权状态，继续 callback：url=%s",
+                            current_url[:180],
+                        )
+                        return
+                    raise RuntimeError(
+                        f"codex_email_submit_stalled: 认证页面在限定等待后仍未进入密码/OTP步骤 "
+                        f"url={current_url or 'unknown'} cause={message[:180]}"
+                    ) from exc
         elif _is_email_verification_page(driver):
             logger.info(
                 "[Codex][Browser] 邮箱提交阶段报告异常，但页面已到达邮箱 OTP，继续验证码流程：%s",

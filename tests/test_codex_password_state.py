@@ -29,6 +29,7 @@ def load_email_flow(stubs):
         "_type_email_address": Mock(),
         "_submit_email_step": Mock(),
         "_fill_login_password_if_present": Mock(return_value=None),
+        "_wait_for_codex_auth_entry_state": Mock(return_value="unknown"),
         "_is_login_password_page": lambda driver: False,
         "_is_email_verification_page": lambda driver: False,
         "_is_mfa_challenge_page": lambda driver: False,
@@ -84,6 +85,60 @@ class ReferenceAuthContractTests(unittest.TestCase):
             timeout=18,
             registration_password="secret",
         )
+
+    def test_delayed_login_page_transitions_to_password_step(self):
+        submit = Mock(side_effect=RuntimeError("email_submit_stalled: delayed navigation"))
+        wait_for_entry = Mock(return_value="password")
+        password = Mock(return_value="next_step")
+        flow, _ = load_email_flow({
+            "_submit_email_step": submit,
+            "_wait_for_codex_auth_entry_state": wait_for_entry,
+            "_fill_login_password_if_present": password,
+            "_is_login_password_page": lambda driver: False,
+            "_is_email_verification_page": lambda driver: False,
+        })
+
+        class Driver:
+            current_url = "https://auth.openai.com/log-in"
+
+            def get(self, url):
+                self.current_url = url
+
+        driver = Driver()
+        flow(
+            driver,
+            "user@example.test",
+            Mock(),
+            "https://auth.openai.com/oauth/authorize",
+            registration_password="secret",
+        )
+
+        wait_for_entry.assert_called_once_with(driver, timeout=24)
+        password.assert_called_once_with(
+            driver,
+            "user@example.test",
+            timeout=18,
+            registration_password="secret",
+        )
+
+    def test_stalled_login_page_fails_before_callback_timeout(self):
+        submit = Mock(side_effect=RuntimeError("email_submit_stalled: still at login page"))
+        flow, _ = load_email_flow({
+            "_submit_email_step": submit,
+            "_wait_for_codex_auth_entry_state": Mock(return_value="unknown"),
+            "_is_login_password_page": lambda driver: False,
+            "_is_email_verification_page": lambda driver: False,
+        })
+
+        class Driver:
+            current_url = "https://auth.openai.com/log-in"
+
+            def get(self, url):
+                # The submit failure is observed after the browser has settled on /log-in.
+                self.current_url = "https://auth.openai.com/log-in"
+
+        with self.assertRaisesRegex(RuntimeError, "codex_email_submit_stalled"):
+            flow(driver=Driver(), email="user@example.test", otp_provider=Mock(), auth_url="https://auth.openai.com/oauth/authorize")
 
     def test_email_submit_error_on_otp_page_continues_otp_flow(self):
         submit = Mock(side_effect=RuntimeError("email_submit_stalled: delayed navigation"))
