@@ -503,7 +503,6 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                 result_status = "failed"
             result_email = str(result_dict.get("email") or email or "").strip() or None
             result_account_id = result_dict.get("account_id")
-            _persist_codex_phone_activation(result_dict, result_email, result_account_id)
             result_error = str(result_dict.get("error") or "").strip()
             result_account_status = str(result_dict.get("account_status") or ("success" if result_account_id else "failed"))
             result_codex_status = str(result_dict.get("codex_status") or "not_started")
@@ -526,7 +525,11 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                 completed_at=datetime.now().isoformat(timespec="seconds"),
             )
             if result_status in {"success", "partial_success"}:
-                log_logger.info(f"[Job {job_id}] {result_status}: {result_email}")
+                log_logger.info(
+                    "[Job %s] %s: email=%s account_id=%s account_status=%s phase=%s codex=%s",
+                    job_id, result_status, result_email or "-", result_account_id or "-",
+                    result_account_status, result_phase, result_codex_status,
+                )
             else:
                 email_to_handle = str(result_email or "").strip()
                 if _should_disable_failed_registration_email(result_error):

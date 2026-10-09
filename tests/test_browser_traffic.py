@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from core.browser_data_saver import BrowserDataSaver
-from core.browser_traffic import PlaywrightTrafficTracker, SeleniumTrafficTracker
+from core.browser_traffic import PlaywrightTrafficTracker, SeleniumTrafficTracker, _traffic_failure_class
 
 
 class _Emitter:
@@ -172,6 +172,20 @@ class _CoverageContext(_Emitter):
 
 
 class BrowserTrafficTests(unittest.TestCase):
+    def test_failure_class_distinguishes_navigation_asset_and_http_error(self):
+        self.assertEqual(
+            _traffic_failure_class({"type": "document", "status": None, "failed": True, "url": "https://auth.openai.com/callback"}),
+            "navigation_cancelled",
+        )
+        self.assertEqual(
+            _traffic_failure_class({"type": "script", "status": None, "failed": True, "url": "https://chatgpt.com/cdn/app.js"}),
+            "asset_unloaded",
+        )
+        self.assertEqual(
+            _traffic_failure_class({"type": "fetch", "status": 500, "failed": True, "url": "https://auth.openai.com/api/test"}),
+            "http_error",
+        )
+
     def test_playwright_counts_http_and_websocket_without_payload_capture(self):
         context = _Emitter()
         page = _Emitter()
@@ -379,7 +393,9 @@ class BrowserTrafficTests(unittest.TestCase):
             ),
         ]
         driver = _SeleniumDriver(entries)
-        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True):
+        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True), patch(
+            "core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", True
+        ):
             tracker = SeleniumTrafficTracker(driver)
             result = tracker.stop()
 
@@ -393,6 +409,8 @@ class BrowserTrafficTests(unittest.TestCase):
         context = _Emitter()
         context.pages = []
         with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True), patch(
+            "core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", True
+        ), patch(
             "core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES", 20
         ):
             tracker = PlaywrightTrafficTracker(context, label="detail")
@@ -416,10 +434,40 @@ class BrowserTrafficTests(unittest.TestCase):
         self.assertNotIn("do-not-log", line)
         self.assertEqual(result["detail_recorded_count"], 1)
 
+    def test_compact_detail_logs_only_interesting_resources(self):
+        context = _Emitter()
+        context.pages = []
+
+        class _StaticRequest(_DetailedRequest):
+            resource_type = "script"
+            url = "https://auth-cdn.oaistatic.com/assets/app.js"
+
+        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True), patch(
+            "core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", False
+        ):
+            tracker = PlaywrightTrafficTracker(context, label="compact")
+            # Emit finished events using the same request objects so both records are complete.
+            static = _StaticRequest()
+            api = _DetailedRequest()
+            context.emit("request", static)
+            context.emit("requestfinished", static)
+            context.emit("request", api)
+            context.emit("requestfinished", api)
+            with self.assertLogs("core.browser_traffic", level="INFO") as captured:
+                result = tracker.stop()
+
+        detail_lines = [line for line in captured.output if "[资源明细] #" in line]
+        self.assertEqual(len(detail_lines), 1)
+        self.assertIn("xhr POST", detail_lines[0])
+        self.assertIn("模式=compact", "\n".join(captured.output))
+        self.assertEqual(result["detail_recorded_count"], 2)
+
     def test_playwright_groups_duplicate_resource_log_lines_without_changing_totals(self):
         context = _Emitter()
         context.pages = []
-        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True):
+        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True), patch(
+            "core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", True
+        ):
             tracker = PlaywrightTrafficTracker(context, label="duplicate")
             first = _DetailedRequest()
             second = _DetailedRequest()
@@ -443,7 +491,9 @@ class BrowserTrafficTests(unittest.TestCase):
     def test_playwright_requestfailed_does_not_reenter_sync_api(self):
         context = _Emitter()
         context.pages = []
-        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True):
+        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True), patch(
+            "core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", True
+        ):
             tracker = PlaywrightTrafficTracker(context, label="failed")
             request = _FailedRequest()
             context.emit("request", request)
@@ -522,7 +572,9 @@ class BrowserTrafficTests(unittest.TestCase):
             _performance_event("Network.dataReceived", {"requestId": "unfinished", "encodedDataLength": 7}),
         ]
         driver = _SeleniumDriver(entries)
-        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True):
+        with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", True), patch(
+            "core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", True
+        ):
             tracker = SeleniumTrafficTracker(driver, label="detail")
             with self.assertLogs("core.browser_traffic", level="INFO") as captured:
                 result = tracker.stop()

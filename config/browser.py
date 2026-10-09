@@ -119,6 +119,8 @@ BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS: list[str] = [
 # 默认关闭；开启后在每次注册结束时按单请求总字节降序输出资源 URL、类型、状态和大小。
 # URL 查询参数值会脱敏，不保存请求/响应 body 或完整 Header 内容。
 BROWSER_TRAFFIC_DETAIL_LOG: bool = False
+# 记录明细但默认只输出 API、文档和异常资源；开启后才逐条输出全部资源。
+BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG: bool = False
 BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES: int = 2000
 
 # ---------- Roxy/Cloak 浏览器 JS 精确覆盖率 ----------
@@ -412,7 +414,7 @@ def validate_browser_profile(profile: dict) -> list[str]:
     return issues
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'BROWSER_LOCALE_PROFILE': 'str', 'AUTO_BROWSER_LOCALE_FROM_IP': 'bool', 'IP_GEO_TIMEOUT': 'float', 'REJECT_CLOUD_PROXY': 'bool', 'BROWSER_DATA_SAVER_MODE': 'bool', 'BROWSER_DATA_SAVER_DEEP_MODE': 'bool', 'BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES': 'list_str_multiline', 'BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS': 'list_str_multiline', 'BROWSER_TRAFFIC_DETAIL_LOG': 'bool', 'BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES': 'int', 'BROWSER_JS_COVERAGE_LOG': 'bool', 'BROWSER_JS_COVERAGE_MAX_ENTRIES': 'int'})
+apply_env_overrides(globals(), {'BROWSER_LOCALE_PROFILE': 'str', 'AUTO_BROWSER_LOCALE_FROM_IP': 'bool', 'IP_GEO_TIMEOUT': 'float', 'REJECT_CLOUD_PROXY': 'bool', 'BROWSER_DATA_SAVER_MODE': 'bool', 'BROWSER_DATA_SAVER_DEEP_MODE': 'bool', 'BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES': 'list_str_multiline', 'BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS': 'list_str_multiline', 'BROWSER_TRAFFIC_DETAIL_LOG': 'bool', 'BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG': 'bool', 'BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES': 'int', 'BROWSER_JS_COVERAGE_LOG': 'bool', 'BROWSER_JS_COVERAGE_MAX_ENTRIES': 'int'})
 BROWSER_LOCALE_PROFILE = _normalize_locale_profile_key(BROWSER_LOCALE_PROFILE)
 _LOCALE = BROWSER_LOCALE_PROFILES[BROWSER_LOCALE_PROFILE]
 NAVIGATOR_LANGUAGE = _LOCALE["navigator_language"]

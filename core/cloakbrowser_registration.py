@@ -193,6 +193,9 @@ def _run_cloak_registration_impl(
         current_otp = otp_code
         used_otps: set[str] = set()
         max_otp_attempts = 3
+        otp_submitted_attempts = 0
+        otp_resend_count = 0
+        otp_final_outcome = "not_submitted"
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
@@ -233,6 +236,7 @@ def _run_cloak_registration_impl(
                         str(exc)[:180],
                     )
                     otp_after_ts = time.time()
+                    otp_resend_count += 1
                     _click_resend_email_otp(driver, timeout=25)
                     human_delay("api")
                     current_otp = None
@@ -246,6 +250,7 @@ def _run_cloak_registration_impl(
             _type_otp(driver, current_otp)
             _check_manual_stop()
             human_delay("otp_input")
+            otp_submitted_attempts += 1
             try:
                 _click_continue(driver)
                 logger.info("[Cloak注册][OTP] 已提交邮箱验证码，等待资料页或登录态")
@@ -253,17 +258,24 @@ def _run_cloak_registration_impl(
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
             outcome = _wait_after_email_otp_submit(driver, timeout=30)
+            otp_final_outcome = str(outcome or "unknown")
             logger.info("[Cloak注册][OTP] 提交后状态：%s", outcome)
             if outcome == "accepted":
+                logger.info(
+                    "[Cloak注册][阶段] 邮箱OTP完成：outcome=accepted submit_attempts=%s resends=%s",
+                    otp_submitted_attempts, otp_resend_count,
+                )
                 break
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             otp_after_ts = time.time()
+            otp_resend_count += 1
             _click_resend_email_otp(driver, timeout=25)
             human_delay("api")
             current_otp = None
 
         profile_submitted = _complete_profile_page(driver, name, birthday, timeout=60)
+        logger.info("[Cloak注册][阶段] 资料页完成：submitted=%s", bool(profile_submitted))
         if profile_submitted:
             create_acknowledged = True
             human_delay("post_auth")
@@ -277,6 +289,7 @@ def _run_cloak_registration_impl(
         )
         access_token = session_info["accessToken"]
         logger.info("[Cloak注册] 已拿到 accessToken：%s", email)
+        logger.info("[Cloak注册][阶段] ChatGPT会话完成：access_token=present")
 
         if _twofa_cfg.ENABLE_2FA:
             logger.warning("[Cloak注册] 当前 CloakBrowser 自动化路径暂不执行 2FA 设置，已跳过")
@@ -308,6 +321,16 @@ def _run_cloak_registration_impl(
                 logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
         except Exception as exc:
             codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
+
+        phone_activation = codex_result.get("phone_activation") if isinstance(codex_result, dict) else None
+        phone_status = "-"
+        if isinstance(phone_activation, dict):
+            phone_status = str(phone_activation.get("status") or ("success" if phone_activation.get("success") else "recorded"))
+        logger.info(
+            "[Cloak注册][阶段] Codex完成：status=%s ok=%s phone=%s error_code=%s message=%s",
+            codex_result.get("status", "-"), bool(codex_result.get("ok")), phone_status,
+            codex_result.get("error_code") or "-", str(codex_result.get("message") or "")[:180] or "-",
+        )
 
         # 让 OAuth 收尾请求完成；浏览器关闭有 5 秒 watchdog，超时仍会强制回收。
         post_register_dwell(email, label="Cloak注册")
@@ -349,8 +372,18 @@ def _run_cloak_registration_impl(
                 "network_traffic": network_traffic,
             },
         )
+        traffic_summary = network_traffic or {}
         codex_status = str(codex_result.get("status") or ("success" if bool(codex_result.get("ok")) else "failed"))
         codex_ok = bool(codex_result.get("ok")) or codex_status == "skipped"
+        logger.info(
+            "[Cloak注册][摘要] email=%s account_id=%s account=success task=%s codex=%s phone=%s "
+            "otp_outcome=%s otp_submit_attempts=%s otp_resends=%s requests=%s failed=%s unfinished=%s",
+            email, account_id, "success" if codex_ok else "partial_success", codex_status, phone_status, otp_final_outcome,
+            otp_submitted_attempts, otp_resend_count,
+            traffic_summary.get("request_count", "-"),
+            traffic_summary.get("failed_request_count", "-"),
+            traffic_summary.get("unfinished_request_count", "-"),
+        )
         return {
             "success": True,
             "task_status": "success" if codex_ok else "partial_success",

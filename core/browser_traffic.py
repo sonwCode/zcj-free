@@ -110,6 +110,57 @@ def _safe_url_for_log(url: Any, *, max_length: int = 600) -> str:
     return safe[:max_length] + ("…" if len(safe) > max_length else "")
 
 
+def _known_browser_host(url: Any) -> bool:
+    """判断是否是本次注册常见的浏览器页面/资源域名。"""
+    try:
+        host = str(urlsplit(str(url or "")).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    return bool(
+        host == "localhost"
+        or host.endswith(".openai.com")
+        or host.endswith(".oaistatic.com")
+        or host == "chatgpt.com"
+        or host.endswith(".chatgpt.com")
+    )
+
+
+def _traffic_failure_class(item: dict[str, Any]) -> str:
+    """把原始 failed 标记分成可读类别，避免把导航卸载当业务失败。"""
+    if bool(item.get("blocked")):
+        return "blocked"
+    if bool(item.get("unfinished")):
+        return "unfinished"
+    try:
+        status = int(item.get("status")) if item.get("status") is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if status is not None and status >= 400:
+        return "http_error"
+    if not bool(item.get("failed")):
+        return "ok"
+    resource_type = _normalize_resource_type(item.get("type"))
+    if status is None and resource_type == "document" and _known_browser_host(item.get("url")):
+        return "navigation_cancelled"
+    if status is None and resource_type in {"script", "stylesheet", "image", "media", "font", "other"} and _known_browser_host(item.get("url")):
+        return "asset_unloaded"
+    return "request_failed"
+
+
+def _traffic_detail_is_interesting(item: dict[str, Any]) -> bool:
+    """compact 模式保留业务请求和真正可疑的资源。"""
+    failure_class = _traffic_failure_class(item)
+    if failure_class in {"blocked", "unfinished", "http_error", "request_failed", "navigation_cancelled"}:
+        return True
+    if failure_class == "asset_unloaded":
+        return False
+    resource_type = _normalize_resource_type(item.get("type"))
+    if resource_type in {"document", "xhr", "fetch", "websocket"}:
+        return True
+    url = str(item.get("url") or "").lower()
+    return any(marker in url for marker in ("/api/", "/backend-api/", "/oauth/", "/email-otp/", "/add-phone/"))
+
+
 def _is_loopback_url(url: Any) -> bool:
     """本机回环 HTTP(S)/WS(S) 资源不属于代理或公网注册流量。"""
     try:
@@ -617,14 +668,8 @@ class _TrafficAccumulator:
             totals["download_bytes"] += int(item["download_bytes"])
             totals["blocked"] += int(bool(item["blocked"]))
             totals["failed"] += int(bool(item["failed"]))
-        logger.info(
-            "[%s] 浏览器资源明细汇总：记录 %s 条，按类型=%s",
-            self.label,
-            len(details),
-            json.dumps(dict(sorted(type_totals.items())), ensure_ascii=False, separators=(",", ":")),
-        )
-        # 资源明细保留逐请求统计，但日志按稳定资源签名合并显示；
-        # 这样同一页面反复加载的相同脚本不会淹没真正的异常记录。
+
+        # 资源明细保留逐请求统计，但日志按稳定资源签名合并显示。
         grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
         byte_fields = (
             "upload_bytes",
@@ -657,29 +702,46 @@ class _TrafficAccumulator:
             for field in byte_fields:
                 group[field] = int(group.get(field, 0) or 0) + int(item.get(field, 0) or 0)
 
-        ranked = sorted(
+        ranked_all = sorted(
             grouped.values(),
             key=lambda item: (
                 int(item["download_bytes"]) + int(item["upload_bytes"]),
                 int(item["download_bytes"]),
             ),
             reverse=True,
-        )[: self._detail_log_max_entries]
+        )
+        verbose = bool(getattr(_browser_cfg, "BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", False))
+        candidates = ranked_all if verbose else [item for item in ranked_all if _traffic_detail_is_interesting(item)]
+        ranked = candidates[: self._detail_log_max_entries]
+        failure_breakdown: dict[str, int] = defaultdict(int)
+        for item in details:
+            failure_breakdown[_traffic_failure_class(item)] += 1
         logger.info(
-            "[%s] 浏览器资源明细开始：按资源签名合并、按总字节降序，输出 %s/%s 组（原始记录 %s，URL 查询值已脱敏）",
+            "[%s] 浏览器资源摘要：记录=%s 原始=%s 类型=%s 失败分类=%s 模式=%s",
+            self.label,
+            len(grouped),
+            len(details),
+            json.dumps(dict(sorted(type_totals.items())), ensure_ascii=False, separators=(",", ":")),
+            json.dumps(dict(sorted(failure_breakdown.items())), ensure_ascii=False, separators=(",", ":")),
+            "verbose" if verbose else "compact",
+        )
+        logger.info(
+            "[%s] 浏览器资源明细开始：输出 %s/%s 组（总资源组 %s，原始记录 %s，URL 查询值已脱敏）",
             self.label,
             len(ranked),
-            len(grouped),
+            len(candidates),
+            len(ranked_all),
             len(details),
         )
         for index, item in enumerate(ranked, 1):
             logger.info(
-                "[%s] [资源明细] #%s count=%s %s %s status=%s upload=%sB download=%sB "
+                "[%s] [资源明细] #%s count=%s class=%s %s %s status=%s upload=%sB download=%sB "
                 "body=%sB headers=%sB failed=%s blocked=%s unfinished=%s cache=%s "
                 "mime=%s ws_upload=%sB ws_download=%sB url=%s",
                 self.label,
                 index,
                 item.get("occurrences", 1),
+                _traffic_failure_class(item),
                 item["type"],
                 item["method"],
                 item["status"] if item["status"] is not None else "-",
@@ -696,6 +758,13 @@ class _TrafficAccumulator:
                 item.get("websocket_payload_download_bytes", 0),
                 item["url"],
             )
+        omitted = len(ranked_all) - len(ranked)
+        if omitted > 0:
+            logger.info(
+                "[%s] [资源明细] compact/上限过滤：省略 %s 组；开启 BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG 可查看全部候选",
+                self.label,
+                omitted,
+            )
         logger.info("[%s] 浏览器资源明细结束", self.label)
 
     def _build_snapshot(self) -> dict[str, Any]:
@@ -703,6 +772,9 @@ class _TrafficAccumulator:
             total_upload = self.http_upload_bytes + self.websocket_upload_bytes
             total_download = self.http_download_bytes + self.websocket_download_bytes
             total = total_upload + total_download
+            detail_failure_breakdown: dict[str, int] = defaultdict(int)
+            for detail in self._request_details:
+                detail_failure_breakdown[_traffic_failure_class(detail)] += 1
             note = (
                 "浏览器侧 HTTP 请求/响应字节（含可获取的请求/响应头和主体）"
                 "；另计 WebSocket 帧 payload；不含 TLS/IP/代理隧道开销"
@@ -733,8 +805,10 @@ class _TrafficAccumulator:
                 "unknown_size_request_count": int(self.unknown_size_request_count),
                 "websocket_count": int(self.websocket_count),
                 "detail_log_enabled": bool(self._detail_log_enabled),
+                "detail_log_verbose": bool(getattr(_browser_cfg, "BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", False)),
                 "detail_log_max_entries": int(self._detail_log_max_entries),
                 "detail_recorded_count": int(len(self._request_details)),
+                "detail_failure_breakdown": dict(sorted(detail_failure_breakdown.items())),
                 "js_coverage": self._js_coverage_snapshot(),
                 "note": note,
             }
@@ -765,13 +839,14 @@ class _TrafficAccumulator:
         self._reported = True
         logger.info(
             "[%s] 注册浏览器网络流量：上传 %.2f KiB，下载 %.2f KiB，合计 %.2f KiB，"
-            "HTTP请求 %s（失败 %s，未完成 %s）",
+            "HTTP请求 %s（失败 %s，分类=%s，未完成 %s）",
             self.label,
             snapshot.get("upload_bytes", 0) / 1024,
             snapshot.get("download_bytes", 0) / 1024,
             snapshot.get("total_bytes", 0) / 1024,
             snapshot.get("request_count", 0),
             snapshot.get("failed_request_count", 0),
+            snapshot.get("detail_failure_breakdown", {}) or {},
             snapshot.get("unfinished_request_count", 0),
         )
         if snapshot.get("data_saver_enabled"):

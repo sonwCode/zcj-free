@@ -104,6 +104,7 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         self.assertEqual(fields["BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES"]["type"], "list_str_multiline")
         self.assertEqual(fields["BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS"]["type"], "list_str_multiline")
         self.assertEqual(fields["BROWSER_TRAFFIC_DETAIL_LOG"]["type"], "bool")
+        self.assertEqual(fields["BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG"]["type"], "bool")
         self.assertEqual(fields["BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES"]["type"], "int")
         self.assertEqual(fields["BROWSER_JS_COVERAGE_LOG"]["type"], "bool")
         self.assertEqual(fields["BROWSER_JS_COVERAGE_MAX_ENTRIES"]["type"], "int")

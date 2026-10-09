@@ -547,7 +547,11 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "BROWSER_TRAFFIC_DETAIL_LOG", "file": "browser.py", "type": "bool", "group": "浏览器画像",
-        "label": "本地浏览器流量明细日志", "help": "仅 Roxy/Cloak 生效；注册结束时输出每个资源的 URL、类型、方法、状态码和上传/下载大小；URL 查询值会脱敏，默认关闭",
+        "label": "本地浏览器流量明细日志", "help": "仅 Roxy/Cloak 生效；注册结束时记录资源统计，默认只输出 API、文档和异常资源；URL 查询值会脱敏，默认关闭",
+    },
+    {
+        "key": "BROWSER_TRAFFIC_DETAIL_VERBOSE_LOG", "file": "browser.py", "type": "bool", "group": "浏览器画像",
+        "label": "逐条输出全部资源明细", "help": "仅在流量明细日志开启时生效；开启后逐条输出所有静态资源，日志会明显增多，默认关闭",
     },
     {
         "key": "BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES", "file": "browser.py", "type": "int", "group": "浏览器画像",

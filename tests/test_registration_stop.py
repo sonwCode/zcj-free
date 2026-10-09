@@ -76,6 +76,12 @@ class RegistrationStopTests(unittest.TestCase):
             phone_activation=result["codex"]["phone_activation"],
         )
 
+    def test_job_persists_codex_phone_metadata_once(self):
+        source = (Path(__file__).parents[1] / "core" / "registration_service.py").read_text(encoding="utf-8")
+        start = source.index("def _run_one_job")
+        body = source[start:]
+        self.assertEqual(body.count("_persist_codex_phone_activation(result_dict, result_email, result_account_id)"), 1)
+
     def test_stop_aware_sleep_raises_promptly_after_signal(self):
         job_id = self._next_job_id()
         started = threading.Event()

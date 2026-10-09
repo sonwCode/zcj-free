@@ -1362,6 +1362,14 @@ def _submit_email_and_wait_next(
     _check_manual_stop()
     last_state = None
     current_email = str(email or "").strip()
+
+    def _email_stage_done(state: str, attempt: int) -> str:
+        logger.info(
+            "%s 邮箱阶段完成：state=%s attempt=%s/%s email=%s",
+            _log_prefix(driver), state, attempt, attempts, current_email or "-",
+        )
+        return state
+
     for attempt in range(1, attempts + 1):
         _check_manual_stop()
         advanced = _current_email_submit_next_state(driver)
@@ -1370,7 +1378,7 @@ def _submit_email_and_wait_next(
             if advanced == "login_password":
                 raise EmailAlreadyRegistered(f"邮箱在 OpenAI 侧已存在账号（邮箱提交后进入登录密码页）: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
             logger.info("%s 重试填写邮箱前发现页面已进入下一步：%s", _log_prefix(driver), advanced)
-            return advanced
+            return _email_stage_done(advanced, attempt)
         try:
             if current_email:
                 _type_email_address(driver, current_email, timeout=20)
@@ -1389,7 +1397,7 @@ def _submit_email_and_wait_next(
             if exc.state == "login_password":
                 raise EmailAlreadyRegistered(f"邮箱在 OpenAI 侧已存在账号（邮箱提交后进入登录密码页）: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}") from exc
             logger.info("%s 等待邮箱输入框期间页面已进入下一步：%s", _log_prefix(driver), exc.state)
-            return exc.state
+            return _email_stage_done(exc.state, attempt)
         state = _email_input_value_state(driver)
         _check_manual_stop()
         last_state = state
@@ -1409,7 +1417,7 @@ def _submit_email_and_wait_next(
             raise EmailAlreadyRegistered(f"邮箱在 OpenAI 侧已存在账号（邮箱提交后进入登录密码页）: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
         if state_name in ("password", "otp", "logged_in"):
             logger.info("%s 邮箱提交后已进入下一步：%s", _log_prefix(driver), state_name)
-            return state_name
+            return _email_stage_done(state_name, attempt)
         diagnostic_state = _email_input_value_state(driver)
         _check_manual_stop()
         # Selenium 读取 DOM 时页面可能恰好完成慢跳转。诊断采样后必须再判断一次，
@@ -1420,9 +1428,10 @@ def _submit_email_and_wait_next(
             if advanced == "login_password":
                 raise EmailAlreadyRegistered(f"邮箱在 OpenAI 侧已存在账号（邮箱提交后进入登录密码页）: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
             logger.info("%s 邮箱提交诊断期间页面已进入下一步：%s", _log_prefix(driver), advanced)
-            return advanced
+            return _email_stage_done(advanced, attempt)
         logger.warning("%s 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", _log_prefix(driver), state_name, diagnostic_state)
         _stop_aware_sleep(1.0)
+    logger.error("%s 邮箱阶段失败：attempts=%s last_state=%s email=%s", _log_prefix(driver), attempts, last_state, current_email or "-")
     raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
 
 
