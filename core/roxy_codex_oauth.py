@@ -2212,6 +2212,64 @@ def _click_add_phone_continue_button(driver, *, timeout: int = 10) -> dict:
     raise RuntimeError(f"submit_missing: add-phone Continue/続行 submit button not found last={last} state={_phone_page_state(driver)}")
 
 
+def _start_add_phone_response_watch(driver):
+    """在 Cloak 页面上暂存 add-phone/send 响应，供失败诊断读取。"""
+    page = getattr(driver, "page", None)
+    if page is None or not callable(getattr(page, "on", None)):
+        return None
+    responses = []
+
+    def _on_response(response):
+        try:
+            url = str(getattr(response, "url", "") or "")
+        except Exception:
+            return
+        if "/api/accounts/add-phone/send" in url:
+            responses.append(response)
+
+    try:
+        page.on("response", _on_response)
+        return {"page": page, "callback": _on_response, "responses": responses}
+    except Exception:
+        return None
+
+
+def _finish_add_phone_response_watch(watch) -> None:
+    if not watch:
+        return
+    page = watch.get("page")
+    callback = watch.get("callback")
+    try:
+        remover = getattr(page, "remove_listener", None) or getattr(page, "off", None)
+        if callable(remover):
+            remover("response", callback)
+    except Exception:
+        pass
+    for response in list(watch.get("responses") or []):
+        try:
+            status = int(getattr(response, "status", 0) or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if 200 <= status < 400:
+            continue
+        detail = ""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                selected = {
+                    key: str(payload.get(key))[:240]
+                    for key in ("error", "message", "detail", "code", "type", "requestId", "request_id")
+                    if payload.get(key) is not None
+                }
+                detail = json.dumps(selected, ensure_ascii=False, separators=(",", ":"))[:600]
+        except Exception:
+            try:
+                detail = " ".join(str(response.text() or "").split())[:600]
+            except Exception:
+                detail = "response_body_unavailable"
+        logger.warning("[Codex][Browser] add-phone/send 响应诊断：status=%s detail=%s", status, detail or "-")
+
+
 def _phone_state_digest(state: dict) -> str:
     """把 add-phone 页的关键状态压成一行，便于在日志里完整看出卡点。
 
@@ -2491,10 +2549,14 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 e164 = f"+{phone}"
                 # 号码尝试只允许一次：任何未进入验证码页的失败都立即释放，
                 # 不再用同一个激活反复提交，避免平台继续计费或状态失控。
-                _prepare_and_submit_add_phone(
-                    driver, e164, label=f"-attempt-{attempt}-submit-1",
-                )
-                _wait_after_phone_send(driver, timeout=15)
+                response_watch = _start_add_phone_response_watch(driver)
+                try:
+                    _prepare_and_submit_add_phone(
+                        driver, e164, label=f"-attempt-{attempt}-submit-1",
+                    )
+                    _wait_after_phone_send(driver, timeout=15)
+                finally:
+                    _finish_add_phone_response_watch(response_watch)
                 logger.info("[Codex][Browser] 已进入手机验证码页")
 
                 sms_provider.set_status(activation_id, 1, http=http)

@@ -96,6 +96,9 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertNotIn("_wait_page_settle_after_submit()", prepare_body)
         self.assertIn("不对当前号码二次提交", click_body)
         self.assertIn("不会对当前 activation 重复提交", wait_body)
+        self.assertIn("_start_add_phone_response_watch(driver)", TEXT)
+        self.assertIn("_finish_add_phone_response_watch(response_watch)", TEXT)
+        self.assertIn("finally:", TEXT[TEXT.index("response_watch ="):TEXT.index("response_watch =") + 500])
 
 
 class ChannelMarkerSplitTests(unittest.TestCase):

@@ -53,6 +53,17 @@ class CloakOtpResendTests(unittest.TestCase):
         self.assertIn("已提交邮箱验证码，等待资料页或登录态", otp_loop)
         self.assertIn("提交后状态：%s", otp_loop)
 
+    def test_password_stage_resets_otp_timestamp(self):
+        body = _function_source("_run_cloak_registration_impl")
+        password_end = body.index("current_otp = otp_code")
+        password_block = body[:password_end]
+        self.assertIn("if openai_password:", password_block)
+        self.assertIn("otp_after_ts = time.time()", password_block)
+        self.assertLess(
+            password_block.index("otp_after_ts = time.time()"),
+            password_end,
+        )
+
     def test_failed_registration_skips_broken_pipe_cleanup(self):
         body = _function_source("_run_cloak_registration_impl")
         self.assertIn("hard_cleanup = True", body)

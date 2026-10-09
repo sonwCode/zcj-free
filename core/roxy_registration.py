@@ -3255,6 +3255,10 @@ def run_roxy_registration(
         openai_password = _fill_password_page_if_present(driver, email, timeout=25)
         _traffic_checkpoint()
         _check_manual_stop()
+        if openai_password:
+            # 密码校验后会重新发送注册 OTP；只接受该阶段之后到达的验证码。
+            otp_after_ts = time.time()
+            logger.info("[Roxy注册][OTP] 密码阶段完成，重置 OTP 起始时间")
 
         # 防御性校验：任何密码页处理分支都不得把仍停留在密码路由的页面交给
         # OTP 输入逻辑，否则只会刷新密码页并报告“找不到 OTP 输入框”。

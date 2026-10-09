@@ -189,6 +189,10 @@ def _run_cloak_registration_impl(
         # _fill_password_page_if_present 会在设置成功后返回本次 OpenAI 注册密码。
         openai_password = _fill_password_page_if_present(driver, email, timeout=25)
         _check_manual_stop()
+        if openai_password:
+            # 密码校验后会重新发送注册 OTP；只接受该阶段之后到达的验证码。
+            otp_after_ts = time.time()
+            logger.info("[Cloak注册][OTP] 密码阶段完成，重置 OTP 起始时间")
 
         current_otp = otp_code
         used_otps: set[str] = set()
