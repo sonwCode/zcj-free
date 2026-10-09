@@ -604,9 +604,31 @@ def _current_email_submit_next_state(driver) -> str | None:
     return None
 
 
+def _normalize_page_state(raw, driver, *, list_keys=()) -> dict:
+    """把浏览器脚本返回值收敛成可安全读取的页面状态。"""
+    if isinstance(raw, dict):
+        state = dict(raw)
+    else:
+        state = {
+            "error": f"invalid_page_state:{type(raw).__name__}",
+            "value": str(raw)[:300],
+        }
+    for key in list_keys:
+        if not isinstance(state.get(key), list):
+            state[key] = []
+    if not isinstance(state.get("url"), str):
+        state["url"] = str(getattr(driver, "current_url", "") or "")
+    return state
+
+
+def _dict_state_items(state: dict, key: str) -> list[dict]:
+    """只返回状态列表中的字典项，避免导航竞态污染主流程。"""
+    return [item for item in (state.get(key) or []) if isinstance(item, dict)]
+
+
 def _email_entry_state(driver) -> dict:
     try:
-        return driver.execute_script(r"""
+        raw = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
           && !el.disabled;
@@ -624,8 +646,9 @@ def _email_entry_state(driver) -> dict:
           .filter(visible).map(el => ({tag: el.tagName, type: el.getAttribute('type') || '', attrs: attrText(el)})).slice(0, 40);
         return {url: location.href, title: document.title, inputs, actions};
         """) or {}
+        return _normalize_page_state(raw, driver, list_keys=("inputs", "actions"))
     except Exception as exc:
-        return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
+        return _normalize_page_state({"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}, driver, list_keys=("inputs", "actions"))
 
 
 def _find_visible_email_input_js(driver):
@@ -712,7 +735,7 @@ def _write_email_value(driver, element, email: str) -> bool:
             logger.debug("%s Cloak 邮箱整值填充失败 attempt=%s: %s: %s", _log_prefix(driver), attempt + 1, type(exc).__name__, exc)
         _stop_aware_sleep(0.12)
         state = _email_input_value_state(driver)
-        values = [str(item.get("value") or "").strip().lower() for item in (state.get("inputs") or [])]
+        values = [str(item.get("value") or "").strip().lower() for item in _dict_state_items(state, "inputs")]
         if value.lower() in values:
             return True
         # React 可能在 fill 返回后立即替换节点；下一轮重新取得 live locator。
@@ -721,7 +744,7 @@ def _write_email_value(driver, element, email: str) -> bool:
     repaired = _set_visible_email_value_js(driver, value)
     _stop_aware_sleep(0.12)
     state = _email_input_value_state(driver)
-    values = [str(item.get("value") or "").strip().lower() for item in (state.get("inputs") or [])]
+    values = [str(item.get("value") or "").strip().lower() for item in _dict_state_items(state, "inputs")]
     if value.lower() in values:
         logger.info("%s Cloak 邮箱已通过 DOM setter 修复并校验：%s", _log_prefix(driver), repaired)
         return True
@@ -929,7 +952,7 @@ def _submit_nearest_form_for_active_input(driver) -> bool:
 def _current_email_input_value(driver) -> str:
     try:
         state = _email_input_value_state(driver)
-        for item in state.get("inputs") or []:
+        for item in _dict_state_items(state, "inputs"):
             value = str(item.get("value") or "").strip()
             if "@" in value:
                 return value
@@ -1267,7 +1290,7 @@ def _submit_email_via_browser_nextauth(driver, email: str) -> dict:
 def _email_input_value_state(driver) -> dict:
     """读取当前可见邮箱框状态，用于提交后确认是否真的进入下一步。"""
     try:
-        return driver.execute_script(r"""
+        raw = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
           && !el.disabled && !el.readOnly;
@@ -1276,13 +1299,14 @@ def _email_input_value_state(driver) -> dict:
           .map(el => ({type: el.getAttribute('type') || '', name: el.name || '', id: el.id || '', autocomplete: el.getAttribute('autocomplete') || '', value: el.value || ''}));
         return {url: location.href, inputs};
         """) or {}
+        return _normalize_page_state(raw, driver, list_keys=("inputs",))
     except Exception as exc:
-        return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
+        return _normalize_page_state({"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}, driver, list_keys=("inputs",))
 
 
 def _is_email_login_page_still_present(driver) -> bool:
     state = _email_input_value_state(driver)
-    return bool(state.get("inputs"))
+    return bool(_dict_state_items(state, "inputs"))
 
 
 def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
@@ -1311,7 +1335,7 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
         state = _email_input_value_state(driver)
         _check_manual_stop()
         last = state
-        inputs = state.get("inputs") or []
+        inputs = _dict_state_items(state, "inputs")
         if inputs:
             values = [str(i.get("value") or "") for i in inputs]
             url = str(state.get("url") or "")
@@ -1401,7 +1425,7 @@ def _submit_email_and_wait_next(
         state = _email_input_value_state(driver)
         _check_manual_stop()
         last_state = state
-        values = [str(i.get("value") or "") for i in (state.get("inputs") or [])]
+        values = [str(i.get("value") or "") for i in _dict_state_items(state, "inputs")]
         if not any(v.strip().lower() == current_email.lower() for v in values):
             logger.warning("%s 邮箱写入校验失败，准备重试：attempt=%s/%s state=%s", _log_prefix(driver), attempt, attempts, state)
             _stop_aware_sleep(0.8)
@@ -1478,7 +1502,7 @@ def _type_otp(driver, code: str) -> None:
 
 def _email_otp_page_state(driver) -> dict:
     try:
-        return driver.execute_script(r"""
+        raw = driver.execute_script(r"""
         const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
         const inputs = [...document.querySelectorAll('input')].filter(visible).map(el => ({
           type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
@@ -1495,8 +1519,9 @@ def _email_otp_page_state(driver) -> dict:
           .filter(visible).map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
         return {url: location.href, title: document.title, inputs, buttons, errors, text: (document.body?.innerText || '').slice(0, 1200)};
         """) or {}
+        return _normalize_page_state(raw, driver, list_keys=("inputs", "buttons", "errors"))
     except Exception as exc:
-        return {"url": getattr(driver, 'current_url', ''), "error": f"{type(exc).__name__}: {exc}"}
+        return _normalize_page_state({"url": getattr(driver, 'current_url', ''), "error": f"{type(exc).__name__}: {exc}"}, driver, list_keys=("inputs", "buttons", "errors"))
 
 
 def _is_email_verification_page(driver) -> bool:
@@ -1509,7 +1534,7 @@ def _is_email_verification_page(driver) -> bool:
     if 'email-verification' in url:
         return True
     state = _email_otp_page_state(driver)
-    attrs = ' '.join(' '.join(str(i.get(k) or '') for k in ('type','name','id','autocomplete','inputmode')) for i in (state.get('inputs') or [])).lower()
+    attrs = ' '.join(' '.join(str(i.get(k) or '') for k in ('type','name','id','autocomplete','inputmode')) for i in _dict_state_items(state, 'inputs')).lower()
     return 'one-time-code' in attrs or 'otp' in attrs or 'code' in attrs
 
 
@@ -1593,7 +1618,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
         invalid_fields = tuple(
             str(i.get('name') or i.get('id') or i.get('autocomplete') or index)
             for index, i in enumerate(last.get('inputs') or [])
-            if str(i.get('ariaInvalid') or '').lower() == 'true'
+            if isinstance(i, dict) and str(i.get('ariaInvalid') or '').lower() == 'true'
         )
         error_present = bool(last.get('errors') or [])
         current_signature = (error_present, invalid_fields)
@@ -1977,7 +2002,7 @@ def _registration_password() -> str:
 
 def _password_page_state(driver) -> dict:
     try:
-        state = driver.execute_script(r"""
+        raw = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
           && !el.disabled && !el.readOnly;
@@ -1994,16 +2019,9 @@ def _password_page_state(driver) -> dict:
           .filter(el => visible(el)).map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 10);
         return {url: location.href, inputs, forms, buttons, errors};
         """) or {}
-        if not isinstance(state, dict):
-            state = {"error": "invalid_password_page_state", "value": str(state)[:300]}
-        for key in ("inputs", "forms", "buttons", "errors"):
-            if not isinstance(state.get(key), list):
-                state[key] = []
-        if not isinstance(state.get("url"), str):
-            state["url"] = str(getattr(driver, "current_url", "") or "")
-        return state
+        return _normalize_page_state(raw, driver, list_keys=("inputs", "forms", "buttons", "errors"))
     except Exception as exc:
-        return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
+        return _normalize_page_state({"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}, driver, list_keys=("inputs", "forms", "buttons", "errors"))
 
 
 def _is_signup_password_page(driver) -> bool:
@@ -2015,7 +2033,7 @@ def _is_signup_password_page(driver) -> bool:
         return True
     if '/log-in/password' in url:
         return False
-    inputs = state.get('inputs') or []
+    inputs = _dict_state_items(state, 'inputs')
     return any(
         i.get('visible') and (
             str(i.get('type') or '').lower() == 'password'
@@ -2061,37 +2079,73 @@ def _is_login_password_page(driver) -> bool:
 
 
 def _resubmit_signup_password_form(driver) -> dict:
-    """密码页点击无跳转时，针对当前密码表单执行一次原生 requestSubmit。"""
+    """密码页无跳转时重新定位 live Continue，先真实点击再补交表单。"""
     try:
         return driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const enabled = el => visible(el) && !el.disabled
+          && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
         const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
-          .find(visible);
+          .find(enabled);
         const form = input?.closest('form');
-        // requestSubmit() 只接受真正的提交按钮，传其它元素会抛
-        // "The specified element is not a submit button"。这里必须显式排除
-        // type="button"：密码页第一个按钮就是 type="button"（显示/隐藏密码），
-        // 旧选择器 'button[type=submit],input[type=submit],button' 是 OR 语义，
-        // 会把它选出来，导致这个兜底从上线起就从未生效。
-        const submitButtons = form ? [...form.querySelectorAll('button,input[type="submit"]')]
-          .filter(el => {
-            const type = String(el.getAttribute('type') || 'button').toLowerCase();
-            const tag = el.tagName.toLowerCase();
-            const isSubmit = tag === 'input' ? type === 'submit' : type === 'submit';
-            return isSubmit && visible(el) && !el.disabled
-              && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
-          }) : [];
-        const button = submitButtons[0] || null;
+        const buttons = form ? [...form.querySelectorAll('button,input[type="submit"],[role="button"]')]
+          .filter(enabled) : [];
+        const score = el => {
+          const attrs = [el.type, el.name, el.value, el.getAttribute('data-dd-action-name'),
+            el.getAttribute('aria-label'), el.textContent].join(' ').toLowerCase();
+          let value = 0;
+          if (String(el.type || '').toLowerCase() === 'submit') value += 100;
+          if (attrs.includes('continue')) value += 80;
+          if (attrs.includes('create')) value += 40;
+          return value;
+        };
+        const button = buttons.sort((a, b) => score(b) - score(a))[0] || null;
         const errors = [...document.querySelectorAll('[role="alert"],[aria-live="assertive"],[aria-live="polite"],.react-aria-FieldError,[slot="errorMessage"],[class*="error"]')]
           .filter(visible).map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 10);
         if (!input || !form) return {ok:false, reason:'missing_password_form', url:location.href, errors};
         if (!String(input.value || '')) return {ok:false, reason:'empty_password', url:location.href, errors};
+        if (!button) return {ok:false, reason:'missing_submit', url:location.href, errors};
         if (errors.length) return {ok:false, reason:'page_errors', url:location.href, errors};
-        if (typeof form.requestSubmit === 'function') form.requestSubmit(button || undefined);
-        else if (button) button.click();
-        else form.submit();
-        return {ok:true, reason:'form_requestSubmit', url:location.href, valueLength:String(input.value || '').length};
+
+        const trace = window.__roxy_password_submit_trace = {
+          startedAt: Date.now(), events: [],
+          url: location.href, buttonType: button.type || '', buttonText: (button.textContent || '').trim().slice(0, 80)
+        };
+        const push = item => { try { trace.events.push(Object.assign({at: Date.now()}, item)); } catch (_) {} };
+        const rect = button.getBoundingClientRect();
+        const base = {bubbles:true, cancelable:true, composed:true, view:window,
+          clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2, button:0, buttons:1};
+        button.scrollIntoView({block:'center'});
+        try {
+          button.dispatchEvent(new PointerEvent('pointerdown', {...base, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          push({type:'pointerdown'});
+          button.dispatchEvent(new MouseEvent('mousedown', base));
+          push({type:'mousedown'});
+          button.dispatchEvent(new PointerEvent('pointerup', {...base, buttons:0, pointerId:1, pointerType:'mouse', isPrimary:true}));
+          button.dispatchEvent(new MouseEvent('mouseup', {...base, buttons:0}));
+          button.click();
+          push({type:'click'});
+        } catch (error) {
+          push({type:'click_error', error:String(error).slice(0, 180)});
+        }
+        setTimeout(() => {
+          try {
+            const currentInput = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')].find(enabled);
+            const currentForm = currentInput?.closest('form');
+            const currentButton = currentForm && [...currentForm.querySelectorAll('button[type="submit"],input[type="submit"],[role="button"]')].find(enabled);
+            if (currentForm && currentButton) {
+              currentForm.requestSubmit?.(currentButton);
+              push({type:'request_submit'});
+            } else {
+              push({type:'form_missing_before_request_submit'});
+            }
+          } catch (error) {
+            push({type:'request_submit_error', error:String(error).slice(0, 180)});
+          }
+        }, 180);
+        return {ok:true, reason:'live_click_then_requestSubmit', url:location.href, valueLength:String(input.value || '').length,
+          buttonType:button.type || '', buttonText:(button.textContent || '').trim().slice(0, 80)};
         """) or {"ok": False, "reason": "empty_result"}
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -2580,11 +2634,17 @@ def _fill_password_page_if_present(
         if _is_signup_password_page(driver):
             current_url = str(getattr(driver, "current_url", "") or "")
             final_state = _password_page_state(driver)
+            try:
+                submit_trace = driver.execute_script("return window.__roxy_password_submit_trace || null;")
+            except Exception as trace_exc:
+                submit_trace = {"error": f"{type(trace_exc).__name__}: {trace_exc}"}
             if not _password_state_has_form(final_state):
                 raise RuntimeError(
-                    f"密码提交后跳转被截断，密码路由仍无表单: url={current_url} state={final_state}"
+                    f"密码提交后跳转被截断，密码路由仍无表单: url={current_url} state={final_state} trace={submit_trace}"
                 )
-            raise RuntimeError(f"密码提交后仍停留在注册密码页: url={current_url} state={final_state}")
+            raise RuntimeError(
+                f"密码提交后仍停留在注册密码页: url={current_url} state={final_state} trace={submit_trace}"
+            )
         return password
     # 如果已经请求切换到密码方式，不允许在导航竞态中静默进入 OTP 阶段。
     # 最后再读取一次浏览器 URL；已抵达密码路由但 DOM 尚未就绪时明确报错，

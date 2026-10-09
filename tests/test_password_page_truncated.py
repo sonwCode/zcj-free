@@ -1,6 +1,7 @@
 import ast
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 SOURCE = Path(__file__).parents[1] / "core" / "roxy_registration.py"
 TEXT = SOURCE.read_text(encoding="utf-8")
@@ -27,6 +28,15 @@ def _function_body(name: str) -> str:
 
 
 class PasswordStateTests(unittest.TestCase):
+    def test_navigation_string_state_is_normalized_without_get_error(self):
+        normalize = _load_function("_normalize_page_state")
+        items = _load_function("_dict_state_items")
+        state = normalize("navigation_after_script", SimpleNamespace(current_url="https://auth.openai.com/create-account/password"), list_keys=("inputs", "forms"))
+        self.assertEqual(state["url"], "https://auth.openai.com/create-account/password")
+        self.assertEqual(state["inputs"], [])
+        self.assertEqual(state["forms"], [])
+        self.assertEqual(items({"inputs": ["stale", {"type": "password"}]}, "inputs"), [{"type": "password"}])
+
     def test_empty_job_186_dom_is_not_a_usable_password_form(self):
         has_form = _load_function("_password_state_has_form")
         state = {
@@ -79,6 +89,20 @@ class PasswordRecoveryTests(unittest.TestCase):
         body = _function_body("_fill_password_page_if_present")
         self.assertIn("密码提交后跳转被截断", body)
         self.assertIn("重载后仍停留在空密码页", body)
+
+    def test_resubmit_relocates_live_button_and_records_submit_trace(self):
+        body = _function_body("_resubmit_signup_password_form")
+        for marker in (
+            "live_click_then_requestSubmit",
+            "__roxy_password_submit_trace",
+            "pointerdown",
+            "mousedown",
+            "button.click()",
+            "requestSubmit",
+            "setTimeout",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, body)
 
 
 if __name__ == "__main__":

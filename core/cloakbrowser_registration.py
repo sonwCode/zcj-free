@@ -402,7 +402,7 @@ def _run_cloak_registration_impl(
         }
     except Exception as exc:
         hard_cleanup = True
-        logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
+        logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc, exc_info=True)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)
         try:
             if email:
