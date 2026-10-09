@@ -411,6 +411,28 @@ class SmsProviderStrategyTests(unittest.TestCase):
         state = sms_provider._activation_state(activation_id)
         self.assertEqual(state["country"], "35")
 
+    def test_random_country_refreshes_after_no_numbers(self):
+        codex_config.SMS_MAX_PRICE = "0.25"
+        codex_config.SMSBOWER_USE_V2 = False
+        codex_config.SMS_NUMBER_ACQUIRE_RETRIES = 3
+        http = _Http([
+            _Response(json.dumps({"36": {"dr": {"cost": 0.031, "count": 50}}})),
+            _Response("NO_NUMBERS"),
+            _Response(json.dumps({
+                "36": {"dr": {"cost": 0.031, "count": 50}},
+                "35": {"dr": {"cost": 0.033, "count": 30}},
+            })),
+            _Response("ACCESS_NUMBER:a-refreshed:15550004"),
+        ])
+
+        with patch.object(sms_provider.random, "shuffle", side_effect=lambda rows: None):
+            activation_id, phone = sms_provider.acquire_number(http=http)
+
+        self.assertEqual((activation_id, phone), ("a-refreshed", "15550004"))
+        number_calls = [call for call in http.calls if call["params"].get("action") != "getPrices"]
+        self.assertEqual([call["params"]["country"] for call in number_calls], ["36", "35"])
+        self.assertEqual(len([call for call in http.calls if call["params"].get("action") == "getPrices"]), 2)
+
     def test_explicit_country_bypasses_random_country_pool(self):
         codex_config.SMS_MAX_PRICE = "0.25"
         http = _Http([
@@ -430,19 +452,20 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(number_calls[0]["params"]["country"], "10")
         self.assertEqual(number_calls[0]["params"]["maxPrice"], "0.034722")
 
-    def test_random_country_without_max_price_uses_configured_country(self):
+    def test_random_country_without_max_price_uses_inventory_not_fixed_country(self):
         codex_config.SMS_MAX_PRICE = ""
+        codex_config.SMS_COUNTRY = "99"
         http = _Http([
             _Response(json.dumps({"1": {"dr": {"cost": 0.03, "count": 12}}})),
             _Response(json.dumps({
-                "activationId": "a-configured",
+                "activationId": "a-random-no-cap",
                 "phoneNumber": "84377221015",
             })),
         ])
 
         activation_id, phone = sms_provider.acquire_number(http=http)
 
-        self.assertEqual((activation_id, phone), ("a-configured", "84377221015"))
+        self.assertEqual((activation_id, phone), ("a-random-no-cap", "84377221015"))
         number_calls = [call for call in http.calls if call["params"].get("action") != "getPrices"]
         self.assertEqual(len(http.calls), 2)
         self.assertEqual(len(number_calls), 1)

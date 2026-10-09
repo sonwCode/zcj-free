@@ -975,28 +975,40 @@ def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list
         return []
     min_price_cny = _smsbower_price_bound("SMSBOWER_MIN_PRICE")
     max_price_cny = _smsbower_price_bound("SMS_MAX_PRICE")
-    if max_price_cny is None:
-        logger.warning("[SMSBower] 未配置最高价格，继续使用固定国家 SMS_COUNTRY=%s", getattr(_cfg, "SMS_COUNTRY", ""))
-        return []
     cny_to_usd_rate, fx_source = _cny_to_usd_rate()
     min_price_usd, max_price_usd = _provider_price_bounds_usd(
         "smsbower", cny_to_usd_rate=cny_to_usd_rate
     )
+    rows = _smsbower_price_rows(http, service)
+    stocked = [row for row in rows if row.get("count", 0) > 0]
     candidates = [
-        row for row in _smsbower_price_rows(http, service)
-        if row["cost"] <= max_price_usd and (min_price_usd is None or row["cost"] >= min_price_usd)
+        row for row in stocked
+        if (max_price_usd is None or row["cost"] <= max_price_usd)
+        and (min_price_usd is None or row["cost"] >= min_price_usd)
     ]
 
     random.shuffle(candidates)
     logger.info(
         "[SMSBower] 随机国家候选：service=%s count=%s price_usd=%s..%s price_cny=%s..%s rate_usd_cny=%s fx_source=%s",
         service, len(candidates), min_price_usd if min_price_usd is not None else 0,
-        max_price_usd, min_price_cny if min_price_cny is not None else 0,
-        max_price_cny, _format_usd_cny_rate(cny_to_usd_rate), fx_source,
+        max_price_usd if max_price_usd is not None else "unbounded",
+        min_price_cny if min_price_cny is not None else 0,
+        max_price_cny if max_price_cny is not None else "unbounded",
+        _format_usd_cny_rate(cny_to_usd_rate), fx_source,
     )
     if not candidates:
+        if stocked:
+            cheapest = min(stocked, key=lambda row: row["cost"])
+            detail = (
+                "；当前在库最低价 USD {}，国家={}，库存={}"
+                .format(cheapest["cost"], cheapest["country"], cheapest.get("count", 0))
+            )
+        else:
+            detail = "；getPrices 当前没有在库国家"
+        if max_price_cny is None:
+            raise SmsNoNumbersError(f"SMSBower 当前价格/库存范围内没有可用国家{detail}")
         raise SmsNoNumbersError(
-            f"SMSBower 在人民币最高价格 ¥{max_price_cny}（约 USD {max_price_usd:.6f}）内没有可用国家"
+            f"SMSBower 在人民币最高价格 ¥{max_price_cny}（约 USD {max_price_usd:.6f}）内没有可用国家{detail}"
         )
     return candidates
 
@@ -1147,10 +1159,10 @@ def _preflight_sms_dependency_for_provider(
         raise SmsProviderConfigurationError(f"不支持的短信平台：{provider}")
     rows = _smsbower_price_rows(http, service_code)
     min_price_usd, max_price_usd = _smsbower_price_bounds_usd()
-    if bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) and country is None and max_price_usd is not None:
+    if bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) and country is None:
         candidates = [
             row for row in rows
-            if row["cost"] <= max_price_usd
+            if (max_price_usd is None or row["cost"] <= max_price_usd)
             and (min_price_usd is None or row["cost"] >= min_price_usd)
         ]
         if not candidates:
@@ -1459,16 +1471,22 @@ def _acquire_number_for_provider(
 
     attempts = _setting_int("SMS_NUMBER_ACQUIRE_RETRIES", 3, 1)
     service_code = _sms_service_code(service)
+    random_country_mode = (
+        provider == "smsbower"
+        and country is None
+        and bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True))
+    )
     random_countries: list[dict] = []
+    tried_countries: set[str] = set()
     fixed_price_quote = None
-    if country is None:
+    last_no_numbers: SmsNoNumbersError | None = None
+    if random_country_mode:
+        attempts = max(
+            attempts,
+            _setting_int("SMSBOWER_RANDOM_COUNTRY_ATTEMPTS", 12, 1),
+        )
         random_countries = _smsbower_random_country_candidates(http, service_code)
-        if random_countries:
-            attempts = min(
-                max(1, _setting_int("SMSBOWER_RANDOM_COUNTRY_ATTEMPTS", 12, 1)),
-                len(random_countries),
-            )
-    if not random_countries:
+    elif not random_country_mode:
         configured_country = str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
         if configured_country:
             try:
@@ -1480,7 +1498,19 @@ def _acquire_number_for_provider(
             except Exception as exc:
                 logger.warning("[SMSBower] 获取号码价格快照失败，不影响取号：%s", exc)
     for attempt in range(1, attempts + 1):
-        candidate = random_countries[attempt - 1] if random_countries else None
+        candidate = None
+        if random_country_mode:
+            if not random_countries:
+                try:
+                    refreshed = _smsbower_random_country_candidates(http, service_code)
+                except SmsNoNumbersError as exc:
+                    last_no_numbers = exc
+                    logger.warning("[SMSBower] 刷新随机国家库存后仍无候选：%s", str(exc)[:220])
+                    break
+                fresh = [row for row in refreshed if row["country"] not in tried_countries]
+                random_countries = fresh or refreshed
+            candidate = random_countries.pop(0)
+            tried_countries.add(candidate["country"])
         selected_country = candidate["country"] if candidate else country
         try:
             activation_id, phone = _acquire_number_once(
@@ -1490,10 +1520,11 @@ def _acquire_number_for_provider(
                 price_quote=candidate or fixed_price_quote,
                 provider=provider,
             )
-        except SmsNoNumbersError:
-            if random_countries and attempt < attempts:
+        except SmsNoNumbersError as exc:
+            last_no_numbers = exc
+            if random_country_mode and attempt < attempts:
                 logger.info(
-                    "[SMSBower] 随机国家无号，继续候选：attempt=%s/%s country=%s cost=%s",
+                    "[SMSBower] 随机国家无号，刷新库存并继续候选：attempt=%s/%s country=%s cost=%s",
                     attempt, attempts, candidate["country"], candidate["cost"],
                 )
                 continue
@@ -1525,8 +1556,11 @@ def _acquire_number_for_provider(
             _release_strategy_rejected(activation_id, http)
             continue
         return activation_id, phone
-    if random_countries:
-        raise SmsNoNumbersError(f"随机尝试 {attempts} 个价格范围内国家后仍无可用号码")
+    if random_country_mode:
+        detail = f"；最后一次取号结果：{last_no_numbers}" if last_no_numbers else ""
+        raise SmsNoNumbersError(
+            f"随机尝试/刷新 {attempts} 个价格范围内国家后仍无可用号码{detail}"
+        ) from last_no_numbers
     raise SmsNumberRejectedError(f"连续 {attempts} 次取到的号码或供应商层级均被策略排除")
 
 

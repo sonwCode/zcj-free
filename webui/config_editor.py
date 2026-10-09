@@ -759,7 +759,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "SMSBOWER_RANDOM_COUNTRY", "file": "codex.py", "type": "bool", "group": "接码平台",
-        "label": "按价格随机选国家", "help": "未指定国家且配置最高价格时，从有库存候选国家中随机取号",
+        "label": "按价格随机选国家", "help": "未指定国家时，从当前价格和库存候选中随机取号；最高价跟随上方设置",
     },
     {
         "key": "SMSBOWER_RANDOM_COUNTRY_ATTEMPTS", "file": "codex.py", "type": "int", "group": "接码平台",

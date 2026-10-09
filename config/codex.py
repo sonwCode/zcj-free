@@ -133,8 +133,8 @@ TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS: int = 12
 # 服务代码：OpenAI (ChatGPT) = "dr"
 SMS_SERVICE: str = "dr"
 
-# 两个平台均使用外部平台国家代码；留空时按价格/库存候选随机选择。
-SMS_COUNTRY: str = "10"
+# 两个平台均使用外部平台国家代码；随机模式开启时留空，按实时库存随机选择。
+SMS_COUNTRY: str = ""
 
 # 通用人民币价格上限；程序实时读取 CNY -> USD 汇率后发送给两个平台。
 SMS_MAX_PRICE: str = ""
