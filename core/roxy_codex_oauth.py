@@ -529,7 +529,8 @@ def _fill_login_password_if_present(
                 return "email_otp"
             raise RuntimeError(
                 "codex_password_step_stalled: 登录密码提交后仍停留在密码页 "
-                f"url={str(getattr(driver, 'current_url', '') or '')[:240]}"
+                f"url={str(getattr(driver, 'current_url', '') or '')[:240]} "
+                f"passwordless={passwordless}"
             )
         return "next_step"
     return None
