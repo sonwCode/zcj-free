@@ -28,6 +28,7 @@ from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 
 logger = logging.getLogger(__name__)
 _ROXY_STOP_CLEANUP_TIMEOUT_SECONDS = 5.0
+_EMAIL_OTP_INVALID_STABILITY_SECONDS = 2.0
 
 
 def _bounded_stop_cleanup(label: str, callback, *, always: bool = False):
@@ -1571,6 +1572,8 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
     _check_manual_stop()
     end = time.time() + timeout
     last = {}
+    invalid_since = None
+    invalid_signature = None
     while time.time() < end:
         _stop_aware_sleep(0.5)
         _check_manual_stop()
@@ -1578,22 +1581,52 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
             return 'accepted'
         last = _email_otp_page_state(driver)
         _check_manual_stop()
-        invalid = any(str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or []))
-        if invalid or (last.get('errors') or []):
-            return 'invalid'
+        invalid_fields = tuple(
+            str(i.get('name') or i.get('id') or i.get('autocomplete') or index)
+            for index, i in enumerate(last.get('inputs') or [])
+            if str(i.get('ariaInvalid') or '').lower() == 'true'
+        )
+        error_present = bool(last.get('errors') or [])
+        current_signature = (error_present, invalid_fields)
+        if error_present or invalid_fields:
+            now = time.time()
+            if current_signature != invalid_signature:
+                invalid_signature = current_signature
+                invalid_since = now
+            elif invalid_since is not None and now - invalid_since >= _EMAIL_OTP_INVALID_STABILITY_SECONDS:
+                logger.warning(
+                    "%s[OTP] 提交后验证码错误标记稳定 %.1fs，按验证码无效处理 error_present=%s invalid_fields=%s",
+                    _log_prefix(driver), now - invalid_since, error_present, invalid_fields,
+                )
+                return 'invalid'
+        else:
+            # React 页面切换时可能短暂挂载旧的错误节点；标记消失即重新计时。
+            invalid_signature = None
+            invalid_since = None
     _check_manual_stop()
     if _is_email_verification_page(driver):
         _check_manual_stop()
-        # 超时仍停留：若无明确错误标记，判定为提交成功、跳转缓慢，按 accepted 放行。
-        has_error_mark = bool(last.get('errors')) or any(
-            str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or [])
+        # 超时仍停留：只有稳定存在的错误标记才判定无效，否则按慢跳转放行。
+        now = time.time()
+        has_stable_error = (
+            invalid_since is not None
+            and now - invalid_since >= _EMAIL_OTP_INVALID_STABILITY_SECONDS
         )
-        if has_error_mark:
-            logger.warning("%s[OTP] 提交后仍停留验证码页且存在错误标记，按验证码无效处理 snapshot=%s", _log_prefix(driver), last)
+        if has_stable_error:
+            logger.warning(
+                "%s[OTP] 提交后仍停留验证码页且错误标记稳定 %.1fs，按验证码无效处理 error_present=%s invalid_fields=%s",
+                _log_prefix(driver), now - invalid_since,
+                bool(last.get('errors') or []),
+                tuple(
+                    str(i.get('name') or i.get('id') or i.get('autocomplete') or index)
+                    for index, i in enumerate(last.get('inputs') or [])
+                    if str(i.get('ariaInvalid') or '').lower() == 'true'
+                ),
+            )
             return 'invalid'
         logger.warning(
-            "%s[OTP] 提交后 %ss 仍在验证码页但无错误标记，按跳转缓慢处理（accepted） snapshot=%s",
-            _log_prefix(driver), timeout, last
+            "%s[OTP] 提交后 %ss 仍在验证码页但错误标记未稳定，按跳转缓慢处理（accepted）",
+            _log_prefix(driver), timeout,
         )
         return 'accepted'
     return 'accepted'

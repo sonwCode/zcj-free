@@ -51,6 +51,7 @@ class CloakOtpResendTests(unittest.TestCase):
         self.assertIn("fallback", otp_loop)
         self.assertIn("_wait_after_email_otp_submit(driver, timeout=30)", otp_loop)
         self.assertIn("已提交邮箱验证码，等待资料页或登录态", otp_loop)
+        self.assertIn("提交后状态：%s", otp_loop)
 
     def test_failed_registration_skips_broken_pipe_cleanup(self):
         body = _function_source("_run_cloak_registration_impl")

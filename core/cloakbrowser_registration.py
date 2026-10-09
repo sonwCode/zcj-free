@@ -253,6 +253,7 @@ def _run_cloak_registration_impl(
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
             outcome = _wait_after_email_otp_submit(driver, timeout=30)
+            logger.info("[Cloak注册][OTP] 提交后状态：%s", outcome)
             if outcome == "accepted":
                 break
             if otp_attempt >= max_otp_attempts:
