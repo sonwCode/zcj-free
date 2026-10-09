@@ -290,8 +290,12 @@ class RoxyCodexPhoneTests(unittest.TestCase):
     def test_phone_submit_waits_for_post_channel_react_state(self):
         source = self._function_source("_prepare_and_submit_add_phone")
         self.assertIn('label="短信通道确认完成"', source)
-        self.assertGreaterEqual(source.count("_select_sms_channel_or_raise(driver)"), 2)
+        self.assertEqual(source.count("_select_sms_channel_or_raise(driver)"), 1)
         self.assertIn("_verify_add_phone_value_before_submit", source)
+        self.assertLess(
+            source.index("_select_sms_channel_or_raise(driver)"),
+            source.index("_verify_add_phone_value_before_submit", source.index("_select_sms_channel_or_raise(driver)")),
+        )
 
 
 if __name__ == "__main__":

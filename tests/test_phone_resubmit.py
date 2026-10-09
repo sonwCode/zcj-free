@@ -72,6 +72,14 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn("_prepare_and_submit_add_phone(", TEXT)
 
 
+    def test_phone_submit_selects_sms_only_once(self):
+        start = TEXT.index("def _prepare_and_submit_add_phone")
+        end = TEXT.index("def _wait_after_phone_send", start)
+        block = TEXT[start:end]
+        self.assertEqual(block.count("_select_sms_channel_or_raise(driver)"), 1)
+        self.assertIn("_assert_sms_channel_or_raise(driver)", block)
+
+
 class ChannelMarkerSplitTests(unittest.TestCase):
     """SMS 选项存在却回退到 WhatsApp，与页面只有 WhatsApp 是两种问题。"""
 

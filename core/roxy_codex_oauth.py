@@ -2303,14 +2303,12 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
         phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
     )
     logger.info("[Codex][Browser] 检查并选择 SMS 短信通道")
+    # 只点击一次 SMS。重复点击 radio 会让 React 重建 add-phone 表单，
+    # 造成手机号状态回退为空并触发 Phone number required。
     _select_sms_channel_or_raise(driver)
-    # 与参考项目一致：radio 的 input/change 完成后先让 React 整体重渲染，
-    # 再检查手机号是否仍在组件状态里。
+    # 给通道选择的异步状态更新留时间，但不再次点击 radio。
     _blur_active_input_and_wait(driver, label="短信通道确认完成")
-    # 页面可能在异步重渲染后恢复 WhatsApp；提交前在稳定 DOM 上再次选择并确认。
-    _select_sms_channel_or_raise(driver)
-    # 选择通道会让 add-phone 表单整体重新渲染，已填的手机号可能被 React 用组件
-    # 状态（空）覆盖回 DOM。提交前必须重新校验并按需重填。
+    # 通道选择/重渲染后只重新填写丢失的手机号，保持 SMS 选择状态不变。
     try:
         _verify_add_phone_value_before_submit(driver, e164, dial_code)
     except RuntimeError as verify_exc:
@@ -2328,9 +2326,6 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
             phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-",
             phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
         )
-        # 重填手机号可能重建 radio 组，再按参考路径恢复并确认 SMS。
-        _select_sms_channel_or_raise(driver)
-    # 最后一次失焦/重填后只读确认通道，确认提交不会落到 WhatsApp。
     _assert_sms_channel_or_raise(driver)
     submit_info = _click_add_phone_continue_button(driver, timeout=10)
     logger.info("[Codex][Browser] 已点击手机号 Continue/続行 按钮：%s，等待进入短信验证码页", submit_info)
