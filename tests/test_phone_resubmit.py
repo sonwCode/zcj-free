@@ -79,6 +79,24 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertEqual(block.count("_select_sms_channel_or_raise(driver)"), 1)
         self.assertIn("_assert_sms_channel_or_raise(driver)", block)
 
+    def test_phone_activation_is_never_resubmitted_after_click(self):
+        click_start = TEXT.index("def _click_add_phone_continue_button")
+        click_end = TEXT.index("def _phone_state_digest", click_start)
+        click_body = TEXT[click_start:click_end]
+        wait_start = TEXT.index("def _wait_after_phone_send")
+        wait_end = TEXT.index("def _wait_after_phone_otp_submit", wait_start)
+        wait_body = TEXT[wait_start:wait_end]
+        prepare_start = TEXT.index("def _prepare_and_submit_add_phone")
+        prepare_end = wait_start
+        prepare_body = TEXT[prepare_start:prepare_end]
+
+        self.assertNotIn("form.requestSubmit(", click_body)
+        self.assertNotIn("_force_submit_add_phone_form", wait_body)
+        self.assertNotIn("requestSubmit(", wait_body)
+        self.assertNotIn("_wait_page_settle_after_submit()", prepare_body)
+        self.assertIn("不对当前号码二次提交", click_body)
+        self.assertIn("不会对当前 activation 重复提交", wait_body)
+
 
 class ChannelMarkerSplitTests(unittest.TestCase):
     """SMS 选项存在却回退到 WhatsApp，与页面只有 WhatsApp 是两种问题。"""

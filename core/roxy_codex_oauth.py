@@ -2158,11 +2158,7 @@ def _refresh_add_phone_for_retry(driver, *, reason: str = "") -> None:
 
 
 def _click_add_phone_continue_button(driver, *, timeout: int = 10) -> dict:
-    """点击 add-phone 表单里的 Continue/続行 按钮。
-
-    参考 FlowPilot 的 getAddPhoneSubmitButton + simulateClick：优先在 add-phone form 内找
-    enabled submit，点击失败时用 form.requestSubmit(button) 兜底。
-    """
+    """点击 add-phone 表单里的 Continue/続行；单次 activation 不进行二次提交。"""
     end = time.time() + timeout
     last = None
     while time.time() < end:
@@ -2192,54 +2188,28 @@ def _click_add_phone_continue_button(driver, *, timeout: int = 10) -> dict:
                 except Exception:
                     text = ''
                 try:
-                    # 优先调用 Cloak/Chrome 的真实元素点击，让浏览器按正常事件顺序
-                    # 触发 React 表单提交；合成 DOM 指针事件只作为真实点击失败后的兜底。
+                    # Each purchased activation gets exactly one submit action. A click error
+                    # may occur after the browser dispatched the event and began navigation,
+                    # so never issue requestSubmit on the same activation as a fallback.
                     _human_click(driver, btn, label="codex_phone_continue")
                     _wait_page_settle_after_submit()
                     return {"ok": True, "method": "human_click", "text": text}
                 except Exception as click_exc:
-                    last = click_exc
-                    submitted = driver.execute_script(r"""
-                    const btn = arguments[0];
-                    const form = btn?.form || btn?.closest?.('form');
-                    if (form && typeof form.requestSubmit === 'function') {
-                      form.requestSubmit(btn);
-                      return true;
+                    logger.warning(
+                        "[Codex][Browser] 手机号提交点击返回异常；不对当前号码二次提交，转入状态检查：%s: %s",
+                        type(click_exc).__name__, str(click_exc)[:180],
+                    )
+                    _wait_page_settle_after_submit()
+                    return {
+                        "ok": False,
+                        "method": "human_click_exception",
+                        "text": text,
+                        "click_error": f"{type(click_exc).__name__}: {str(click_exc)[:160]}",
                     }
-                    if (btn && typeof btn.click === 'function') {
-                      btn.click();
-                      return true;
-                    }
-                    return false;
-                    """, btn)
-                    if submitted:
-                        _wait_page_settle_after_submit()
-                        return {"ok": True, "method": "requestSubmit", "text": text, "click_error": str(click_exc)[:160]}
         except Exception as exc:
             last = exc
         _stop_sleep(0.25)
     raise RuntimeError(f"submit_missing: add-phone Continue/続行 submit button not found last={last} state={_phone_page_state(driver)}")
-
-
-def _force_submit_add_phone_form(driver) -> dict:
-    """add-phone 页面点击按钮没生效时，直接 requestSubmit 当前 form。"""
-    try:
-        return driver.execute_script(r"""
-        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-        const form = document.querySelector('form[action*="/add-phone" i]')
-          || [...document.querySelectorAll('form')].find(f => /add-phone/i.test(f.getAttribute('action') || ''));
-        if (!form) return {ok:false, reason:'missing_form', url: location.href};
-        const btn = [...form.querySelectorAll('button[type="submit"],input[type="submit"]')]
-          .find(el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true')
-          || form.querySelector('button[type="submit"],input[type="submit"]');
-        if (btn) btn.scrollIntoView({block:'center'});
-        if (typeof form.requestSubmit === 'function') form.requestSubmit(btn || undefined);
-        else if (btn && typeof btn.click === 'function') btn.click();
-        else form.submit();
-        return {ok:true, method: btn ? 'requestSubmit(button)' : 'requestSubmit(form)', url: location.href};
-        """) or {}
-    except Exception as exc:
-        return {ok:false, reason:f'{type(exc).__name__}: {exc}', url:getattr(driver, 'current_url', '')}
 
 
 def _phone_state_digest(state: dict) -> str:
@@ -2281,10 +2251,7 @@ _PHONE_SWITCH_HINTS = (
 
 
 def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict:
-    """在 add-phone 页填写号码、选择 SMS 通道并点击提交。
-
-    同一号码需要重复提交时复用同一套步骤，避免复制粘贴导致两处逻辑漂移。
-    """
+    """在 add-phone 页填写号码、选择 SMS 通道并只提交一次。"""
     logger.info("[Codex][Browser] 准备手机号输入页，重新设置新手机号%s", label)
     _ensure_add_phone_input(driver, reason=f"add-phone{label}")
     phone_fill = _set_phone_value(driver, e164, timeout=10)
@@ -2328,49 +2295,41 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
         )
     _assert_sms_channel_or_raise(driver)
     submit_info = _click_add_phone_continue_button(driver, timeout=10)
-    logger.info("[Codex][Browser] 已点击手机号 Continue/続行 按钮：%s，等待进入短信验证码页", submit_info)
-    _wait_page_settle_after_submit()
+    logger.info("[Codex][Browser] 手机号提交动作已派发：%s，开始检查验证码页/错误状态", submit_info)
     return submit_info
 
 
 def _wait_after_phone_send(driver, timeout: int = 12) -> str:
+    """Observe one add-phone submission; never resubmit the same paid activation."""
     end = time.time() + timeout
     last = {}
-    force_submitted = False
     while time.time() < end:
         _stop_sleep(1)
         last = _phone_page_state(driver)
-        # 必须优先判断验证码页：页面文案里可能包含 send/limit/check 等词，不能把
-        # “Check your phone / Enter the verification code...” 误判成发送失败。
+        # Check the code page first: its copy can contain send/limit/check markers.
         if _is_phone_code_state(last):
             return 'code_page'
         body = str(last.get('bodyText') or '')
         reason = _classify_phone_page_failure(last)
         if reason:
             logger.warning(
-                "[Codex][Browser] 手机号页判定失败：reason=%s url=%s %s",
+                "[Codex][Browser] 手机号页判定失败：reason=%s url=%s %s body=%s",
                 reason, str(last.get("url") or "-")[:120], _phone_state_digest(last),
+                " ".join(body.split())[:260],
             )
             raise RuntimeError(f"{reason}: {body[:240]}")
-        # 仍在 add-phone 且字段有 aria-invalid，认为号码被拒。
         if _is_add_phone_page(driver):
             invalid = any(str(i.get('ariaInvalid') or '').lower() == 'true' for i in (last.get('inputs') or []))
             if invalid:
                 raise RuntimeError(f"invalid_phone: add-phone input aria-invalid state={last}")
-            # Cloak/React-Aria 场景下 btn.click 可能只聚焦没触发表单提交；补一次 requestSubmit。
-            if not force_submitted and time.time() > end - timeout + 3:
-                info = _force_submit_add_phone_form(driver)
-                logger.info("[Codex][Browser] add-phone 点击后仍停留本页，补执行 form.requestSubmit：%s", info)
-                force_submitted = True
-                _stop_sleep(2)
     if _is_phone_code_state(last) or _is_phone_code_page(driver):
         return 'code_page'
     if _is_add_phone_page(driver):
         logger.warning(
-            "[Codex][Browser] 手机号提交后仍停留在 add-phone：url=%s %s",
+            "[Codex][Browser] 单次手机号提交后仍停留在 add-phone，不会对当前 activation 重复提交：url=%s %s",
             str(last.get("url") or "-")[:120], _phone_state_digest(last),
         )
-        raise RuntimeError(f"send_not_accepted: 提交后仍停留在 add-phone state={last}")
+        raise RuntimeError(f"send_not_accepted: 单次提交后仍停留在 add-phone state={last}")
     return 'unknown'
 
 
