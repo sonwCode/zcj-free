@@ -95,6 +95,7 @@ def _load_staged_provider():
             SMSBOWER_RANDOM_COUNTRY_ATTEMPTS=12,
             SMS_NUMBER_ACQUIRE_RETRIES=3,
             SMS_NUMBER_REJECT_TTL=1800,
+            SMS_COUNTRY_REJECT_TTL=900,
             SMS_TIER_FAILURE_THRESHOLD=2,
             SMS_TIER_COOLDOWN_SECONDS=2700,
         )
@@ -163,6 +164,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.SMSBOWER_EXCEPT_PROVIDER_IDS = ""
         codex_config.SMS_TIER_FAILURE_THRESHOLD = 2
         codex_config.SMS_TIER_COOLDOWN_SECONDS = 2700
+        codex_config.SMS_COUNTRY_REJECT_TTL = 900
 
     def test_random_country_candidates_filter_price_stock_and_shuffle(self):
         codex_config.SMSBOWER_MIN_PRICE = "0.10"
@@ -640,6 +642,36 @@ class SmsProviderStrategyTests(unittest.TestCase):
             ),
             "number_rejected",
         )
+
+    def test_voip_rejection_cools_only_provider_country(self):
+        sms_provider._remember_activation(
+            "voip-1",
+            "15550008",
+            {"provider": "smsbower", "service": "dr", "country": "12", "tier": "default"},
+        )
+        category = sms_provider.report_failure(
+            "voip-1",
+            'add_phone_response={"code":"voip_phone_disallowed"}',
+        )
+        state = sms_provider._activation_state("voip-1")
+        self.assertEqual(category, "number_rejected")
+        self.assertTrue(sms_provider._country_is_recently_rejected(state))
+        self.assertFalse(sms_provider._country_is_recently_rejected({
+            "provider": "smsbower", "service": "dr", "country": "36",
+        }))
+        self.assertEqual(sms_provider.get_sms_runtime_metrics()["rejected_countries"], 1)
+
+    def test_fraud_guard_does_not_cool_entire_country(self):
+        sms_provider._remember_activation(
+            "fraud-1",
+            "15550010",
+            {"provider": "smsbower", "service": "dr", "country": "12", "tier": "default"},
+        )
+        sms_provider.report_failure(
+            "fraud-1",
+            'add_phone_response={"code":"fraud_guard"}',
+        )
+        self.assertEqual(sms_provider.get_sms_runtime_metrics()["rejected_countries"], 0)
 
     def test_smsbower_default_tier_never_cools_entire_provider(self):
         codex_config.SMS_TIER_FAILURE_THRESHOLD = 1

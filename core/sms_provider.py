@@ -33,6 +33,7 @@ _STATE_LOCK = threading.RLock()
 _ACTIVATION_STATE: dict[str, dict] = {}
 _CODE_HISTORY: dict[str, set[str]] = {}
 _RECENT_REJECTED_NUMBERS: dict[str, float] = {}
+_RECENT_REJECTED_COUNTRIES: dict[tuple[str, str, str], float] = {}
 _TIER_FAILURES: dict[tuple[str, str, str, str], int] = {}
 _TIER_COOLDOWNS: dict[tuple[str, str, str, str], float] = {}
 _METRICS: dict[str, int] = {}
@@ -378,6 +379,9 @@ def _prune_strategy_state() -> None:
         for phone, expires_at in list(_RECENT_REJECTED_NUMBERS.items()):
             if expires_at <= now:
                 _RECENT_REJECTED_NUMBERS.pop(phone, None)
+        for key, expires_at in list(_RECENT_REJECTED_COUNTRIES.items()):
+            if expires_at <= now:
+                _RECENT_REJECTED_COUNTRIES.pop(key, None)
         for key, expires_at in list(_TIER_COOLDOWNS.items()):
             if expires_at <= now:
                 _TIER_COOLDOWNS.pop(key, None)
@@ -509,6 +513,41 @@ def _record_rejected_number(state: dict, reason: str) -> None:
     )
 
 
+def _country_rejection_key(state: dict) -> tuple[str, str, str] | None:
+    provider = str(state.get("provider") or _provider()).strip().lower()
+    service = str(state.get("service") or getattr(_cfg, "SMS_SERVICE", "") or "").strip()
+    country = str(state.get("country") or "").strip()
+    if not provider or not service or not country:
+        return None
+    return provider, service, country
+
+
+def _record_country_rejected(state: dict, reason: object) -> None:
+    """VoIP 明确拒绝时暂时排除对应 provider-country，不扩大到整个 provider。"""
+    text = str(reason or "").lower()
+    if not any(marker in text for marker in ("voip_phone_disallowed", "voip phone", "voip")):
+        return
+    key = _country_rejection_key(state)
+    if key is None:
+        return
+    ttl = _setting_int("SMS_COUNTRY_REJECT_TTL", 900, 60)
+    with _STATE_LOCK:
+        _RECENT_REJECTED_COUNTRIES[key] = time.monotonic() + ttl
+    logger.info(
+        "[SMS] 记录 VoIP 国家质量失败：provider=%s service=%s country=%s ttl=%ss reason=%s",
+        key[0], key[1], key[2], ttl, str(reason or "")[:120],
+    )
+
+
+def _country_is_recently_rejected(state: dict) -> bool:
+    key = _country_rejection_key(state)
+    if key is None:
+        return False
+    _prune_strategy_state()
+    with _STATE_LOCK:
+        return _RECENT_REJECTED_COUNTRIES.get(key, 0) > time.monotonic()
+
+
 def _record_tier_failure(state: dict, category: str) -> None:
     key = _tier_cooldown_key(state)
     if key is None:
@@ -610,6 +649,8 @@ def _report_failure_with_state(
     elif category in ("number_rejected", "send_failed", "code_rejected", "code_timeout"):
         if state and category in ("number_rejected", "send_failed", "code_rejected"):
             _record_rejected_number(state, str(reason or category))
+            if category == "number_rejected":
+                _record_country_rejected(state, reason)
         if state:
             _record_tier_failure(state, category)
         _metric(category, state)
@@ -666,6 +707,7 @@ def get_sms_runtime_metrics() -> dict:
             "events": dict(_METRICS),
             "active_activations": len(_ACTIVATION_STATE),
             "rejected_numbers": len(_RECENT_REJECTED_NUMBERS),
+            "rejected_countries": len(_RECENT_REJECTED_COUNTRIES),
             "cooled_tiers": len(_TIER_COOLDOWNS),
         }
 
@@ -676,6 +718,7 @@ def _reset_runtime_state_for_tests() -> None:
         _ACTIVATION_STATE.clear()
         _CODE_HISTORY.clear()
         _RECENT_REJECTED_NUMBERS.clear()
+        _RECENT_REJECTED_COUNTRIES.clear()
         _TIER_FAILURES.clear()
         _TIER_COOLDOWNS.clear()
         _METRICS.clear()
@@ -1546,9 +1589,15 @@ def _acquire_number_for_provider(
                 logger.warning("[SMSBower] 违规号码释放失败，继续换号：id=%s error=%s", activation_id, release_exc)
             continue
         recently_rejected = _number_is_recently_rejected(phone)
+        country_rejected = _country_is_recently_rejected(state)
         cooled = _tier_is_cooled(state)
-        if recently_rejected or cooled:
-            reason = "recently_rejected_number" if recently_rejected else "cooled_tier"
+        if recently_rejected or country_rejected or cooled:
+            if recently_rejected:
+                reason = "recently_rejected_number"
+            elif country_rejected:
+                reason = "recently_rejected_country"
+            else:
+                reason = "cooled_tier"
             _metric("candidate_skipped", state)
             logger.info(
                 "[SMSBower] 跳过策略排除候选：attempt=%s/%s reason=%s phone=%s",
