@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from config import cloakbrowser as _cfg
+from config import email as _email_cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.browser_data_saver import BrowserDataSaver
@@ -196,7 +197,12 @@ def _run_cloak_registration_impl(
 
         current_otp = otp_code
         used_otps: set[str] = set()
-        max_otp_attempts = 3
+        try:
+            max_otp_attempts = max(3, min(6, int(
+                getattr(_email_cfg, "REGISTER_OTP_MAX_ATTEMPTS", 4) or 4
+            )))
+        except (TypeError, ValueError):
+            max_otp_attempts = 4
         otp_submitted_attempts = 0
         otp_resend_count = 0
         otp_final_outcome = "not_submitted"

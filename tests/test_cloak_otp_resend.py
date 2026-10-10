@@ -34,6 +34,12 @@ class CloakOtpResendTests(unittest.TestCase):
     def test_obsolete_restart_helper_is_removed(self):
         self.assertNotIn("def _restart_cloak_email_otp", TEXT)
 
+    def test_registration_otp_retry_budget_is_configurable(self):
+        body = _function_source("_run_cloak_registration_impl")
+        otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
+        self.assertIn("REGISTER_OTP_MAX_ATTEMPTS", otp_loop)
+        self.assertIn("max(3, min(6", otp_loop)
+
     def test_repeated_otp_is_excluded_before_retry(self):
         """Remail 可能在 resend 后短暂返回旧邮件，旧码不能再次提交。"""
         body = _function_source("_run_cloak_registration_impl")
