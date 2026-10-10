@@ -480,9 +480,9 @@ def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
     headers = session.get_auth_headers(referer="https://auth.openai.com/email-verification")
     try:
         from core.openai_auth import build_sentinel_header, request_sentinel_token
-        sentinel_response = request_sentinel_token(session, "email_otp_validate")
+        sentinel_response = request_sentinel_token(session, "authorize_continue")
         sentinel_header, so_header = build_sentinel_header(
-            session, sentinel_response, "email_otp_validate"
+            session, sentinel_response, "authorize_continue"
         )
         if sentinel_header:
             headers["openai-sentinel-token"] = sentinel_header
