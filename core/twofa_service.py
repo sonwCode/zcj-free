@@ -6,6 +6,7 @@ import logging
 import random
 import threading
 from datetime import datetime
+from urllib.parse import urlsplit
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -91,7 +92,16 @@ def _pick_twofa_fallback_proxy(excluded_targets=None) -> str:
     excluded = {str(value or "").strip() for value in (excluded_targets or ()) if str(value or "").strip()}
     candidates = [value for value in configured if value not in excluded]
     if candidates:
-        return random.choice(candidates)
+        excluded_hosts = {
+            urlsplit(value).hostname or ""
+            for value in excluded
+            if urlsplit(value).hostname
+        }
+        different_host = [
+            value for value in candidates
+            if (urlsplit(value).hostname or "") not in excluded_hosts
+        ]
+        return random.choice(different_host or candidates)
     from config import proxy as proxy_cfg
     return proxy_cfg.pick_proxy_excluding(excluded)
 

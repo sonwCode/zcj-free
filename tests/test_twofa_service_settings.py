@@ -43,6 +43,21 @@ class TwofaServiceSettingsTests(unittest.TestCase):
         self.assertEqual(source, "fallback_pool")
         open_proxy.assert_called_once_with(fallback)
 
+    def test_fallback_selector_prefers_different_proxy_host(self):
+        first = "http://first-user:first-pass@trustsource.test:10000"
+        second = "http://second-user:second-pass@other-proxy.test:10000"
+        with patch.object(twofa_service._twofa_cfg, "TWOFA_PROXY_FALLBACK_POOL", [first, second]), patch(
+            "core.proxy_chain.open_proxy_pool_proxy", side_effect=lambda target: (target, None)
+        ) as open_proxy:
+            transport, relay, source = twofa_service._resolve_twofa_proxy(
+                None, excluded_targets={first}, force_fallback_pool=True
+            )
+
+        self.assertEqual(transport, second)
+        self.assertIsNone(relay)
+        self.assertEqual(source, "fallback_pool")
+        open_proxy.assert_called_once_with(second)
+
     def test_saved_proxy_initial_403_rotates_once_to_pool_session(self):
         class _Session:
             def __init__(self, proxy, fingerprint_seed):
