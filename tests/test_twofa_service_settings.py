@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from core import twofa_service
-from core.account_export import TwofaReauthTransientError
+from core.account_export import AccountUnusableError, TwofaReauthTransientError
 
 
 class TwofaServiceSettingsTests(unittest.TestCase):
@@ -57,6 +57,49 @@ class TwofaServiceSettingsTests(unittest.TestCase):
         self.assertIsNone(relay)
         self.assertEqual(source, "fallback_pool")
         open_proxy.assert_called_once_with(second)
+
+    def test_account_unusable_error_is_persisted_without_fallback(self):
+        session = Mock()
+        session.proxy = "saved-proxy"
+        session.proxy_target = "saved-proxy"
+        session.device_id = "device-id"
+        session.fingerprint_summary_text.return_value = "test-fingerprint"
+        updates = []
+        resolve_calls = []
+
+        def resolve(proxy, *, excluded_targets=None, force_fallback_pool=False):
+            resolve_calls.append((proxy, set(excluded_targets or ()), force_fallback_pool))
+            return ("saved-proxy", None, "saved")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            twofa_service, "log_path", side_effect=lambda email: Path(tmp) / "twofa.log"
+        ), patch.object(twofa_service.logging, "FileHandler", return_value=Mock()), patch.object(
+            twofa_service.logging, "getLogger", return_value=Mock()
+        ), patch.object(twofa_service, "_resolve_twofa_proxy", side_effect=resolve), patch.object(
+            twofa_service, "BrowserSession", return_value=session
+        ), patch.object(
+            twofa_service, "setup_2fa",
+            side_effect=AccountUnusableError("account deactivated", error_code="account_deactivated"),
+        ), patch.object(twofa_service, "close_browser_session"), patch.object(
+            twofa_service, "_append_log"
+        ), patch.object(twofa_service.db, "mark_account_totp_setup_running", return_value=True), patch.object(
+            twofa_service.db,
+            "update_account_totp_secret",
+            side_effect=lambda *args, **kwargs: updates.append((args, kwargs)),
+        ):
+            result = twofa_service._run_twofa(
+                account_id=8,
+                email="user@example.com",
+                access_token="access-token",
+                proxy="saved-proxy",
+                trigger="test-deactivated",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "account_deactivated")
+        self.assertEqual(len(resolve_calls), 1)
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0][0][1]["error_code"], "account_deactivated")
 
     def test_saved_proxy_initial_403_rotates_once_to_pool_session(self):
         class _Session:

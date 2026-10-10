@@ -1713,6 +1713,7 @@ function _codexAction(r) {
 }
 function _totpAction(r) {
   const status = r.totp_setup_status || '';
+  const errorCode = r.totp_setup_error_code || '';
   if (r.totp_enabled) {
     const cached = TOTP_CODE_CACHE.get(Number(r.id));
     const codeHtml = cached?.code
@@ -1726,7 +1727,10 @@ function _totpAction(r) {
   if (!r.has_access_token) {
     return `<span class="muted">无Token</span>`;
   }
-  const tip = r.totp_setup_error || r.totp_setup_message || '为该账号开启 2FA，并把 TOTP 密钥写回账号信息';
+  const tip = [r.totp_setup_error, r.totp_setup_message, errorCode].filter(Boolean).join('\n') || '为该账号开启 2FA，并把 TOTP 密钥写回账号信息';
+  if (['account_deactivated', 'account_deleted', 'account_banned'].includes(errorCode)) {
+    return `<span class="muted" title="${esc(tip)}">账号不可用</span>`;
+  }
   return `<button type="button" class="twofa-action" data-account-totp-setup="${esc(r.id)}" title="${esc(tip)}">开启2FA</button>`;
 }
 function _liveStatusSub(r) {

@@ -3615,7 +3615,8 @@ function _codexCellV2(r) {
 function _totpCellV2(r) {
   const enabled = !!r.totp_enabled;
   const status = r.totp_setup_status || '';
-  const titleText = r.totp_setup_message || r.totp_setup_error || '';
+  const errorCode = r.totp_setup_error_code || '';
+  const titleText = [r.totp_setup_message, r.totp_setup_error, errorCode].filter(Boolean).join('\n');
   const titleAttr = titleText ? ` title="${esc(titleText)}"` : '';
   if (enabled) {
     const cached = TOTP_CODE_CACHE.get(Number(r.id));
@@ -3629,9 +3630,12 @@ function _totpCellV2(r) {
     return `<div class="agent-token-cell"><span class="pill status-running"${titleAttr}>${label}</span></div>`;
   }
   const btnTitle = titleText ? ` title="${esc(titleText)}"` : ` title="为该账号开启 2FA，并把 TOTP 密钥写回账号信息"`;
-  const btn = r.has_access_token
-    ? `<button type="button" class="acc-v2-twofa-btn" data-account-totp-setup="${esc(r.id)}"${btnTitle}>开启2FA</button>`
-    : `<span class="acc-v2-muted">无Token</span>`;
+  const unusable = ['account_deactivated', 'account_deleted', 'account_banned'].includes(errorCode);
+  const btn = unusable
+    ? `<span class="acc-v2-muted"${btnTitle}>账号不可用</span>`
+    : r.has_access_token
+      ? `<button type="button" class="acc-v2-twofa-btn" data-account-totp-setup="${esc(r.id)}"${btnTitle}>开启2FA</button>`
+      : `<span class="acc-v2-muted">无Token</span>`;
   return `<div class="agent-token-cell">${btn}</div>`;
 }
 function _codexAgentCell(r) {

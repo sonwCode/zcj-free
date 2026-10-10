@@ -1842,7 +1842,7 @@ def list_account_plan_check_statuses(
         "codex_agent_status", "codex_agent_message",
         "codex_agent_runtime_id", "codex_agent_sub2api_url",
         "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
-        "totp_setup_status", "totp_setup_ok", "totp_setup_error",
+        "totp_setup_status", "totp_setup_ok", "totp_setup_error", "totp_setup_error_code",
         "totp_setup_message", "totp_setup_trigger", "totp_setup_queued_at",
         "totp_setup_started_at", "totp_setup_completed_at", "totp_setup_checked_at",
         "original_email", "email_source", "email_change_status", "email_change_ok",
@@ -1911,6 +1911,7 @@ def list_account_plan_check_statuses(
                     "totp_setup_status": row.get("totp_setup_status"),
                     "totp_setup_ok": row.get("totp_setup_ok"),
                     "totp_setup_error": row.get("totp_setup_error"),
+                    "totp_setup_error_code": row.get("totp_setup_error_code"),
                     "totp_setup_message": row.get("totp_setup_message"),
                     "totp_setup_checked_at": row.get("totp_setup_checked_at"),
                     "totp_setup_started_at": row.get("totp_setup_started_at"),
@@ -2183,6 +2184,7 @@ def claim_account_totp_setup(acc_id: int, trigger: str = "manual") -> bool:
         row["totp_setup_started_at"] = None
         row["totp_setup_completed_at"] = None
         row["totp_setup_error"] = None
+        row["totp_setup_error_code"] = None
         row["updated_at"] = now
         _save_accounts(rows)
         return True
@@ -2199,6 +2201,7 @@ def mark_account_totp_setup_running(acc_id: int) -> bool:
         row["totp_setup_status"] = "running"
         row["totp_setup_started_at"] = now
         row["totp_setup_error"] = None
+        row["totp_setup_error_code"] = None
         row["updated_at"] = now
         _save_accounts(rows)
         return True
@@ -2220,6 +2223,7 @@ def update_account_totp_secret(acc_id: int, result: dict | None = None) -> bool:
         if status in {"success", "failed", "stopped"}:
             row["totp_setup_completed_at"] = _now()
         row["totp_setup_error"] = None if ok or status == "running" else result.get("error")
+        row["totp_setup_error_code"] = None if ok or status == "running" else result.get("error_code")
         secret = str(result.get("totp_secret") or "").strip()
         if ok and secret:
             row["totp_secret"] = secret
@@ -2243,6 +2247,7 @@ def recover_interrupted_totp_setups() -> int:
             row["totp_setup_status"] = "failed"
             row["totp_setup_ok"] = False
             row["totp_setup_error"] = "WebUI 重启导致 2FA 设置中断，请重新开启"
+            row["totp_setup_error_code"] = "interrupted"
             row["totp_setup_completed_at"] = now
             row["updated_at"] = now
             recovered += 1
