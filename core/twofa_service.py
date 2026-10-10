@@ -13,7 +13,7 @@ from pathlib import Path
 from config import email as _email_cfg
 from config import twofa as _twofa_cfg
 from core import db
-from core.account_export import TwofaReauthTransientError, setup_2fa
+from core.account_export import AccountUnusableError, TwofaReauthTransientError, setup_2fa
 from core.session import BrowserSession, close_browser_session
 from core.proxy_utils import mask_proxy_url
 
@@ -262,6 +262,23 @@ def _run_twofa(
         _append_log(email, f"[2FA] 完成：secret={secret[:4]}...{secret[-4:]}")
         logger.info("[2FA] 完成：email=%s secret=%s...%s", email, secret[:4], secret[-4:])
         return {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"}
+    except AccountUnusableError as exc:
+        result = {
+            "ok": False,
+            "status": "failed",
+            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+            "error_code": str(getattr(exc, "error_code", "") or "account_deactivated"),
+        }
+        try:
+            db.update_account_totp_secret(account_id, result)
+        except Exception:
+            logger.exception("[2FA] 写回账号不可用状态失败: account_id=%s", account_id)
+        try:
+            _append_log(email, f"[2FA] 失败：{result['error']} code={result['error_code']}")
+        except Exception:
+            pass
+        logger.warning("[2FA] 账号不可用，停止重试：email=%s code=%s", email, result["error_code"])
+        return result
     except Exception as exc:
         result = {"ok": False, "status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
         try:
