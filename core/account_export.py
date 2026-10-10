@@ -629,12 +629,16 @@ def setup_2fa(
     logger.info("[2FA] 已显式触发邮箱重认证 OTP 发送")
     human_delay("navigate")
 
+    used_otp_codes: set[str] = set()
     if otp_code is None:
         if _email_cfg.USE_EMAIL_SERVICE:
             from core.email_provider import wait_for_otp
             logger.info("[2FA] 自动等待邮箱重认证 OTP...")
             try:
-                otp_code = wait_for_otp(email, after_ts=reauth_otp_after_ts)
+                otp_code = wait_for_otp(
+                    email, after_ts=reauth_otp_after_ts, exclude_codes=used_otp_codes
+                )
+                used_otp_codes.add(str(otp_code).strip())
             except Exception as first_wait_exc:
                 # 重认证页本身没有可靠的 resend API；重新发起一次 authorize
                 # 流程会让 auth.openai.com 再发送一封新的 OTP。只自动重发一次，
@@ -654,7 +658,10 @@ def setup_2fa(
                 # 过滤掉；若拿到旧码，后面的 401 重试逻辑仍会校验。
                 broad_after_ts = max(0.0, reauth_otp_after_ts - 120.0)
                 logger.info("[2FA] 第二轮取码启用时间偏差容错：after_ts=%.0f", broad_after_ts)
-                otp_code = wait_for_otp(email, after_ts=broad_after_ts)
+                otp_code = wait_for_otp(
+                    email, after_ts=broad_after_ts, exclude_codes=used_otp_codes
+                )
+                used_otp_codes.add(str(otp_code).strip())
             logger.info("[2FA] 已收到邮箱重认证 OTP")
         else:
             logger.info("")
@@ -682,12 +689,15 @@ def setup_2fa(
             raise
         logger.warning("[2FA] 首次 OTP 被拒绝，重新获取最新验证码后再试一次")
         from core.email_provider import wait_for_otp
+        used_otp_codes.add(str(otp_code).strip())
         retry_settle = max(8, int(getattr(_email_cfg, "OTP_SETTLE_SECONDS", 5) or 5))
         fresh_otp = wait_for_otp(
             email,
             after_ts=reauth_otp_after_ts,
             settle_seconds=retry_settle,
+            exclude_codes=used_otp_codes,
         )
+        used_otp_codes.add(str(fresh_otp).strip())
         if fresh_otp == otp_code:
             logger.warning("[2FA] 重试仍获取到相同 OTP=%s，继续提交以保留原始错误信息", _mask_otp(fresh_otp))
         else:

@@ -85,6 +85,35 @@ class AccountExportTwofaTests(unittest.TestCase):
         self.assertEqual(context.exception.original.args[0], "HTTP 403 from csrf")
         self.assertEqual(session.reset_count, 1)
 
+    def test_setup_2fa_excludes_rejected_otp_on_retry(self):
+        session = Mock()
+        rejected = RuntimeError("HTTP 401 from email otp validate")
+        rejected.response = SimpleNamespace(status_code=401)
+        submitted = []
+
+        def validate(_session, code):
+            submitted.append(code)
+            if len(submitted) == 1:
+                raise rejected
+            return "https://auth.example/callback"
+
+        with patch.object(account_export, "_trigger_reauth_with_retry", return_value="https://auth.example/authorize"), patch.object(
+            account_export, "_follow_reauth_with_retry", return_value="https://auth.example/email-verification"
+        ), patch("core.openai_auth.send_email_otp"), patch(
+            "core.email_provider.wait_for_otp", side_effect=["123456", "654321"]
+        ) as wait_for_otp, patch.object(account_export, "_validate_reauth_otp", side_effect=validate), patch(
+            "config.email.USE_EMAIL_SERVICE", True
+        ), patch.object(account_export, "human_delay"), patch.object(
+            account_export, "_exchange_new_token", return_value="new-token"
+        ), patch.object(
+            account_export, "_enroll_totp", return_value=("JBSWY3DPEHPK3PXP", "session-id")
+        ), patch.object(account_export, "_activate_totp"):
+            result = account_export.setup_2fa(session, "user@example.com")
+
+        self.assertEqual(result, "JBSWY3DPEHPK3PXP")
+        self.assertEqual(submitted, ["123456", "654321"])
+        self.assertIn("123456", wait_for_otp.call_args_list[1].kwargs["exclude_codes"])
+
     def test_setup_2fa_otp_validate_403_exposes_otp_stage(self):
         session = Mock()
         blocked = RuntimeError("HTTP 403 from email otp validate")
