@@ -11,6 +11,7 @@
 import json
 import logging
 import random
+import re
 import time
 from core.stop_control import sleep as _stop_sleep
 from datetime import datetime
@@ -75,7 +76,21 @@ def _otp_error_hints(response) -> str:
         "rate", "limit", "blocked", "challenge", "captcha", "verification",
     )
     hints = [word for word in hint_words if word in text]
-    return ",".join(hints[:6]) or "none"
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        keys = ",".join(str(key)[:32] for key in list(payload)[:8])
+        for key in ("error", "error_code", "code", "type"):
+            value = payload.get(key)
+            if isinstance(value, (str, int, float, bool)):
+                safe_value = re.sub(r"\b\d{4,8}\b", "<redacted>", str(value))
+                safe_value = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", "<email>", safe_value)
+                hints.append(f"{key}={safe_value[:48]}")
+        if keys:
+            hints.append(f"keys={keys}")
+    return ",".join(hints[:10]) or "none"
 
 
 def _is_retryable_reauth_error(exc: BaseException) -> bool:
