@@ -213,7 +213,7 @@ def _run_twofa(
                 if (
                     not fallback_enabled
                     or exc.stage not in {"initial", "otp_validate"}
-                    or proxy_source not in {"saved", "pool"}
+                    or proxy_source not in {"saved", "pool", "fallback_pool"}
                     or fallback_count >= fallback_limit
                 ):
                     raise

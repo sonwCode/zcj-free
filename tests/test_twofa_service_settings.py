@@ -117,6 +117,7 @@ class TwofaServiceSettingsTests(unittest.TestCase):
         self.assertTrue(second.closed)
         self.assertEqual(resolve_calls[1][0], None)
         self.assertIn("saved-proxy", resolve_calls[1][1])
+        self.assertTrue(resolve_calls[1][2])
         self.assertEqual(len(updates), 1)
 
 
