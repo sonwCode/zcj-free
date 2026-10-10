@@ -435,6 +435,27 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual([call["params"]["country"] for call in number_calls], ["36", "35"])
         self.assertEqual(len([call for call in http.calls if call["params"].get("action") == "getPrices"]), 2)
 
+    def test_random_country_does_not_repeat_exhausted_country_after_refresh(self):
+        codex_config.SMS_MAX_PRICE = "0.25"
+        codex_config.SMSBOWER_USE_V2 = False
+        codex_config.SMS_NUMBER_ACQUIRE_RETRIES = 12
+        http = _Http([
+            _Response(json.dumps({"117": {"dr": {"cost": 0.03, "count": 1}}})),
+            _Response("NO_NUMBERS"),
+            _Response(json.dumps({"117": {"dr": {"cost": 0.03, "count": 1}}})),
+        ])
+
+        with patch.object(sms_provider.random, "shuffle", side_effect=lambda rows: None):
+            with self.assertRaises(sms_provider.SmsNoNumbersError):
+                sms_provider._acquire_number_for_provider("smsbower", http)
+
+        number_calls = [call for call in http.calls if call["params"].get("action") != "getPrices"]
+        self.assertEqual([call["params"]["country"] for call in number_calls], ["117"])
+        self.assertEqual(
+            len([call for call in http.calls if call["params"].get("action") == "getPrices"]),
+            2,
+        )
+
     def test_explicit_country_bypasses_random_country_pool(self):
         codex_config.SMS_MAX_PRICE = "0.25"
         http = _Http([

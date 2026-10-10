@@ -1552,7 +1552,16 @@ def _acquire_number_for_provider(
                     logger.warning("[SMSBower] 刷新随机国家库存后仍无候选：%s", str(exc)[:220])
                     break
                 fresh = [row for row in refreshed if row["country"] not in tried_countries]
-                random_countries = fresh or refreshed
+                if not fresh:
+                    last_no_numbers = SmsNoNumbersError(
+                        "刷新库存后没有新的价格范围内国家，停止重复尝试已耗尽国家"
+                    )
+                    logger.warning(
+                        "[SMSBower] 刷新库存未发现未尝试国家，停止重复取号：tried=%s",
+                        ",".join(sorted(tried_countries)) or "-",
+                    )
+                    break
+                random_countries = fresh
             candidate = random_countries.pop(0)
             tried_countries.add(candidate["country"])
         selected_country = candidate["country"] if candidate else country
