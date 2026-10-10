@@ -82,12 +82,22 @@ def _otp_error_hints(response) -> str:
         payload = None
     if isinstance(payload, dict):
         keys = ",".join(str(key)[:32] for key in list(payload)[:8])
-        for key in ("error", "error_code", "code", "type"):
-            value = payload.get(key)
+
+        def add_scalar_hint(label: str, value: object) -> None:
             if isinstance(value, (str, int, float, bool)):
                 safe_value = re.sub(r"\b\d{4,8}\b", "<redacted>", str(value))
                 safe_value = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", "<email>", safe_value)
-                hints.append(f"{key}={safe_value[:48]}")
+                hints.append(f"{label}={safe_value[:48]}")
+
+        for key in ("error", "error_code", "code", "type"):
+            value = payload.get(key)
+            add_scalar_hint(key, value)
+            if isinstance(value, dict):
+                error_keys = ",".join(str(item)[:32] for item in list(value)[:8])
+                if error_keys:
+                    hints.append(f"{key}_keys={error_keys}")
+                for child_key in ("code", "type", "reason", "message"):
+                    add_scalar_hint(f"{key}.{child_key}", value.get(child_key))
         if keys:
             hints.append(f"keys={keys}")
     return ",".join(hints[:10]) or "none"
