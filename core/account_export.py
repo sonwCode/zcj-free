@@ -488,6 +488,7 @@ def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
             headers["openai-sentinel-token"] = sentinel_header
         if so_header:
             headers["openai-sentinel-so-token"] = so_header
+        human_delay("challenge")
         logger.info("[2FA] OTP validate Sentinel 头已生成")
     except Exception as exc:
         # 旧版 auth 流程可能不要求 Sentinel；失败时清理熔断后保留兼容请求。
