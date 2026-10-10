@@ -85,6 +85,14 @@ class PasswordRecoveryTests(unittest.TestCase):
         self.assertIn("if error_state and _password_state_has_form(error_state)", body)
         self.assertIn("密码表单已消失，跳过无效的原生补交", body)
 
+    def test_stalled_password_form_gets_one_bounded_reload_recovery(self):
+        body = _function_body("_fill_password_page_if_present")
+        self.assertIn('not final_state.get("errors")', body)
+        self.assertIn("_password_state_has_form(final_state) and _recovery_round < 1", body)
+        self.assertIn("window.location.reload()", body)
+        self.assertIn("_recovery_round=_recovery_round + 1", body)
+        self.assertIn("_password_value=password", body)
+
     def test_persistent_empty_shell_is_reported_as_truncated_navigation(self):
         body = _function_body("_fill_password_page_if_present")
         self.assertIn("密码提交后跳转被截断", body)

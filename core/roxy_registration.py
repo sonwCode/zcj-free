@@ -2638,6 +2638,60 @@ def _fill_password_page_if_present(
                 submit_trace = driver.execute_script("return window.__roxy_password_submit_trace || null;")
             except Exception as trace_exc:
                 submit_trace = {"error": f"{type(trace_exc).__name__}: {trace_exc}"}
+            # 当前页面仍保留完整密码表单且没有业务错误时，通常是提交请求
+            # 被高延迟/不稳定出口挂起。刷新一次会中止挂起请求，并让服务端状态
+            # 重新决定落点；若服务端已经接受密码，刷新后会进入 OTP 页面。
+            if not final_state.get("errors") and _password_state_has_form(final_state) and _recovery_round < 1:
+                logger.warning(
+                    "%s 密码提交后仍停留且页面无错误，刷新密码页并复用原密码恢复一次：url=%s",
+                    _log_prefix(driver), current_url,
+                )
+                try:
+                    driver.execute_script("window.location.reload()")
+                except Exception as reload_exc:
+                    logger.info(
+                        "%s 刷新密码页触发异常，继续观察当前导航：%s: %s",
+                        _log_prefix(driver), type(reload_exc).__name__, str(reload_exc)[:120],
+                    )
+
+                recovery_started = time.time()
+                recovery_end = recovery_started + 40
+                navigation_grace_end = recovery_started + 3
+                while time.time() < recovery_end:
+                    if _is_email_verification_page(driver):
+                        logger.info("%s 刷新后已进入邮箱验证码页，密码提交恢复成功", _log_prefix(driver))
+                        return password
+                    if _has_access_token(driver):
+                        logger.info("%s 刷新后已检测到登录态，密码提交恢复成功", _log_prefix(driver))
+                        return password
+                    current_url = str(getattr(driver, "current_url", "") or "")
+                    if _is_navigation_error_url(current_url):
+                        raise RuntimeError(f"密码提交后刷新落入浏览器导航错误页: url={current_url}")
+                    if time.time() < navigation_grace_end:
+                        _stop_aware_sleep(0.5)
+                        continue
+                    if not _is_signup_password_page(driver):
+                        return password
+                    recovered_state = _password_page_state(driver)
+                    if not recovered_state.get("errors") and _password_state_has_form(recovered_state):
+                        logger.info("%s 刷新后密码表单已恢复，复用原密码重新提交", _log_prefix(driver))
+                        recovered_password = _fill_password_page_if_present(
+                            driver,
+                            email,
+                            timeout=timeout,
+                            _recovery_round=_recovery_round + 1,
+                            _password_value=password,
+                        )
+                        return recovered_password or password
+                    _stop_aware_sleep(0.5)
+
+                final_state = _password_page_state(driver)
+                current_url = str(getattr(driver, "current_url", "") or "")
+                try:
+                    submit_trace = driver.execute_script("return window.__roxy_password_submit_trace || null;")
+                except Exception as trace_exc:
+                    submit_trace = {"error": f"{type(trace_exc).__name__}: {trace_exc}"}
+
             if not _password_state_has_form(final_state):
                 raise RuntimeError(
                     f"密码提交后跳转被截断，密码路由仍无表单: url={current_url} state={final_state} trace={submit_trace}"
