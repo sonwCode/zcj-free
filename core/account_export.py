@@ -576,6 +576,7 @@ def setup_2fa(
     email: str,
     otp_code: str | None = None,
     access_token: str | None = None,
+    exclude_otp_codes: set[str] | None = None,
 ) -> str:
     """
     完整的 2FA 设置流程。
@@ -587,6 +588,7 @@ def setup_2fa(
         session: 已完成注册的会话
         email: 账号邮箱（用作 login_hint）
         otp_code: 邮箱验证码（None 则按上述策略获取）
+        exclude_otp_codes: 跨会话已提交验证码集合，自动取码时排除这些旧码
 
     Returns:
         TOTP secret（Base32 字符串），可直接用于 pyotp.TOTP() 生成 6 位动态码
@@ -629,7 +631,7 @@ def setup_2fa(
     logger.info("[2FA] 已显式触发邮箱重认证 OTP 发送")
     human_delay("navigate")
 
-    used_otp_codes: set[str] = set()
+    used_otp_codes = exclude_otp_codes if exclude_otp_codes is not None else set()
     if otp_code is None:
         if _email_cfg.USE_EMAIL_SERVICE:
             from core.email_provider import wait_for_otp

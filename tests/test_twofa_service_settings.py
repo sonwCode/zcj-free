@@ -82,10 +82,15 @@ class TwofaServiceSettingsTests(unittest.TestCase):
             resolve_calls.append((proxy, set(excluded_targets or ()), force_fallback_pool))
             return ("saved-proxy", None, "saved") if len(resolve_calls) == 1 else ("pool-proxy", None, "fallback_pool")
 
-        def setup(session, email, access_token):
+        setup_exclusions = []
+
+        def setup(session, email, access_token, exclude_otp_codes=None):
             setup_calls.append(session)
+            setup_exclusions.append(exclude_otp_codes)
             if len(setup_calls) == 1:
+                exclude_otp_codes.add("old-code")
                 raise TwofaReauthTransientError("otp validate 403", stage="otp_validate")
+            self.assertIn("old-code", exclude_otp_codes)
             return "JBSWY3DPEHPK3PXP"
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(

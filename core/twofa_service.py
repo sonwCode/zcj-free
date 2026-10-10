@@ -203,11 +203,17 @@ def _run_twofa(
         session = BrowserSession(proxy=real_proxy, fingerprint_seed=f"account:{identity}")
         _log_session_created()
         fallback_count = 0
+        used_otp_codes: set[str] = set()
         fallback_enabled = bool(getattr(_twofa_cfg, "TWOFA_REAUTH_PROXY_FALLBACK", True))
         fallback_limit = _int_setting("TWOFA_REAUTH_PROXY_FALLBACK_ATTEMPTS", 1, 0, 3)
         while True:
             try:
-                secret = setup_2fa(session, email, access_token=access_token)
+                secret = setup_2fa(
+                    session,
+                    email,
+                    access_token=access_token,
+                    exclude_otp_codes=used_otp_codes,
+                )
                 break
             except TwofaReauthTransientError as exc:
                 if (
