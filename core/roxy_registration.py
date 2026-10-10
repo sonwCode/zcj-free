@@ -2981,6 +2981,7 @@ def _read_chatgpt_session_once(driver) -> dict | None:
             logger.info("%s /api/auth/session 已返回 accessToken via=context", _log_prefix(driver))
             return context_data
         logger.info("%s context session 无 accessToken，HTTP=%s keys=%s", _log_prefix(driver), context_data.get("_http_status"), list(context_data.keys()))
+        return context_data
     script = r"""
     const done = arguments[0];
     fetch('/api/auth/session', {
@@ -2998,6 +2999,7 @@ def _read_chatgpt_session_once(driver) -> dict | None:
             logger.info("%s /api/auth/session 已返回 accessToken via=page", _log_prefix(driver))
             return data
         logger.info("%s 页面 session 无 accessToken，HTTP=%s keys=%s", _log_prefix(driver), result.get("status"), list(data.keys()))
+        return data
     return None
 
 
@@ -3078,7 +3080,7 @@ def _fetch_chatgpt_session(
             try:
                 data = _read_chatgpt_session_once(driver)
                 _check_manual_stop()
-                if data:
+                if isinstance(data, dict) and data.get("accessToken"):
                     return data
                 keys = list(data.keys()) if isinstance(data, dict) else []
                 warning_only = isinstance(data, dict) and "WARNING_BANNER" in data and not data.get("accessToken")

@@ -71,6 +71,14 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertLess(acquire, release)
         self.assertIn("_prepare_and_submit_add_phone(", TEXT)
 
+    def test_fraud_guard_uses_longer_configurable_backoff(self):
+        config = CFG.read_text(encoding="utf-8")
+        self.assertIn("SMS_FRAUD_GUARD_RETRY_MIN", config)
+        self.assertIn("SMS_FRAUD_GUARD_RETRY_MAX", config)
+        self.assertIn('"fraud_guard"', TEXT)
+        self.assertIn('"suspicious behavior from phone"', TEXT)
+        self.assertIn("_sleep_before_phone_retry(attempt, max_retries, reason=err_text)", TEXT)
+
 
     def test_phone_submit_selects_sms_only_once(self):
         start = TEXT.index("def _prepare_and_submit_add_phone")
@@ -101,6 +109,25 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn("response_diagnostic = _finish_add_phone_response_watch(response_watch)", TEXT)
         self.assertIn("add_phone_response=", TEXT)
         self.assertIn("finally:", TEXT[TEXT.index("response_watch ="):TEXT.index("response_watch =") + 500])
+
+
+class FraudGuardBackoffTests(unittest.TestCase):
+    def test_fraud_guard_uses_configured_delay_range(self):
+        ns = _load({"_sleep_before_phone_retry"})
+        delays = []
+        messages = []
+        ns["random"] = type("Random", (), {"uniform": staticmethod(lambda low, high: (low, high))})
+        ns["sms_provider"] = type(
+            "SmsProvider", (), {"_cfg": type("Cfg", (), {
+                "SMS_FRAUD_GUARD_RETRY_MIN": 21,
+                "SMS_FRAUD_GUARD_RETRY_MAX": 39,
+            })()}
+        )
+        ns["logger"] = type("Logger", (), {"info": lambda self, *args: messages.append(args)})()
+        ns["_stop_sleep"] = delays.append
+        ns["_sleep_before_phone_retry"](1, 10, reason='add_phone_response code=fraud_guard')
+        self.assertEqual(delays, [(21, 39)])
+        self.assertTrue(messages)
 
 
 class ChannelMarkerSplitTests(unittest.TestCase):

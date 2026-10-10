@@ -31,6 +31,13 @@ class ChatGPTSessionRecoveryTests(unittest.TestCase):
         self.assertIn("login_recovery_attempted = True", source)
         self.assertIn("and not login_recovery_attempted", source)
 
+    def test_empty_session_state_reaches_warning_recovery_loop(self):
+        source = ROXY.read_text(encoding="utf-8")
+        self.assertIn("return context_data", source)
+        self.assertIn("return data\n    return None", source)
+        self.assertIn('if isinstance(data, dict) and data.get("accessToken"):', source)
+        self.assertIn("warning_only = isinstance(data, dict)", source)
+
     def test_remail_and_legacy_provider_compatibility_is_present(self):
         remail = (ROOT / "core" / "remail_client.py").read_text(encoding="utf-8")
         provider = (ROOT / "core" / "email_provider.py").read_text(encoding="utf-8")

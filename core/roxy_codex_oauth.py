@@ -2509,12 +2509,33 @@ def _classify_phone_page_failure(state: dict) -> str:
         return 'send_limited'
     return ''
 
-def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "[Codex][Browser]") -> None:
-    """换号前随机等待，至少 3 秒，避免连续提交号码过快。"""
+def _sleep_before_phone_retry(
+    attempt: int,
+    max_retries: int,
+    *,
+    prefix: str = "[Codex][Browser]",
+    reason: str = "",
+) -> None:
+    """按服务端拒绝类型退避，避免在 fraud_guard 窗口内连续换号。"""
     if attempt >= max_retries:
         return
-    seconds = random.uniform(3.0, 8.0)
-    logger.info("%s 换号前随机等待 %.1f 秒", prefix, seconds)
+    reason_text = str(reason or "").lower()
+    fraud_guard = any(marker in reason_text for marker in (
+        "fraud_guard",
+        "suspicious behavior from phone",
+    ))
+    if fraud_guard:
+        sms_cfg = getattr(sms_provider, "_cfg", None)
+        minimum = max(1, int(getattr(sms_cfg, "SMS_FRAUD_GUARD_RETRY_MIN", 20) or 20))
+        maximum = max(minimum, int(getattr(sms_cfg, "SMS_FRAUD_GUARD_RETRY_MAX", 45) or 45))
+        seconds = random.uniform(minimum, maximum)
+        logger.info(
+            "%s 检测到 fraud_guard，换号前退避 %.1f 秒（范围 %s-%ss）",
+            prefix, seconds, minimum, maximum,
+        )
+    else:
+        seconds = random.uniform(3.0, 8.0)
+        logger.info("%s 换号前随机等待 %.1f 秒", prefix, seconds)
     _stop_sleep(seconds)
 
 
@@ -2672,7 +2693,7 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                             "[Codex][Browser] 换号前刷新手机号页面失败，下一轮继续尝试恢复：%s",
                             str(refresh_exc)[:180],
                         )
-                    _sleep_before_phone_retry(attempt, max_retries)
+                    _sleep_before_phone_retry(attempt, max_retries, reason=err_text)
         raise RuntimeError(f"Roxy 手机验证重试 {max_retries} 次仍失败，最后错误：{last_err}")
     finally:
         try:
