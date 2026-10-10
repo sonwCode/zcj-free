@@ -67,6 +67,17 @@ def _mask_otp(value: object) -> str:
     return "<redacted>" if str(value or "").strip() else "<empty>"
 
 
+def _otp_error_hints(response) -> str:
+    """从 OTP 错误响应提取非敏感分类提示，不记录原始响应正文。"""
+    text = str(getattr(response, "text", "") or "").lower()
+    hint_words = (
+        "invalid", "incorrect", "expired", "session", "csrf", "state",
+        "rate", "limit", "blocked", "challenge", "captcha", "verification",
+    )
+    hints = [word for word in hint_words if word in text]
+    return ",".join(hints[:6]) or "none"
+
+
 def _is_retryable_reauth_error(exc: BaseException) -> bool:
     """仅重试限流、服务端错误和传输故障，不重试普通业务 4xx。"""
     response = getattr(exc, "response", None)
@@ -471,6 +482,12 @@ def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
 
     logger.info("[2FA] 提交重认证 OTP: %s", _mask_otp(code))
     resp = session.post(url, headers=headers, data=body)
+    if getattr(resp, "status_code", 0) >= 400:
+        logger.warning(
+            "[2FA] OTP validate HTTP 错误：status=%s hints=%s",
+            getattr(resp, "status_code", "?"),
+            _otp_error_hints(resp),
+        )
     resp.raise_for_status()
     data = resp.json()
     continue_url = data.get("continue_url")
