@@ -34,6 +34,7 @@ def load_email_flow(stubs):
         "_is_email_verification_page": lambda driver: False,
         "_is_mfa_challenge_page": lambda driver: False,
         "_fill_mfa_challenge_if_present": Mock(),
+        "_maybe_click_passwordless_after_email": Mock(),
     }
     namespace.update(stubs)
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(CODEX), "exec"), namespace)
@@ -121,7 +122,47 @@ class ReferenceAuthContractTests(unittest.TestCase):
             registration_password="secret",
         )
 
-    def test_stalled_login_page_fails_before_callback_timeout(self):
+    def test_stalled_login_page_gets_one_fresh_authorize_recovery(self):
+        submit = Mock(side_effect=[RuntimeError("email_submit_stalled: still at login page"), None])
+        password = Mock(return_value="next_step")
+        flow, _ = load_email_flow({
+            "_submit_email_step": submit,
+            "_fill_login_password_if_present": password,
+            "_wait_for_codex_auth_entry_state": Mock(return_value="unknown"),
+            "_is_login_password_page": lambda driver: False,
+            "_is_email_verification_page": lambda driver: False,
+        })
+
+        class Driver:
+            current_url = "https://auth.openai.com/log-in"
+            gets = []
+
+            def get(self, url):
+                self.gets.append(url)
+                self.current_url = "https://auth.openai.com/log-in"
+
+        driver = Driver()
+        flow(
+            driver=driver,
+            email="user@example.test",
+            otp_provider=Mock(),
+            auth_url="https://auth.openai.com/oauth/authorize",
+            registration_password="secret",
+        )
+
+        self.assertEqual(submit.call_count, 2)
+        self.assertEqual(
+            driver.gets,
+            ["https://auth.openai.com/oauth/authorize", "https://auth.openai.com/oauth/authorize"],
+        )
+        password.assert_called_once_with(
+            driver,
+            "user@example.test",
+            timeout=18,
+            registration_password="secret",
+        )
+
+    def test_stalled_login_page_fails_after_recovery_is_exhausted(self):
         submit = Mock(side_effect=RuntimeError("email_submit_stalled: still at login page"))
         flow, _ = load_email_flow({
             "_submit_email_step": submit,
