@@ -129,7 +129,12 @@ def _trigger_reauth_with_retry(
     raise last_exc
 
 
-def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
+def _follow_reauth_with_retry(
+    session: BrowserSession,
+    auth_url: str,
+    *,
+    stage: str = "initial",
+) -> str:
     """重试跨站 authorize 导航；首个 403 下发的 CF Cookie 可供下一轮复用。"""
     from config import twofa as _twofa_cfg
 
@@ -155,9 +160,16 @@ def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
             retryable = _is_retryable_reauth_error(exc)
             if attempt >= max_attempts or not retryable:
                 logger.warning(
-                    "[2FA] authorize 导航失败且不再重试：attempt=%s/%s retryable=%s error=%s: %s",
-                    attempt, max_attempts, retryable, type(exc).__name__, str(exc)[:200],
+                    "[2FA] authorize 导航失败且不再重试：stage=%s attempt=%s/%s retryable=%s error=%s: %s",
+                    stage, attempt, max_attempts, retryable, type(exc).__name__, str(exc)[:200],
                 )
+                if attempt >= max_attempts and retryable:
+                    raise TwofaReauthTransientError(
+                        f"2FA authorize 导航临时失败（stage={stage}，attempts={attempt}）: "
+                        f"{type(exc).__name__}: {str(exc)[:180]}",
+                        stage=stage,
+                        original=exc,
+                    ) from exc
                 raise
 
             # 403 响应通常会刷新 __cf_bm。清理本地熔断但保留 Cookie Jar，
@@ -584,7 +596,7 @@ def setup_2fa(
     auth_url = _trigger_reauth_with_retry(session, email, stage="initial")
     logger.info("[2FA] 重认证 authorize URL 已获取")
     human_delay("api")
-    _follow_reauth_with_retry(session, auth_url)
+    _follow_reauth_with_retry(session, auth_url, stage="initial")
     logger.info("[2FA] 已跟随重认证 authorize URL")
     # 浏览器登录页在落到 email-verification 后还会显式 GET
     # /api/accounts/email-otp/send；仅跟随 authorize URL 有时只打开页面而不真正
@@ -612,7 +624,7 @@ def setup_2fa(
                 reauth_otp_after_ts = time.time()
                 resend_auth_url = _trigger_reauth_with_retry(session, email, stage="otp_resend")
                 human_delay("api")
-                _follow_reauth_with_retry(session, resend_auth_url)
+                _follow_reauth_with_retry(session, resend_auth_url, stage="otp_resend")
                 send_email_otp(session)
                 logger.info("[2FA] 已重新触发重认证 OTP，开始第二轮等待")
                 # Remail 的 receivedAt 可能比本地发送时间早几十秒（网关缓存/时钟
