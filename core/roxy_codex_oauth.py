@@ -17,7 +17,11 @@ from core.email_provider import wait_for_otp
 from core.humanize import delay as human_delay
 from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 from core import sms_provider
-from core.openai_auth import AccountUnusableError, detect_account_unusable_response_body
+from core.openai_auth import (
+    AccountUnusableError,
+    detect_account_unusable_response_body,
+    detect_account_unusable_text,
+)
 from core.roxybrowser_client import RoxyBrowserClient
 from core import codex_oauth as _codex_proto
 from core.roxy_registration import (
@@ -1289,6 +1293,13 @@ def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
             invalid = any(str(i.get("ariaInvalid") or "").lower() == "true" for i in (state.get("inputs") or []))
             errors = [str(x) for x in (state.get("errors") or []) if str(x).strip()]
             body_text = str(state.get("text") or "").lower()
+            dead_text_code = detect_account_unusable_text(body_text)
+            if dead_text_code:
+                logger.warning(
+                    "[Codex][Browser] 邮箱 OTP 页面文案识别账号已废：code=%s",
+                    dead_text_code,
+                )
+                return f"deactivated:{dead_text_code}"
             error_hit = any(x in body_text for x in (
                 "invalid code", "incorrect code", "wrong code", "expired",
                 "验证码错误", "验证码无效", "验证码已过期", "コードが正しく", "無効", "期限",

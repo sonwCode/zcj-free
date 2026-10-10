@@ -13,4 +13,8 @@ class ReferencePasswordTests(unittest.TestCase):
   self.assertIn('_click_passwordless_signup_if_present(driver)',TEXT)
   self.assertIn('return "email_otp"',TEXT)
   self.assertIn('if "codex_password_step_stalled" in str(exc):',TEXT)
+ def test_email_otp_dead_account_text_fails_immediately(self):
+  self.assertIn('detect_account_unusable_text',TEXT)
+  self.assertIn('dead_text_code = detect_account_unusable_text(body_text)',TEXT)
+  self.assertIn('return f"deactivated:{dead_text_code}"',TEXT)
 if __name__=='__main__': unittest.main()
