@@ -21,6 +21,7 @@ from urllib.parse import urlencode
 import pyotp
 
 from core.session import BrowserSession
+from core.openai_auth import AccountUnusableError
 from core.humanize import delay as human_delay
 
 logger = logging.getLogger(__name__)
@@ -532,6 +533,13 @@ def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
             getattr(resp, "status_code", "?"),
             _otp_error_hints(resp),
         )
+        from core.openai_auth import detect_account_unusable_response_body
+        dead_code = detect_account_unusable_response_body(str(getattr(resp, "text", "") or ""))
+        if dead_code:
+            raise AccountUnusableError(
+                f"2FA OTP validate 账号不可用：{dead_code}",
+                error_code=dead_code,
+            )
     resp.raise_for_status()
     data = resp.json()
     continue_url = data.get("continue_url")

@@ -85,6 +85,22 @@ class AccountExportTwofaTests(unittest.TestCase):
         self.assertEqual(context.exception.original.args[0], "HTTP 403 from csrf")
         self.assertEqual(session.reset_count, 1)
 
+    def test_validate_reauth_otp_raises_account_unusable_for_deactivated(self):
+        session = Mock()
+        session.get_auth_headers.return_value = {}
+        response = Mock(status_code=403, text='{"error":{"code":"account_deactivated","type":"invalid_request_error"}}')
+        response.json.return_value = response.text and {"error": {"code": "account_deactivated"}}
+        session.post.return_value = response
+        with patch(
+            "core.openai_auth.request_sentinel_token", return_value={"token": "challenge"}
+        ), patch(
+            "core.openai_auth.build_sentinel_header", return_value=("sentinel", None)
+        ):
+            with self.assertRaises(account_export.AccountUnusableError) as context:
+                account_export._validate_reauth_otp(session, "123456")
+
+        self.assertEqual(context.exception.error_code, "account_deactivated")
+
     def test_validate_reauth_otp_adds_sentinel_headers(self):
         session = Mock()
         session.get_auth_headers.return_value = {"content-type": "application/json"}
