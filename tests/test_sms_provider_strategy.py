@@ -161,6 +161,8 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS = 12
         codex_config.SMSBOWER_RANDOM_COUNTRY = True
         codex_config.SMSBOWER_RANDOM_COUNTRY_ATTEMPTS = 12
+        codex_config.SMS_PREFLIGHT_RETRIES = 1
+        codex_config.SMS_PREFLIGHT_RETRY_DELAY = 0
         codex_config.SMSBOWER_EXCEPT_PROVIDER_IDS = ""
         codex_config.SMS_TIER_FAILURE_THRESHOLD = 2
         codex_config.SMS_TIER_COOLDOWN_SECONDS = 2700
@@ -224,6 +226,25 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
         self.assertEqual([call["params"].get("action") for call in http.calls], ["getPrices"])
         self.assertNotIn("getNumber", [call["params"].get("action") for call in http.calls])
+
+    def test_preflight_smsbower_retries_transient_empty_snapshot(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smsbower"
+        codex_config.SMSBOWER_RANDOM_COUNTRY = True
+        codex_config.SMS_PREFLIGHT_RETRIES = 2
+        codex_config.SMS_PREFLIGHT_RETRY_DELAY = 0
+        http = _Http([
+            _Response(json.dumps({})),
+            _Response(json.dumps({"6": {"dr": {"cost": 0.023, "count": 10}}})),
+        ])
+
+        result = sms_provider.preflight_sms_dependency(http=http)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["candidate_count"], 1)
+        self.assertEqual(
+            [call["params"].get("action") for call in http.calls],
+            ["getPrices", "getPrices"],
+        )
 
 
     def test_unsupported_legacy_provider_falls_back_to_smsbower(self):

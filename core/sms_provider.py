@@ -1216,14 +1216,33 @@ def _preflight_sms_dependency_for_provider(
         return _preflight_tiger(http, service_code, country)
     if provider != "smsbower":
         raise SmsProviderConfigurationError(f"不支持的短信平台：{provider}")
-    rows = _smsbower_price_rows(http, service_code)
     min_price_usd, max_price_usd = _smsbower_price_bounds_usd()
     if bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) and country is None:
-        candidates = [
-            row for row in rows
-            if (max_price_usd is None or row["cost"] <= max_price_usd)
-            and (min_price_usd is None or row["cost"] >= min_price_usd)
-        ]
+        try:
+            retry_count = _setting_int("SMS_PREFLIGHT_RETRIES", 2, 1)
+        except Exception:
+            retry_count = 2
+        try:
+            retry_delay = max(0, _setting_int("SMS_PREFLIGHT_RETRY_DELAY", 2, 0))
+        except Exception:
+            retry_delay = 2
+        candidates = []
+        for preflight_attempt in range(1, retry_count + 1):
+            rows = _smsbower_price_rows(http, service_code)
+            candidates = [
+                row for row in rows
+                if (max_price_usd is None or row["cost"] <= max_price_usd)
+                and (min_price_usd is None or row["cost"] >= min_price_usd)
+            ]
+            if candidates:
+                break
+            if preflight_attempt < retry_count:
+                logger.warning(
+                    "[SMSBower] 预检价格/库存范围内暂无候选，等待后刷新：attempt=%s/%s delay=%ss",
+                    preflight_attempt, retry_count, retry_delay,
+                )
+                if retry_delay:
+                    _stop_sleep(retry_delay)
         if not candidates:
             raise SmsNoNumbersError("SMSBower 当前价格范围内没有可用国家")
         return {
@@ -1237,6 +1256,7 @@ def _preflight_sms_dependency_for_provider(
         }
     if not country_code:
         raise SmsProviderConfigurationError("SMS_COUNTRY 不能为空")
+    rows = _smsbower_price_rows(http, service_code)
     target = country_code.lstrip("+")
     candidates = [
         row for row in rows
