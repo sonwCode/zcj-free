@@ -478,6 +478,24 @@ def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
     """
     url = "https://auth.openai.com/api/accounts/email-otp/validate"
     headers = session.get_auth_headers(referer="https://auth.openai.com/email-verification")
+    try:
+        from core.openai_auth import build_sentinel_header, request_sentinel_token
+        sentinel_response = request_sentinel_token(session, "email_otp_validate")
+        sentinel_header, so_header = build_sentinel_header(
+            session, sentinel_response, "email_otp_validate"
+        )
+        if sentinel_header:
+            headers["openai-sentinel-token"] = sentinel_header
+        if so_header:
+            headers["openai-sentinel-so-token"] = so_header
+        logger.info("[2FA] OTP validate Sentinel 头已生成")
+    except Exception as exc:
+        # 旧版 auth 流程可能不要求 Sentinel；失败时清理熔断后保留兼容请求。
+        _clear_twofa_session_circuit(session, source="OTP validate Sentinel")
+        logger.warning(
+            "[2FA] OTP validate Sentinel 头生成失败，继续兼容请求：%s: %s",
+            type(exc).__name__, str(exc)[:160],
+        )
     body = json.dumps({"code": code})
 
     logger.info("[2FA] 提交重认证 OTP: %s", _mask_otp(code))

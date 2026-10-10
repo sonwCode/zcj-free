@@ -85,6 +85,24 @@ class AccountExportTwofaTests(unittest.TestCase):
         self.assertEqual(context.exception.original.args[0], "HTTP 403 from csrf")
         self.assertEqual(session.reset_count, 1)
 
+    def test_validate_reauth_otp_adds_sentinel_headers(self):
+        session = Mock()
+        session.get_auth_headers.return_value = {"content-type": "application/json"}
+        response = Mock(status_code=200, text="")
+        response.json.return_value = {"continue_url": "https://auth.example/callback"}
+        session.post.return_value = response
+        with patch(
+            "core.openai_auth.request_sentinel_token", return_value={"token": "challenge"}
+        ), patch(
+            "core.openai_auth.build_sentinel_header", return_value=("sentinel", "so-token")
+        ):
+            result = account_export._validate_reauth_otp(session, "123456")
+
+        self.assertEqual(result, "https://auth.example/callback")
+        headers = session.post.call_args.kwargs["headers"]
+        self.assertEqual(headers["openai-sentinel-token"], "sentinel")
+        self.assertEqual(headers["openai-sentinel-so-token"], "so-token")
+
     def test_setup_2fa_excludes_rejected_otp_on_retry(self):
         session = Mock()
         rejected = RuntimeError("HTTP 401 from email otp validate")
