@@ -106,6 +106,13 @@ def pick_proxy() -> str:
     return random.choice(PROXY_POOL) if PROXY_POOL else ""
 
 
+def pick_proxy_excluding(excluded=None) -> str:
+    """随机选择代理；有可用候选时排除指定目标。"""
+    excluded_set = {str(item or "").strip() for item in (excluded or ()) if str(item or "").strip()}
+    candidates = [proxy for proxy in PROXY_POOL if proxy not in excluded_set]
+    return random.choice(candidates or PROXY_POOL) if PROXY_POOL else ""
+
+
 def acquire_proxy_lease() -> str:
     """选择当前租约最少的代理目标，并登记一个并发租约。"""
     with _PROXY_LEASE_LOCK:

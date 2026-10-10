@@ -70,6 +70,20 @@ class AccountExportTwofaTests(unittest.TestCase):
         self.assertEqual(session.reset_count, 2)
         sleep.assert_not_called()
 
+    def test_reauth_retry_exhaustion_exposes_initial_stage(self):
+        session = _CircuitSession()
+        with patch.object(
+            account_export, "_trigger_reauth", side_effect=RuntimeError("HTTP 403 from csrf")
+        ), patch("config.twofa.TWOFA_REAUTH_MAX_ATTEMPTS", 2), patch(
+            "config.twofa.TWOFA_REAUTH_RETRY_DELAY", 0
+        ):
+            with self.assertRaises(account_export.TwofaReauthTransientError) as context:
+                account_export._trigger_reauth_with_retry(session, "user@example.com")
+
+        self.assertEqual(context.exception.stage, "initial")
+        self.assertEqual(context.exception.original.args[0], "HTTP 403 from csrf")
+        self.assertEqual(session.reset_count, 1)
+
     def test_reauth_business_400_is_not_retried(self):
         session = _CircuitSession()
         with patch.object(

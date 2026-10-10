@@ -11,7 +11,7 @@ from pathlib import Path
 from config import email as _email_cfg
 from config import twofa as _twofa_cfg
 from core import db
-from core.account_export import setup_2fa
+from core.account_export import TwofaReauthTransientError, setup_2fa
 from core.session import BrowserSession, close_browser_session
 from core.proxy_utils import mask_proxy_url
 
@@ -81,21 +81,25 @@ def _normalize_proxy(proxy: str | None) -> str | None:
     return None
 
 
-def _resolve_twofa_proxy(proxy: str | None):
-    """按 TWOFA_PROXY_MODE 解析传输代理。"""
+def _resolve_twofa_proxy(proxy: str | None, *, excluded_targets=None):
+    """按 TWOFA_PROXY_MODE 解析传输代理，并可排除失败目标。"""
     mode = str(getattr(_twofa_cfg, "TWOFA_PROXY_MODE", "saved") or "saved").strip().lower()
     if mode not in {"saved", "pool"}:
         raise ValueError(f"TWOFA_PROXY_MODE={mode!r} 无效，可选 saved / pool")
+    from config import proxy as proxy_cfg
+    from core.proxy_chain import open_proxy_pool_proxy
+
+    excluded_targets = set(excluded_targets or ())
     if mode == "pool":
-        from core.proxy_chain import open_proxy_pool_proxy
-        transport, relay = open_proxy_pool_proxy(None)
+        target = proxy_cfg.pick_proxy_excluding(excluded_targets)
+        transport, relay = open_proxy_pool_proxy(target)
         return transport or None, relay, "pool"
     target = _normalize_proxy(proxy)
     if not target:
-        # 没有可复用的目标代理时交给 BrowserSession 从代理池选择；
-        # BrowserSession 会自行管理代理池链式中继生命周期。
-        return None, None, "pool"
-    from core.proxy_chain import open_proxy_pool_proxy
+        # 没有可复用的目标代理时，从代理池选取；回退时可排除刚失败的目标。
+        target = proxy_cfg.pick_proxy_excluding(excluded_targets)
+        transport, relay = open_proxy_pool_proxy(target)
+        return transport or None, relay, "pool"
 
     transport, relay = open_proxy_pool_proxy(target)
     return transport, relay, "saved"
@@ -141,18 +145,82 @@ def _run_twofa(
         fh.addFilter(lambda record: record.threadName == thread_name)
         root_logger.addHandler(fh)
         logger.info("[2FA] 开始后台设置：email=%s trigger=%s", email, trigger)
-        real_proxy, relay, proxy_source = _resolve_twofa_proxy(proxy)
         identity = email.strip().lower()
+        real_proxy, relay, proxy_source = _resolve_twofa_proxy(proxy)
+
+        def _log_session_created() -> None:
+            target_label = mask_proxy_url(
+                getattr(session, "proxy_target", None) or session.proxy or "direct"
+            ) or "direct"
+            transport_label = mask_proxy_url(session.proxy or "direct") or "direct"
+            _append_log(
+                email,
+                f"[2FA] 会话创建完成：target={target_label} transport={transport_label} "
+                f"source={proxy_source} device_id={session.device_id}",
+            )
+            _append_log(email, f"[2FA] 指纹摘要：{session.fingerprint_summary_text()}")
+
+        def _close_attempt_session() -> None:
+            nonlocal session, relay
+            if session is not None:
+                try:
+                    close_browser_session(session)
+                finally:
+                    session = None
+            if relay is not None:
+                try:
+                    relay.close()
+                finally:
+                    relay = None
+
         session = BrowserSession(proxy=real_proxy, fingerprint_seed=f"account:{identity}")
-        target_label = mask_proxy_url(getattr(session, "proxy_target", None) or session.proxy or "direct") or "direct"
-        transport_label = mask_proxy_url(session.proxy or "direct") or "direct"
-        _append_log(
-            email,
-            f"[2FA] 会话创建完成：target={target_label} transport={transport_label} "
-            f"source={proxy_source} device_id={session.device_id}",
-        )
-        _append_log(email, f"[2FA] 指纹摘要：{session.fingerprint_summary_text()}")
-        secret = setup_2fa(session, email, access_token=access_token)
+        _log_session_created()
+        fallback_count = 0
+        fallback_enabled = bool(getattr(_twofa_cfg, "TWOFA_REAUTH_PROXY_FALLBACK", True))
+        fallback_limit = _int_setting("TWOFA_REAUTH_PROXY_FALLBACK_ATTEMPTS", 1, 0, 3)
+        while True:
+            try:
+                secret = setup_2fa(session, email, access_token=access_token)
+                break
+            except TwofaReauthTransientError as exc:
+                if (
+                    not fallback_enabled
+                    or exc.stage != "initial"
+                    or proxy_source != "saved"
+                    or fallback_count >= fallback_limit
+                ):
+                    raise
+                fallback_count += 1
+                old_targets = {
+                    str(proxy or "").strip(),
+                    str(real_proxy or "").strip(),
+                    str(getattr(session, "proxy_target", "") or "").strip(),
+                }
+                old_targets.discard("")
+                logger.warning(
+                    "[2FA] 保存代理初始重认证失败，切换代理池重建会话：attempt=%s/%s "
+                    "stage=%s excluded=%s",
+                    fallback_count,
+                    fallback_limit,
+                    exc.stage,
+                    len(old_targets),
+                )
+                _append_log(
+                    email,
+                    f"[2FA] 保存代理重认证失败，切换代理池重试：attempt={fallback_count}/{fallback_limit} "
+                    f"excluded_targets={len(old_targets)}",
+                )
+                _close_attempt_session()
+                real_proxy, relay, proxy_source = _resolve_twofa_proxy(
+                    None,
+                    excluded_targets=old_targets,
+                )
+                session = BrowserSession(
+                    proxy=real_proxy,
+                    fingerprint_seed=f"account:{identity}:2fa-fallback:{fallback_count}",
+                )
+                _log_session_created()
+
         db.update_account_totp_secret(
             account_id,
             {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"},

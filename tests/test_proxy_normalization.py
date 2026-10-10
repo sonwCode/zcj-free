@@ -58,6 +58,17 @@ class ProxyNormalizationTests(unittest.TestCase):
             proxy_config.release_proxy_lease(second)
             self.assertEqual(proxy_config._PROXY_LEASES, {})
 
+    def test_pick_proxy_excluding_avoids_failed_target_when_alternative_exists(self):
+        with patch.object(
+            proxy_config,
+            "PROXY_POOL",
+            ["http://proxy-a.test:1", "http://proxy-b.test:1"],
+        ):
+            self.assertEqual(
+                proxy_config.pick_proxy_excluding({"http://proxy-a.test:1"}),
+                "http://proxy-b.test:1",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

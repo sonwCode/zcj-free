@@ -25,6 +25,15 @@ from core.humanize import delay as human_delay
 logger = logging.getLogger(__name__)
 
 
+class TwofaReauthTransientError(RuntimeError):
+    """重认证入口的临时网络失败已耗尽当前会话重试。"""
+
+    def __init__(self, message: str, *, stage: str, original: BaseException | None = None):
+        super().__init__(message)
+        self.stage = str(stage or "initial")
+        self.original = original
+
+
 def _clear_twofa_session_circuit(
     session: BrowserSession, *, source: str = "可选预热"
 ) -> None:
@@ -66,7 +75,12 @@ def _is_retryable_reauth_error(exc: BaseException) -> bool:
     return any(hint in text for hint in _RETRYABLE_REAUTH_HINTS)
 
 
-def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
+def _trigger_reauth_with_retry(
+    session: BrowserSession,
+    email: str,
+    *,
+    stage: str = "initial",
+) -> str:
     """对 CSRF + signin 阶段的临时故障执行有限指数退避重试。"""
     from config import twofa as _twofa_cfg
 
@@ -89,9 +103,16 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
             retryable = _is_retryable_reauth_error(exc)
             if attempt >= max_attempts or not retryable:
                 logger.warning(
-                    "[2FA] 重认证发起失败且不再重试：attempt=%s/%s retryable=%s error=%s: %s",
-                    attempt, max_attempts, retryable, type(exc).__name__, str(exc)[:200],
+                    "[2FA] 重认证发起失败且不再重试：stage=%s attempt=%s/%s retryable=%s error=%s: %s",
+                    stage, attempt, max_attempts, retryable, type(exc).__name__, str(exc)[:200],
                 )
+                if attempt >= max_attempts and retryable:
+                    raise TwofaReauthTransientError(
+                        f"2FA 重认证入口临时失败（stage={stage}，attempts={attempt}）: "
+                        f"{type(exc).__name__}: {str(exc)[:180]}",
+                        stage=stage,
+                        original=exc,
+                    ) from exc
                 raise
 
             # 403/429 已开启 BrowserSession 熔断；不清理会导致下一轮在本地直接失败。
@@ -560,7 +581,7 @@ def setup_2fa(
     # 阶段一：重认证
     logger.info("[2FA] 阶段1：发起重认证")
     reauth_otp_after_ts = time.time()
-    auth_url = _trigger_reauth_with_retry(session, email)
+    auth_url = _trigger_reauth_with_retry(session, email, stage="initial")
     logger.info("[2FA] 重认证 authorize URL 已获取")
     human_delay("api")
     _follow_reauth_with_retry(session, auth_url)
@@ -589,7 +610,7 @@ def setup_2fa(
                     type(first_wait_exc).__name__, str(first_wait_exc)[:180],
                 )
                 reauth_otp_after_ts = time.time()
-                resend_auth_url = _trigger_reauth_with_retry(session, email)
+                resend_auth_url = _trigger_reauth_with_retry(session, email, stage="otp_resend")
                 human_delay("api")
                 _follow_reauth_with_retry(session, resend_auth_url)
                 send_email_otp(session)

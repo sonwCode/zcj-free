@@ -21,6 +21,9 @@ TWOFA_PROXY_MODE = "saved"
 # 本地熔断，再按指数退避重试；业务类 4xx 不重试。
 TWOFA_REAUTH_MAX_ATTEMPTS = 3
 TWOFA_REAUTH_RETRY_DELAY = 3.0
+# 保存代理在初始 CSRF/signin 重认证阶段连续 403 时，切换代理池重试一次。
+TWOFA_REAUTH_PROXY_FALLBACK = True
+TWOFA_REAUTH_PROXY_FALLBACK_ATTEMPTS = 1
 
 # 2FA 后台队列。workers 是实际同时执行的账号数，修改后需重启进程以重建线程池。
 TWOFA_WORKERS = 4
@@ -32,6 +35,8 @@ apply_env_overrides(globals(), {
     'TWOFA_PROXY_MODE': 'str',
     'TWOFA_REAUTH_MAX_ATTEMPTS': 'int',
     'TWOFA_REAUTH_RETRY_DELAY': 'float',
+    'TWOFA_REAUTH_PROXY_FALLBACK': 'bool',
+    'TWOFA_REAUTH_PROXY_FALLBACK_ATTEMPTS': 'int',
     'TWOFA_WORKERS': 'int',
     'TWOFA_QUEUE_LIMIT': 'int',
 })
