@@ -17,6 +17,16 @@ from core.stop_control import check_stop_requested as _check_stop_requested
 logger = logging.getLogger(__name__)
 
 
+def _release_proxy_lease(target: str | None) -> None:
+    if not target:
+        return
+    try:
+        from config.proxy import release_proxy_lease
+        release_proxy_lease(target)
+    except Exception as exc:
+        logger.debug("[Cloak] 释放代理租约失败：%s", exc)
+
+
 def _process_children(pid: int) -> list[int]:
     """Return descendants from procfs without depending on psutil."""
     children: dict[int, list[int]] = {}
@@ -259,11 +269,19 @@ class _SwitchTo:
 class CloakSeleniumDriver:
     """只实现本项目 Roxy Selenium 流程实际用到的 WebDriver 子集。"""
 
-    def __init__(self, browser: Any, context: Any | None, page: Any, proxy_relay: Any | None = None):
+    def __init__(
+        self,
+        browser: Any,
+        context: Any | None,
+        page: Any,
+        proxy_relay: Any | None = None,
+        proxy_pool_target: str | None = None,
+    ):
         self.browser = browser
         self.context = context
         self.page = page
         self._proxy_relay = proxy_relay
+        self._proxy_pool_target = str(proxy_pool_target or "").strip()
         self._force_kill_owners = (browser, context)
         self._closed = False
         self._page_load_timeout_ms = int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90) * 1000
@@ -319,6 +337,10 @@ class CloakSeleniumDriver:
     def refresh(self) -> None:
         self.page.reload(wait_until="domcontentloaded", timeout=self._page_load_timeout_ms)
 
+    def _release_proxy_pool_target(self) -> None:
+        target, self._proxy_pool_target = self._proxy_pool_target, ""
+        _release_proxy_lease(target)
+
     def quit(self) -> None:
         if self._closed:
             return
@@ -343,6 +365,7 @@ class CloakSeleniumDriver:
                     relay.close()
                 except Exception:
                     pass
+            self._release_proxy_pool_target()
         if errors:
             raise RuntimeError(
                 f"Cloak graceful close failed: {type(errors[0]).__name__}: {str(errors[0])[:180]}"
@@ -360,6 +383,7 @@ class CloakSeleniumDriver:
                 relay.close()
             except Exception:
                 pass
+        self._release_proxy_pool_target()
         self.context = None
         self.browser = None
         self._closed = True
@@ -652,18 +676,20 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     """启动 CloakBrowser；返回前的任何失败都会回滚已取得资源。"""
     proxy_relay = None
     proxy_pool_target = ""
+    proxy_lease_acquired = False
     browser = None
     context = None
     driver = None
     try:
         if proxy is None and bool(getattr(_cfg, "CLOAK_USE_PROXY", True)):
             try:
-                from config.proxy import pick_proxy
+                from config.proxy import acquire_proxy_lease, release_proxy_lease
             except Exception:
                 proxy = None
             else:
                 from core.proxy_chain import open_proxy_pool_proxy
-                proxy_pool_target = str(pick_proxy() or "").strip()
+                proxy_pool_target = str(acquire_proxy_lease() or "").strip()
+                proxy_lease_acquired = bool(proxy_pool_target)
                 proxy, proxy_relay = open_proxy_pool_proxy(proxy_pool_target)
 
         try:
@@ -719,8 +745,15 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
             context = browser.new_context(**context_kwargs)
             page = context.new_page()
 
-        driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
+        driver = CloakSeleniumDriver(
+            browser=browser,
+            context=context,
+            page=page,
+            proxy_relay=proxy_relay,
+            proxy_pool_target=proxy_pool_target if proxy_lease_acquired else None,
+        )
         proxy_relay = None
+        proxy_lease_acquired = False
         driver._registration_log_prefix = "[Cloak注册]"
         driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
         return driver, CloakOpenResult(raw={
@@ -735,4 +768,9 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
             close_cloak_driver(driver)
         else:
             _rollback_cloak_resources(browser=browser, context=context, proxy_relay=proxy_relay)
+        if proxy_lease_acquired:
+            try:
+                release_proxy_lease(proxy_pool_target)
+            except Exception:
+                pass
         raise

@@ -10,6 +10,7 @@
     - socks5h://           SOCKS5（DNS 在代理端解析，推荐，避免 DNS-IP 错配）
 """
 import random
+import threading
 from urllib.parse import quote, urlparse
 
 from config.env_loader import apply_env_overrides
@@ -57,6 +58,10 @@ PLAN_CHECK_MIN_INTERVAL = 1.0
 PLAN_CHECK_JITTER = 0.8
 
 
+_PROXY_LEASE_LOCK = threading.RLock()
+_PROXY_LEASES: dict[str, int] = {}
+
+
 def _valid_port(value: str) -> bool:
     return value.isdigit() and 1 <= int(value) <= 65535
 
@@ -99,6 +104,36 @@ def normalize_proxy_list(values, default_scheme: str = "http") -> list[str]:
 def pick_proxy() -> str:
     """从代理池中随机抽取一个代理 URL；池为空时返回空串（即不使用代理）。"""
     return random.choice(PROXY_POOL) if PROXY_POOL else ""
+
+
+def acquire_proxy_lease() -> str:
+    """选择当前租约最少的代理目标，并登记一个并发租约。"""
+    with _PROXY_LEASE_LOCK:
+        if not PROXY_POOL:
+            return ""
+        minimum = min(_PROXY_LEASES.get(proxy, 0) for proxy in PROXY_POOL)
+        candidates = [proxy for proxy in PROXY_POOL if _PROXY_LEASES.get(proxy, 0) == minimum]
+        selected = random.choice(candidates)
+        _PROXY_LEASES[selected] = _PROXY_LEASES.get(selected, 0) + 1
+        return selected
+
+
+def release_proxy_lease(proxy: str | None) -> None:
+    """释放一次代理目标租约；未知或空目标安全忽略。"""
+    target = str(proxy or "").strip()
+    if not target:
+        return
+    with _PROXY_LEASE_LOCK:
+        current = _PROXY_LEASES.get(target, 0)
+        if current <= 1:
+            _PROXY_LEASES.pop(target, None)
+        else:
+            _PROXY_LEASES[target] = current - 1
+
+
+def _reset_proxy_leases_for_tests() -> None:
+    with _PROXY_LEASE_LOCK:
+        _PROXY_LEASES.clear()
 
 
 # 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理

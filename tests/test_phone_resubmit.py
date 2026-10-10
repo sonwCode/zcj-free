@@ -30,7 +30,8 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
 
     def test_cloak_email_otp_matches_reference_retry_contract(self):
         source = (ROOT / "core" / "cloakbrowser_registration.py").read_text(encoding="utf-8")
-        self.assertIn("max_otp_attempts = 3", source)
+        self.assertIn("REGISTER_OTP_MAX_ATTEMPTS", source)
+        self.assertIn("max(3, min(6", source)
         self.assertIn("after_ts=otp_after_ts", source)
         self.assertIn("exclude_codes=used_otps", source)
         self.assertNotIn("max_wait=30 if used_otps else None", source)
@@ -187,9 +188,11 @@ class ResubmitLoopWiringTests(unittest.TestCase):
         loop_start = TEXT.index("def _do_phone_verification_if_present")
         loop_block = TEXT[loop_start:]
         acquire = loop_block.index("activation_id, phone = sms_provider.acquire_number(http)")
+        preflight = loop_block.index("_ensure_add_phone_input(driver, reason=f\"before-acquire-attempt-{attempt}\")")
         release = loop_block.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)")
         next_attempt = loop_block.index("for attempt in range(1, max_retries + 1)")
-        self.assertLess(next_attempt, acquire)
+        self.assertLess(next_attempt, preflight)
+        self.assertLess(preflight, acquire)
         self.assertLess(acquire, release)
 
     def test_no_bare_cfg_reference(self):

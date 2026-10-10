@@ -216,10 +216,8 @@ def _run_cloak_registration_impl(
                         exclude_codes=used_otps,
                     )
                 except Exception as exc:
-                    if otp_attempt >= max_otp_attempts:
-                        raise
-                    # 参考 Roxy 流程：after_ts 过滤可能漏掉同一封被重发/时间戳异常的验证码，
-                    # 先短暂宽松读取一次最新验证码，再执行 resend，避免无效地多等 90 秒。
+                    # 参考 Roxy 流程：after_ts 过滤可能漏掉同一封被重发/时间戳异常的验证码。
+                    # 最后一轮也先做一次宽松读取，避免邮件已到达但时间戳偏差导致直接失败。
                     fallback_otp = None
                     try:
                         fallback_otp = wait_for_otp(
@@ -238,6 +236,8 @@ def _run_cloak_registration_impl(
                         )
                         current_otp = fallback_otp
                         continue
+                    if otp_attempt >= max_otp_attempts:
+                        raise
                     logger.warning(
                         "[Cloak注册][OTP] 一直未收到验证码，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
                         otp_attempt + 1,

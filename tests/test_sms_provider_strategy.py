@@ -184,6 +184,21 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(http.calls[0]["params"]["action"], "getPrices")
         self.assertEqual(http.calls[0]["params"]["service"], "dr")
 
+    def test_random_country_candidates_skip_recently_rejected_voip_country(self):
+        codex_config.SMS_MAX_PRICE = "0.25"
+        sms_provider._record_country_rejected(
+            {"provider": "smsbower", "service": "dr", "country": "36"},
+            "voip_phone_disallowed",
+        )
+        http = _Http([_Response(json.dumps({
+            "36": {"dr": {"cost": 0.031, "count": 50}},
+            "35": {"dr": {"cost": 0.033, "count": 30}},
+        }))])
+
+        candidates = sms_provider._smsbower_random_country_candidates(http, "dr")
+
+        self.assertEqual([row["country"] for row in candidates], ["35"])
+
     def test_preflight_smsbower_uses_get_prices_without_consuming_number(self):
         codex_config.SMSBOWER_RANDOM_COUNTRY = False
         http = _Http([_Response(json.dumps({

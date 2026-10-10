@@ -55,6 +55,8 @@ class CloakOtpResendTests(unittest.TestCase):
         self.assertIn("max_wait=15", otp_loop)
         self.assertIn("poll_interval=3", otp_loop)
         self.assertIn("fallback", otp_loop)
+        fallback_pos = otp_loop.index("fallback_otp")
+        self.assertGreater(otp_loop.index("if otp_attempt >= max_otp_attempts", fallback_pos), fallback_pos)
         self.assertIn("_wait_after_email_otp_submit(driver, timeout=30)", otp_loop)
         self.assertIn("已提交邮箱验证码，等待资料页或登录态", otp_loop)
         self.assertIn("提交后状态：%s", otp_loop)

@@ -1031,6 +1031,21 @@ def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list
         and (min_price_usd is None or row["cost"] >= min_price_usd)
     ]
 
+    cooled = [
+        row for row in candidates
+        if _country_is_recently_rejected({
+            "provider": "smsbower",
+            "service": service,
+            "country": row["country"],
+        })
+    ]
+    if cooled:
+        cooled_ids = sorted({row["country"] for row in cooled})
+        candidates = [row for row in candidates if row["country"] not in cooled_ids]
+        logger.info(
+            "[SMSBower] 过滤近期 VoIP 拒绝国家：countries=%s",
+            ",".join(cooled_ids),
+        )
     random.shuffle(candidates)
     logger.info(
         "[SMSBower] 随机国家候选：service=%s count=%s price_usd=%s..%s price_cny=%s..%s rate_usd_cny=%s fx_source=%s",

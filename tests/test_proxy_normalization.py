@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 import unittest
 
+from unittest.mock import patch
+
+from config import proxy as proxy_config
 from config.proxy import normalize_proxy_list, normalize_proxy_url
 
 
@@ -40,6 +43,20 @@ class ProxyNormalizationTests(unittest.TestCase):
             normalize_proxy_list(["", "  ", "127.0.0.1:7897"]),
             ["http://127.0.0.1:7897"],
         )
+
+    def test_proxy_leases_spread_concurrent_browsers(self):
+        with patch.object(
+            proxy_config,
+            "PROXY_POOL",
+            ["http://proxy-a.test:1", "http://proxy-b.test:1"],
+        ):
+            proxy_config._reset_proxy_leases_for_tests()
+            first = proxy_config.acquire_proxy_lease()
+            second = proxy_config.acquire_proxy_lease()
+            self.assertNotEqual(first, second)
+            proxy_config.release_proxy_lease(first)
+            proxy_config.release_proxy_lease(second)
+            self.assertEqual(proxy_config._PROXY_LEASES, {})
 
 
 if __name__ == "__main__":
