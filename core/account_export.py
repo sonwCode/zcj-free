@@ -500,7 +500,7 @@ def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
     body = json.dumps({"code": code})
 
     logger.info("[2FA] 提交重认证 OTP: %s", _mask_otp(code))
-    resp = session.post(url, headers=headers, data=body)
+    resp = session.post(url, headers=headers, data=body, allow_redirects=False)
     if getattr(resp, "status_code", 0) >= 400:
         logger.warning(
             "[2FA] OTP validate HTTP 错误：status=%s hints=%s",
