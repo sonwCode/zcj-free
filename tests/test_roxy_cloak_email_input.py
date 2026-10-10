@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from unittest.mock import patch
 
@@ -62,6 +63,11 @@ class RoxyCloakEmailInputTests(unittest.TestCase):
         self.assertEqual(stale.fill_calls, [email])
         self.assertEqual(live.fill_calls, [email])
         self.assertEqual(live.value, email)
+
+    def test_submit_email_recovery_log_distinguishes_missing_input_transition(self):
+        source = inspect.getsource(roxy._submit_email_step)
+        self.assertIn("提交后登录页已无邮箱输入框，等待认证页面继续推进", source)
+        self.assertIn("登录页恢复未能重新提交邮箱，继续等待认证页面", source)
 
 
 if __name__ == "__main__":

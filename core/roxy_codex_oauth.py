@@ -825,12 +825,16 @@ def _fill_email_and_otp(
         if otp_attempt >= max_otp_attempts:
             raise RuntimeError("Codex 邮箱验证码连续错误/过期，已达到最大重试次数")
 
+        validate_snapshot = _email_otp_validate_snapshot(driver)
         logger.warning(
-            "[Codex][Browser] 邮箱验证码错误/过期或页面未跳转，准备重新发送并重新获取最新验证码（%s/%s）",
+            "[Codex][Browser] 邮箱验证码未通过，重开授权流程获取新码（下一轮 %s/%s，"
+            "已排除旧码=%s，validate=%s）",
             otp_attempt + 1,
             max_otp_attempts,
+            len(used_codes),
+            validate_snapshot,
         )
-        _restart_email_otp_flow("验证码错误/过期或页面未跳转，避免点击 resend 导致 500")
+        _restart_email_otp_flow("验证码未通过；重开授权并排除已提交旧码，避免点击 resend 导致 500")
 
 
 

@@ -47,6 +47,8 @@ class ReferenceAuthContractTests(unittest.TestCase):
         self.assertLess(body.index("_submit_email_step(driver)"), body.index("_fill_login_password_if_present("))
         self.assertIn("_maybe_click_passwordless_after_email", body)
         self.assertIn("_wait_for_fresh_email_otp", body)
+        self.assertIn("已排除旧码=%s", body)
+        self.assertIn("validate_snapshot = _email_otp_validate_snapshot(driver)", body)
 
     def test_reference_password_helper_and_mfa_exist(self):
         password = source(CODEX, "_fill_login_password_if_present")

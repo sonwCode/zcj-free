@@ -1131,7 +1131,15 @@ def _submit_email_step(driver, email: str | None = None) -> None:
                 return
             _stop_aware_sleep(0.4)
         recovery = _recover_email_submit_if_stuck(driver, email_value)
-        logger.warning("%s 邮箱提交后仍停留 /log-in，执行共享恢复：%s", _log_prefix(driver), recovery)
+        if recovery.get("reason") == "missing_email_input":
+            logger.info(
+                "%s 提交后登录页已无邮箱输入框，等待认证页面继续推进：%s",
+                _log_prefix(driver), recovery,
+            )
+        elif recovery.get("ok"):
+            logger.info("%s 登录页恢复已重新提交邮箱，等待认证页面推进：%s", _log_prefix(driver), recovery)
+        else:
+            logger.warning("%s 登录页恢复未能重新提交邮箱，继续等待认证页面：%s", _log_prefix(driver), recovery)
         deadline = time.time() + 12
         while time.time() < deadline:
             current = str(getattr(driver, "current_url", "") or "").lower()
