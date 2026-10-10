@@ -23,6 +23,7 @@ from typing import Any, Callable
 from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, _post_register_dwell_seconds
+from core.otp_utils import mask_otp as _mask_otp
 from core.browser_use_client import BrowserUseClient
 from core.cloud_browser_lifecycle import CloudBrowserLease
 from core.email_provider import acquire_email_after_input, resolve_email_source, wait_for_otp
@@ -2775,7 +2776,7 @@ def run_browser_use_registration(
                         _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500/chrome-error")
                         current_otp = None
                         continue
-                logger.info("[BrowserUse][OTP] 收到验证码：%s", current_otp)
+                logger.info("[BrowserUse][OTP] 收到验证码：%s", _mask_otp(current_otp))
                 _t_otp_submit = _StepTimer("提交邮箱 OTP")
                 _clear_otp_inputs(page)
                 _type_otp(page, current_otp)

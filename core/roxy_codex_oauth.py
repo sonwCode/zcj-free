@@ -17,6 +17,7 @@ from core.email_provider import wait_for_otp
 from core.humanize import delay as human_delay
 from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
 from core import sms_provider
+from core.otp_utils import mask_otp as _mask_otp
 from core.openai_auth import (
     AccountUnusableError,
     detect_account_unusable_response_body,
@@ -787,7 +788,7 @@ def _fill_email_and_otp(
             _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500")
             continue
         used_codes.add(str(code))
-        logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", code)
+        logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", _mask_otp(code))
         _wait_for_otp_input(driver, timeout=30)
         _clear_otp_inputs(driver)
         _install_email_otp_validate_hook(driver)

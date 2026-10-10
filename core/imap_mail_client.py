@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from config import email as _email_cfg
-from core.otp_utils import extract_otp, looks_like_openai_email
+from core.otp_utils import extract_otp, looks_like_openai_email, mask_otp
 from core.qqmail_client import _msg_to_dict
 
 logger = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ def fetch_latest_otp(
             if ts >= best_ts:
                 if otp != best_otp:
                     best_otp, best_ts, settle_until = otp, ts, time.time() + settle
-                    logger.info("[IMAP] 锁定候选 OTP=%s，等待 %ss settle", otp, settle)
+                    logger.info("[IMAP] 锁定候选 OTP=%s，等待 %ss settle", mask_otp(otp), settle)
             break
         if best_otp and settle_until is not None and time.time() >= settle_until:
             return best_otp

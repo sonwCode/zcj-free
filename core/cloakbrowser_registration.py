@@ -13,6 +13,7 @@ from config import cloakbrowser as _cfg
 from config import email as _email_cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
+from core.otp_utils import mask_otp as _mask_otp
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import PlaywrightTrafficTracker
 from core.cloakbrowser_driver import build_cloak_driver, close_cloak_driver
@@ -232,7 +233,7 @@ def _run_cloak_registration_impl(
                     if fallback_otp:
                         logger.info(
                             "[Cloak注册][OTP] 取码超时但宽松取到最新验证码，直接重试提交：%s (fallback)",
-                            fallback_otp,
+                            _mask_otp(fallback_otp),
                         )
                         current_otp = fallback_otp
                         continue
@@ -255,7 +256,7 @@ def _run_cloak_registration_impl(
             if not current_otp:
                 raise RuntimeError("邮箱验证码为空")
             used_otps.add(current_otp)
-            logger.info("[Cloak注册][OTP] 收到验证码：%s", current_otp)
+            logger.info("[Cloak注册][OTP] 收到验证码：%s", _mask_otp(current_otp))
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
             _check_manual_stop()

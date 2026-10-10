@@ -12,6 +12,7 @@ import logging
 import threading
 import time
 from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
+from core.otp_utils import mask_otp
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def submit_manual_otp(email: str, code: str) -> dict:
     with _lock:
         _codes[key].append(code)
         _event_for(key).set()
-    logger.info("[ManualOTP] 已提交验证码：email=%s code=%s", email, code)
+    logger.info("[ManualOTP] 已提交验证码：email=%s code=%s", email, mask_otp(code))
     return {"ok": True, "email": email, "code": code}
 
 

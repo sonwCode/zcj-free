@@ -118,6 +118,50 @@ class RemailClientTests(unittest.TestCase):
         self.assertEqual(kwargs["params"], {"email": "fresh@outlook.test", "token": "st-test-token"})
         self.assertNotIn("Authorization", kwargs["headers"])
 
+    @patch("core.remail_client.requests.request")
+    def test_fetch_latest_otp_skips_excluded_newest_code(self, request):
+        account = remail_client.RemailAccount(
+            email="fresh@outlook.test",
+            service_token="st-test-token",
+            order_no="R1",
+            project_id=1001,
+            email_suffix="outlook.com",
+        )
+        remail_client._CONTEXT_CACHE["fresh@outlook.test"] = account
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "items": [
+                {
+                    "id": 3,
+                    "receivedAt": "2026-08-29T05:02:00Z",
+                    "sender": "noreply@openai.com",
+                    "subject": "Your verification code",
+                    "bodyPreview": "Your code is 654321",
+                    "verificationCode": "654321",
+                },
+                {
+                    "id": 2,
+                    "receivedAt": "2026-08-29T05:01:00Z",
+                    "sender": "noreply@openai.com",
+                    "subject": "Your verification code",
+                    "bodyPreview": "Your code is 123456",
+                    "verificationCode": "123456",
+                },
+            ]
+        }
+        request.return_value = response
+
+        code = remail_client.fetch_latest_otp(
+            "fresh@outlook.test",
+            after_ts=remail_client._parse_timestamp("2026-08-29T05:00:30Z"),
+            max_wait=1,
+            poll_interval=1,
+            settle_seconds=0,
+            exclude_codes={"654321"},
+        )
+
+        self.assertEqual(code, "123456")
+
     @patch("core.remail_client._saved_context_metadata")
     @patch("core.remail_client.requests.request")
     def test_fetch_latest_otp_restores_saved_service_token_after_restart(self, request, saved):

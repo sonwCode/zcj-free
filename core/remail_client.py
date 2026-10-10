@@ -210,7 +210,7 @@ def _email_suffix() -> str:
 
 
 def _supply_policy() -> str:
-    value = str(getattr(_email_cfg, "REMAIL_SUPPLY_POLICY", "public_only") or "public_only").strip().lower()
+    value = str(getattr(_email_cfg, "REMAIL_SUPPLY_POLICY", "private_first") or "private_first").strip().lower()
     if value not in {"private_first", "public_only"}:
         raise RemailError("Remail 库存策略无效，只支持 private_first 或 public_only")
     return value

@@ -2,6 +2,8 @@ import ast
 import unittest
 from pathlib import Path
 
+from core.otp_utils import mask_otp
+
 
 ROOT = Path(__file__).parents[1]
 TARGET = ROOT / "core" / "cloakbrowser_registration.py"
@@ -18,6 +20,11 @@ def _function_source(name: str) -> str:
 
 class CloakOtpResendTests(unittest.TestCase):
     """Cloak 注册 OTP 重试必须留在当前验证会话，不能重开登录入口。"""
+
+    def test_mask_otp_never_returns_code(self):
+        self.assertEqual(mask_otp("123456"), "<redacted>")
+        self.assertEqual(mask_otp(""), "<empty>")
+        self.assertNotIn("123456", mask_otp("123456"))
 
     def test_both_retry_branches_click_resend(self):
         body = _function_source("_run_cloak_registration_impl")

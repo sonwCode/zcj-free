@@ -14,6 +14,7 @@ from typing import Callable
 from config import roxybrowser as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
+from core.otp_utils import mask_otp as _mask_otp
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import SeleniumTrafficTracker
 from core.roxy_asset_cache import RoxyLocalAssetCache
@@ -3357,7 +3358,7 @@ def run_roxy_registration(
                     if fallback_otp:
                         logger.info(
                             "[Roxy注册][OTP] 取码接口超时但宽松取到最新验证码，直接重试提交：%s (fallback)",
-                            fallback_otp,
+                            _mask_otp(fallback_otp),
                         )
                         if str(fallback_otp) in used_otps:
                             raise RuntimeError("重复验证码，等待重新发送")
@@ -3376,7 +3377,7 @@ def run_roxy_registration(
                     current_otp = None
                     continue
             used_otps.add(str(current_otp))
-            logger.info("[Roxy注册][OTP] 收到验证码：%s", current_otp)
+            logger.info("[Roxy注册][OTP] 收到验证码：%s", _mask_otp(current_otp))
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
             logger.info("[Roxy注册][OTP] 已填写邮箱验证码")

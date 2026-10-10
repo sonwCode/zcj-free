@@ -14,6 +14,7 @@ from core import sms_provider
 from core import codex_oauth as _codex_proto
 from core.browser_use_client import BrowserUseClient
 from core.cloud_browser_lifecycle import CloudBrowserLease
+from core.otp_utils import mask_otp as _mask_otp
 from core.openai_auth import AccountUnusableError, detect_account_unusable_response_body
 from core.browser_use_registration import (
     _timeout_ms,
@@ -904,7 +905,7 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
             _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500")
             continue
         used_codes.add(str(code))
-        logger.info("[Codex][BrowserUse] 邮箱 OTP 收到：%s", code)
+        logger.info("[Codex][BrowserUse] 邮箱 OTP 收到：%s", _mask_otp(code))
         _t_otp_submit = _StepTimer("提交邮箱 OTP")
         _clear_otp_inputs(page)
         _type_otp(page, code)
@@ -1480,7 +1481,7 @@ def _do_phone_verification_if_present(page) -> dict | None:
             _t_sms = _StepTimer(f"等待手机短信 attempt={attempt}")
             sms_code = sms_provider.wait_for_sms_code(activation_id, http)
             _t_sms.done()
-            logger.info("[Codex][BrowserUse] 手机 OTP 收到：%s", sms_code)
+            logger.info("[Codex][BrowserUse] 手机 OTP 收到：%s", _mask_otp(sms_code))
             _clear_otp_inputs(page)
             _type_otp(page, sms_code)
             _bu_delay("otp_input")

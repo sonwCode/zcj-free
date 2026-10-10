@@ -13,6 +13,7 @@ import time
 from config import openai_protocol as _protocol_cfg
 from core.session import BrowserSession
 from core.stop_control import sleep as _stop_sleep
+from core.otp_utils import mask_otp
 from core.sentinel import (
     generate_requirements_token,
     build_sentinel_request_body,
@@ -755,12 +756,12 @@ def validate_email_otp(session: BrowserSession, code: str, sentinel_header: str 
 
     body = json.dumps({"code": code})
 
-    logger.info(f"[步骤10] 提交邮箱验证码: {code}")
+    logger.info("[步骤10] 提交邮箱验证码: %s", mask_otp(code))
     resp = session.post(url, headers=headers, data=body)
 
     if resp.status_code != 200:
         logger.error(f"[步骤10] 请求失败, 状态码: {resp.status_code}")
-        logger.error(f"[步骤10] 响应内容: {resp.text}")
+        logger.error("[步骤10] 响应内容已省略：status=%s content_length=%s", resp.status_code, len(resp.text or ""))
         # 先看是不是"账号已废"——这类邮箱再试也没用，单独抛出让上层标 failed
         err_code = _extract_error_code(resp)
         if err_code in _ACCOUNT_DEAD_CODES:

@@ -34,6 +34,7 @@ import pyotp
 from config import codex as _cfg
 from core.session import BrowserSession, close_browser_session
 from core.humanize import delay as human_delay
+from core.otp_utils import mask_otp
 from core.stop_control import sleep as _stop_sleep
 from core.openai_auth import (
     _is_transient_network_error,
@@ -2333,7 +2334,7 @@ def run_codex_oauth(
                         auth_result = retry_result
                         break
             if not password_login_done:
-                logger.info(f"[Codex] 邮箱 OTP 收到：{email_otp}")
+                logger.info("[Codex] 邮箱 OTP 收到：%s", mask_otp(email_otp))
                 human_delay("otp_input")
                 auth_result = _submit_email_otp(session, email_otp)
                 human_delay("api")

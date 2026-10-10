@@ -14,6 +14,7 @@ import string
 import threading
 import time
 from core.stop_control import check_stop_requested as _check_stop_requested, sleep as _stop_sleep
+from core.otp_utils import mask_otp
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email import policy
@@ -660,9 +661,9 @@ def fetch_latest_otp(
                 effective_ts == best_timestamp and message_key != best_message_key and best_otp != otp
             ):
                 if best_otp and best_otp != otp:
-                    logger.info("[Cloudflare] 发现更晚 OTP=%s，替换 %s", otp, best_otp)
+                    logger.info("[Cloudflare] 发现更晚 OTP=%s，替换 %s", mask_otp(otp), mask_otp(best_otp))
                 elif not best_otp:
-                    logger.info("[Cloudflare] 锁定 OTP 候选 %s，等待 settle=%ss", otp, settle)
+                    logger.info("[Cloudflare] 锁定 OTP 候选 %s，等待 settle=%ss", mask_otp(otp), settle)
                 best_otp = otp
                 best_timestamp = effective_ts
                 best_message_key = message_key
@@ -673,14 +674,14 @@ def fetch_latest_otp(
 
         now = time.monotonic()
         if best_otp and settle_until is not None and now >= settle_until:
-            logger.info("[Cloudflare] settle 完成，返回 OTP=%s", best_otp)
+            logger.info("[Cloudflare] settle 完成，返回 OTP=%s", mask_otp(best_otp))
             return best_otp
 
         remaining = max(0, int(deadline - now))
         if best_otp and settle_until is not None:
             logger.info(
                 "[Cloudflare] 已有候选 OTP=%s，settle 剩余 ~%ss，总剩余 %ss",
-                best_otp,
+                mask_otp(best_otp),
                 max(0, int(settle_until - now)),
                 remaining,
             )
@@ -696,7 +697,7 @@ def fetch_latest_otp(
         _stop_sleep(min(interval, max(1, remaining)))
 
     if best_otp:
-        logger.warning("[Cloudflare] 总超时但已有候选，返回 OTP=%s", best_otp)
+        logger.warning("[Cloudflare] 总超时但已有候选，返回 OTP=%s", mask_otp(best_otp))
         return best_otp
 
     raise CFTempMailError(f"等待 Cloudflare 验证码超时: {target}; {last_error}")

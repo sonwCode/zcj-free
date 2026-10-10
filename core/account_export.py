@@ -23,6 +23,7 @@ import pyotp
 from core.session import BrowserSession
 from core.openai_auth import AccountUnusableError
 from core.humanize import delay as human_delay
+from core.otp_utils import mask_otp as _mask_otp
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,6 @@ _RETRYABLE_REAUTH_HINTS = (
     "proxy", "socks", "timeout", "timed out", "connection", "closed",
     "reset", "temporarily unavailable", "熔断冷却",
 )
-
-
-def _mask_otp(value: object) -> str:
-    """日志中只保留验证码存在性，避免写入可用的完整验证码。"""
-    return "<redacted>" if str(value or "").strip() else "<empty>"
 
 
 def _otp_error_hints(response) -> str:

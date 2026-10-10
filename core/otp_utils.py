@@ -35,6 +35,11 @@ _OTP_CONTEXT_KEYWORDS = (
 _OTP_REGEX = re.compile(r"\b(\d{6})\b")
 
 
+def mask_otp(value: object) -> str:
+    """Return a non-reversible marker for OTP values in logs."""
+    return "<redacted>" if str(value or "").strip() else "<empty>"
+
+
 def _get_field(item: dict, *names: str) -> str:
     """
     从邮件 dict 中按顺序尝试多个可能的字段名，返回第一个非空字符串。

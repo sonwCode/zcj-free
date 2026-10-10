@@ -14,7 +14,7 @@ class RemailConfigTests(unittest.TestCase):
         self.assertIn('REMAIL_API_BASE = "https://remail.aishop6.com"', source)
         self.assertIn("REMAIL_PROJECT_ID = 2", source)
         self.assertIn('REMAIL_SERVICE_MODE = "purchase"', source)
-        self.assertIn('REMAIL_SUPPLY_POLICY = "public_only"', source)
+        self.assertIn('REMAIL_SUPPLY_POLICY = "private_first"', source)
         self.assertIn('"remail"', source)
 
     def test_secret_registry_includes_remail_api_key(self):
