@@ -70,7 +70,7 @@ class TwofaServiceSettingsTests(unittest.TestCase):
         def setup(session, email, access_token):
             setup_calls.append(session)
             if len(setup_calls) == 1:
-                raise TwofaReauthTransientError("initial csrf 403", stage="initial")
+                raise TwofaReauthTransientError("otp validate 403", stage="otp_validate")
             return "JBSWY3DPEHPK3PXP"
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(

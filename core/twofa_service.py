@@ -202,8 +202,8 @@ def _run_twofa(
             except TwofaReauthTransientError as exc:
                 if (
                     not fallback_enabled
-                    or exc.stage != "initial"
-                    or proxy_source != "saved"
+                    or exc.stage not in {"initial", "otp_validate"}
+                    or proxy_source not in {"saved", "pool"}
                     or fallback_count >= fallback_limit
                 ):
                     raise
@@ -215,7 +215,7 @@ def _run_twofa(
                 }
                 old_targets.discard("")
                 logger.warning(
-                    "[2FA] 保存代理初始重认证失败，切换代理池重建会话：attempt=%s/%s "
+                    "[2FA] 当前 2FA 会话重认证失败，切换备用代理重建会话：attempt=%s/%s "
                     "stage=%s excluded=%s",
                     fallback_count,
                     fallback_limit,
@@ -224,8 +224,8 @@ def _run_twofa(
                 )
                 _append_log(
                     email,
-                    f"[2FA] 保存代理重认证失败，切换代理池重试：attempt={fallback_count}/{fallback_limit} "
-                    f"excluded_targets={len(old_targets)}",
+                    f"[2FA] 重认证阶段失败，切换备用代理重试：attempt={fallback_count}/{fallback_limit} "
+                    f"stage={exc.stage} excluded_targets={len(old_targets)}",
                 )
                 _close_attempt_session()
                 real_proxy, relay, proxy_source = _resolve_twofa_proxy(

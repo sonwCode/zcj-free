@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import core.account_export as account_export
 
@@ -83,6 +84,23 @@ class AccountExportTwofaTests(unittest.TestCase):
         self.assertEqual(context.exception.stage, "initial")
         self.assertEqual(context.exception.original.args[0], "HTTP 403 from csrf")
         self.assertEqual(session.reset_count, 1)
+
+    def test_setup_2fa_otp_validate_403_exposes_otp_stage(self):
+        session = Mock()
+        blocked = RuntimeError("HTTP 403 from email otp validate")
+        blocked.response = SimpleNamespace(status_code=403)
+        with patch.object(account_export, "_trigger_reauth_with_retry", return_value="https://auth.example/authorize"), patch.object(
+            account_export, "_follow_reauth_with_retry", return_value="https://auth.example/email-verification"
+        ), patch("core.openai_auth.send_email_otp"), patch(
+            "core.email_provider.wait_for_otp", return_value="123456"
+        ), patch.object(account_export, "_validate_reauth_otp", side_effect=blocked), patch(
+            "config.email.USE_EMAIL_SERVICE", True
+        ), patch.object(account_export, "human_delay"):
+            with self.assertRaises(account_export.TwofaReauthTransientError) as context:
+                account_export.setup_2fa(session, "user@example.com")
+
+        self.assertEqual(context.exception.stage, "otp_validate")
+        self.assertIs(context.exception.original, blocked)
 
     def test_authorize_retry_exhaustion_exposes_initial_stage(self):
         session = _CircuitSession()

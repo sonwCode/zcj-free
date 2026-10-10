@@ -62,6 +62,11 @@ _RETRYABLE_REAUTH_HINTS = (
 )
 
 
+def _mask_otp(value: object) -> str:
+    """日志中只保留验证码存在性，避免写入可用的完整验证码。"""
+    return "<redacted>" if str(value or "").strip() else "<empty>"
+
+
 def _is_retryable_reauth_error(exc: BaseException) -> bool:
     """仅重试限流、服务端错误和传输故障，不重试普通业务 4xx。"""
     response = getattr(exc, "response", None)
@@ -464,7 +469,7 @@ def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
     headers = session.get_auth_headers(referer="https://auth.openai.com/email-verification")
     body = json.dumps({"code": code})
 
-    logger.info(f"[2FA] 提交重认证 OTP: {code}")
+    logger.info("[2FA] 提交重认证 OTP: %s", _mask_otp(code))
     resp = session.post(url, headers=headers, data=body)
     resp.raise_for_status()
     data = resp.json()
@@ -538,7 +543,7 @@ def _activate_totp(
         "session_id": session_id,
     })
 
-    logger.info(f"[2FA] 激活 enrollment, code={totp_code}")
+    logger.info("[2FA] 激活 enrollment, code=%s", _mask_otp(totp_code))
     resp = session.post(url, headers=headers, data=body)
     if resp.status_code != 200:
         logger.error(f"[2FA] activate 失败 {resp.status_code}: {resp.text}")
@@ -645,6 +650,14 @@ def setup_2fa(
     try:
         continue_url = _validate_reauth_otp(session, otp_code)
     except Exception as first_exc:
+        # OTP validate 的 403/429/5xx 属于当前会话或出口的临时故障，
+        # 交给队列关闭会话并切换 2FA 备用代理，从头获取一份新 OTP。
+        if _is_retryable_reauth_error(first_exc):
+            raise TwofaReauthTransientError(
+                f"2FA OTP validate 临时失败：{type(first_exc).__name__}: {str(first_exc)[:180]}",
+                stage="otp_validate",
+                original=first_exc,
+            ) from first_exc
         # 部分取码接口会短暂返回缓存中的上一封邮件。若服务端拒绝验证码，
         # 重新轮询一次并提交最新候选，避免第一次旧码直接终止整个 2FA 流程。
         status_code = getattr(getattr(first_exc, "response", None), "status_code", None)
@@ -659,11 +672,20 @@ def setup_2fa(
             settle_seconds=retry_settle,
         )
         if fresh_otp == otp_code:
-            logger.warning("[2FA] 重试仍获取到相同 OTP=%s，继续提交以保留原始错误信息", fresh_otp)
+            logger.warning("[2FA] 重试仍获取到相同 OTP=%s，继续提交以保留原始错误信息", _mask_otp(fresh_otp))
         else:
-            logger.info("[2FA] 已获取新的 OTP=%s，替换首次候选", fresh_otp)
+            logger.info("[2FA] 已获取新的 OTP=%s，替换首次候选", _mask_otp(fresh_otp))
         otp_code = fresh_otp
-        continue_url = _validate_reauth_otp(session, otp_code)
+        try:
+            continue_url = _validate_reauth_otp(session, otp_code)
+        except Exception as retry_exc:
+            if _is_retryable_reauth_error(retry_exc):
+                raise TwofaReauthTransientError(
+                    f"2FA OTP validate 重试临时失败：{type(retry_exc).__name__}: {str(retry_exc)[:180]}",
+                    stage="otp_validate",
+                    original=retry_exc,
+                ) from retry_exc
+            raise
     logger.info("[2FA] 邮箱重认证 OTP 验证通过，continue_url=%s", continue_url)
     human_delay("api")
     logger.info("[2FA] 正在交换新 token...")
