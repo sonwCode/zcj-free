@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -81,8 +82,22 @@ def _normalize_proxy(proxy: str | None) -> str | None:
     return None
 
 
-def _resolve_twofa_proxy(proxy: str | None, *, excluded_targets=None):
-    """按 TWOFA_PROXY_MODE 解析传输代理，并可排除失败目标。"""
+def _pick_twofa_fallback_proxy(excluded_targets=None) -> str:
+    configured = [
+        _normalize_proxy(value)
+        for value in (getattr(_twofa_cfg, "TWOFA_PROXY_FALLBACK_POOL", []) or [])
+    ]
+    configured = [value for value in configured if value]
+    excluded = {str(value or "").strip() for value in (excluded_targets or ()) if str(value or "").strip()}
+    candidates = [value for value in configured if value not in excluded]
+    if candidates:
+        return random.choice(candidates)
+    from config import proxy as proxy_cfg
+    return proxy_cfg.pick_proxy_excluding(excluded)
+
+
+def _resolve_twofa_proxy(proxy: str | None, *, excluded_targets=None, force_fallback_pool: bool = False):
+    """按 TWOFA_PROXY_MODE 解析传输代理，并可使用独立 2FA 备用池。"""
     mode = str(getattr(_twofa_cfg, "TWOFA_PROXY_MODE", "saved") or "saved").strip().lower()
     if mode not in {"saved", "pool"}:
         raise ValueError(f"TWOFA_PROXY_MODE={mode!r} 无效，可选 saved / pool")
@@ -91,15 +106,17 @@ def _resolve_twofa_proxy(proxy: str | None, *, excluded_targets=None):
 
     excluded_targets = set(excluded_targets or ())
     if mode == "pool":
-        target = proxy_cfg.pick_proxy_excluding(excluded_targets)
+        target = _pick_twofa_fallback_proxy(excluded_targets) if force_fallback_pool else proxy_cfg.pick_proxy_excluding(excluded_targets)
         transport, relay = open_proxy_pool_proxy(target)
-        return transport or None, relay, "pool"
+        source = "fallback_pool" if force_fallback_pool else "pool"
+        return transport or None, relay, source
     target = _normalize_proxy(proxy)
     if not target:
         # 没有可复用的目标代理时，从代理池选取；回退时可排除刚失败的目标。
-        target = proxy_cfg.pick_proxy_excluding(excluded_targets)
+        target = _pick_twofa_fallback_proxy(excluded_targets) if force_fallback_pool else proxy_cfg.pick_proxy_excluding(excluded_targets)
         transport, relay = open_proxy_pool_proxy(target)
-        return transport or None, relay, "pool"
+        source = "fallback_pool" if force_fallback_pool else "pool"
+        return transport or None, relay, source
 
     transport, relay = open_proxy_pool_proxy(target)
     return transport, relay, "saved"
@@ -214,6 +231,7 @@ def _run_twofa(
                 real_proxy, relay, proxy_source = _resolve_twofa_proxy(
                     None,
                     excluded_targets=old_targets,
+                    force_fallback_pool=True,
                 )
                 session = BrowserSession(
                     proxy=real_proxy,

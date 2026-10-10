@@ -27,6 +27,22 @@ class TwofaServiceSettingsTests(unittest.TestCase):
         finally:
             twofa_service._twofa_cfg.TWOFA_WORKERS = original
 
+    def test_fallback_selector_prefers_dedicated_twofa_pool(self):
+        fallback = "http://fallback-user:fallback-pass@trustsource.test:10000"
+        with patch.object(twofa_service._twofa_cfg, "TWOFA_PROXY_MODE", "saved"), patch.object(
+            twofa_service._twofa_cfg, "TWOFA_PROXY_FALLBACK_POOL", [fallback]
+        ), patch(
+            "core.proxy_chain.open_proxy_pool_proxy", return_value=(fallback, None)
+        ) as open_proxy:
+            transport, relay, source = twofa_service._resolve_twofa_proxy(
+                None, excluded_targets={"http://failed.test:1"}, force_fallback_pool=True
+            )
+
+        self.assertEqual(transport, fallback)
+        self.assertIsNone(relay)
+        self.assertEqual(source, "fallback_pool")
+        open_proxy.assert_called_once_with(fallback)
+
     def test_saved_proxy_initial_403_rotates_once_to_pool_session(self):
         class _Session:
             def __init__(self, proxy, fingerprint_seed):
@@ -47,9 +63,9 @@ class TwofaServiceSettingsTests(unittest.TestCase):
         resolve_calls = []
         updates = []
 
-        def resolve(proxy, *, excluded_targets=None):
-            resolve_calls.append((proxy, set(excluded_targets or ())))
-            return ("saved-proxy", None, "saved") if len(resolve_calls) == 1 else ("pool-proxy", None, "pool")
+        def resolve(proxy, *, excluded_targets=None, force_fallback_pool=False):
+            resolve_calls.append((proxy, set(excluded_targets or ()), force_fallback_pool))
+            return ("saved-proxy", None, "saved") if len(resolve_calls) == 1 else ("pool-proxy", None, "fallback_pool")
 
         def setup(session, email, access_token):
             setup_calls.append(session)

@@ -16,6 +16,9 @@ ENABLE_2FA = False
 #   saved = 优先使用账号保存的有效代理（无有效代理时回退代理池）
 #   pool  = 忽略账号保存的代理，每次任务都从 PROXY_POOL 随机抽取
 TWOFA_PROXY_MODE = "saved"
+# 初始重认证的保存代理失败后使用的独立备用代理池；为空时回退全局 PROXY_POOL。
+# 该池只用于 2FA，不参与注册和短信流程。
+TWOFA_PROXY_FALLBACK_POOL: list[str] = []
 
 # 发起 reauth（CSRF + signin）时的临时网络错误重试。403 会先清理当前会话的
 # 本地熔断，再按指数退避重试；业务类 4xx 不重试。
@@ -33,6 +36,7 @@ TWOFA_QUEUE_LIMIT = 200
 apply_env_overrides(globals(), {
     'ENABLE_2FA': 'bool',
     'TWOFA_PROXY_MODE': 'str',
+    'TWOFA_PROXY_FALLBACK_POOL': 'list_str_multiline',
     'TWOFA_REAUTH_MAX_ATTEMPTS': 'int',
     'TWOFA_REAUTH_RETRY_DELAY': 'float',
     'TWOFA_REAUTH_PROXY_FALLBACK': 'bool',
