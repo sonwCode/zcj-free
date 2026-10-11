@@ -3469,6 +3469,7 @@ def run_roxy_registration(
             proxy=account_proxy,
             browser_cookies=browser_context_state.get("cookies"),
             transport_proxy=browser_context_state.get("transport_proxy"),
+            browser_context=browser_context_state.get("browser_context"),
         )
         totp_secret = str(pre_twofa_result.get("totp_secret") or "") or None if pre_twofa_result.get("ok") else None
         if pre_twofa_result.get("ok"):

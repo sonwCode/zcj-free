@@ -91,6 +91,50 @@ def _seeded_browser_profile(seed: str, geo: dict | None = None) -> dict:
     return build_browser_environment(geo, base_profile=pool[idx])
 
 
+class BrowserContextHTTPError(RuntimeError):
+    """HTTP error wrapper compatible with the existing retry classifiers."""
+
+    def __init__(self, response):
+        status = int(getattr(response, "status_code", 0) or 0)
+        super().__init__(f"HTTP {status}")
+        self.response = response
+
+
+class _BrowserContextResponse:
+    def __init__(self, raw):
+        self._raw = raw
+        self.status_code = int(getattr(raw, "status", 0) or 0)
+        self.url = str(getattr(raw, "url", "") or "")
+        self.headers = dict(getattr(raw, "headers", {}) or {})
+        self.reason = str(getattr(raw, "status_text", "") or "")
+        self.ok = 200 <= self.status_code < 400
+        self._text_cache = None
+
+    @property
+    def text(self) -> str:
+        if self._text_cache is None:
+            try:
+                self._text_cache = str(self._raw.text() or "")
+            except Exception:
+                self._text_cache = ""
+        return self._text_cache
+
+    @property
+    def content(self) -> bytes:
+        try:
+            return bytes(self._raw.body() or b"")
+        except Exception:
+            return self.text.encode("utf-8", errors="replace")
+
+    def json(self):
+        return self._raw.json()
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise BrowserContextHTTPError(self)
+        return None
+
+
 class BrowserSession:
     """
     模拟 Chrome 浏览器的 HTTP 会话管理器。
@@ -109,6 +153,7 @@ class BrowserSession:
         browser_profile: dict | None = None,
         fingerprint_seed: str | None = None,
         browser_cookies: list[dict] | None = None,
+        browser_context: object | None = None,
     ):
         """
         初始化会话。
@@ -124,6 +169,7 @@ class BrowserSession:
         # proxy=""    → 禁用代理（直连）
         # proxy="..." → 使用指定代理，不套用代理池上游
         self._proxy_pool_relay = None
+        self._browser_context = browser_context
         self.session = None
         self._closed = False
         if proxy is None:
@@ -220,7 +266,7 @@ class BrowserSession:
             self.blocked_reason = ""
 
             # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
-            self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
+            self.exit_geo = self._detect_exit_geo() if detect_exit_geo and browser_context is None else {}
             self._enforce_proxy_quality()
             if browser_profile:
                 self.browser_profile = dict(browser_profile)
@@ -875,16 +921,56 @@ class BrowserSession:
         logger.warning("[熔断] 当前会话收到 HTTP %s，进入冷却 %ss，停止后续请求：%s", status, min(cool_down, 3600), safe_url)
         return resp
 
+    def _browser_context_request(self, method: str, url: str, headers: dict | None, **kwargs):
+        context = getattr(self, "_browser_context", None)
+        request_api = getattr(context, "request", None) if context is not None else None
+        if request_api is None:
+            raise RuntimeError("browser request context 不可用")
+        options = {}
+        if headers:
+            options["headers"] = dict(headers)
+        timeout = kwargs.pop("timeout", None)
+        if timeout is not None:
+            try:
+                options["timeout"] = int(max(0.1, float(timeout)) * 1000)
+            except (TypeError, ValueError):
+                pass
+        if "allow_redirects" in kwargs:
+            allow_redirects = bool(kwargs.pop("allow_redirects"))
+            if not allow_redirects:
+                options["max_redirects"] = 0
+        data = kwargs.pop("data", None)
+        if data is not None:
+            options["data"] = data
+        params = kwargs.pop("params", None)
+        if params is not None:
+            options["params"] = params
+        # curl_cffi-only options must not leak into Playwright APIRequestContext.
+        for key in ("verify", "proxies", "impersonate", "stream"):
+            kwargs.pop(key, None)
+        options.update(kwargs)
+        request_method = getattr(request_api, str(method).lower(), None)
+        if not callable(request_method):
+            raise RuntimeError(f"browser request method 不支持: {method}")
+        raw = request_method(url, **options)
+        return _BrowserContextResponse(raw)
+
     def get(self, url: str, headers: dict = None, **kwargs):
         """发送 GET 请求"""
         self._raise_if_circuit_open()
         headers = self._attach_openai_target_headers_for_url(url, headers)
-        resp = self.session.get(url, headers=headers, **kwargs)
+        if self._browser_context is not None:
+            resp = self._browser_context_request("get", url, headers, **kwargs)
+        else:
+            resp = self.session.get(url, headers=headers, **kwargs)
         return self._observe_response_for_circuit_breaker(resp, url)
 
     def post(self, url: str, headers: dict = None, **kwargs):
         """发送 POST 请求"""
         self._raise_if_circuit_open()
         headers = self._attach_openai_target_headers_for_url(url, headers)
-        resp = self.session.post(url, headers=headers, **kwargs)
+        if self._browser_context is not None:
+            resp = self._browser_context_request("post", url, headers, **kwargs)
+        else:
+            resp = self.session.post(url, headers=headers, **kwargs)
         return self._observe_response_for_circuit_breaker(resp, url)

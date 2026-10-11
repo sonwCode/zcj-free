@@ -152,7 +152,7 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
 def _run_twofa(
     *, account_id: int, email: str, access_token: str, proxy: str | None,
     trigger: str, browser_cookies: list[dict] | None = None,
-    transport_proxy: str | None = None,
+    transport_proxy: str | None = None, browser_context: object | None = None,
 ) -> dict:
     global _OUTSTANDING
     fh: logging.FileHandler | None = None
@@ -202,7 +202,11 @@ def _run_twofa(
                 finally:
                     relay = None
 
-        if transport_proxy:
+        if browser_context is not None:
+            real_proxy = ""
+            relay = None
+            proxy_source = "browser_request_context"
+        elif transport_proxy:
             real_proxy = str(transport_proxy).strip()
             relay = None
             proxy_source = "browser_context"
@@ -210,12 +214,17 @@ def _run_twofa(
             real_proxy, relay, proxy_source = _resolve_twofa_proxy(proxy)
         session_kwargs = {
             "proxy": real_proxy,
+            "detect_exit_geo": False if browser_context is not None else True,
             "fingerprint_seed": f"account:{identity}",
         }
         if browser_cookies:
             session_kwargs["browser_cookies"] = browser_cookies
+        if browser_context is not None:
+            session_kwargs["browser_context"] = browser_context
         session = BrowserSession(**session_kwargs)
         _log_session_created()
+        if browser_context is not None:
+            _append_log(email, f"[2FA] 使用注册浏览器请求上下文：cookie_count={len(browser_cookies or ())}")
         fallback_count = 0
         used_otp_codes: set[str] = set()
         fallback_enabled = bool(getattr(_twofa_cfg, "TWOFA_REAUTH_PROXY_FALLBACK", True))
@@ -233,7 +242,7 @@ def _run_twofa(
                 if (
                     not fallback_enabled
                     or exc.stage not in {"initial", "otp_validate"}
-                    or proxy_source not in {"saved", "pool", "fallback_pool", "browser_context"}
+                    or proxy_source not in {"saved", "pool", "fallback_pool", "browser_context", "browser_request_context"}
                     or fallback_count >= fallback_limit
                 ):
                     raise
@@ -270,6 +279,7 @@ def _run_twofa(
                 if browser_cookies:
                     fallback_session_kwargs["browser_cookies"] = browser_cookies
                 session = BrowserSession(**fallback_session_kwargs)
+                browser_context = None
                 _log_session_created()
 
         normalized_secret = normalize_totp_secret(secret)
@@ -362,7 +372,8 @@ def enqueue_account_totp_setup(
     trigger: str = "manual",
     proxy: str | None = None,
     browser_cookies: list[dict] | None = None,
-    transport_proxy: str | None = None,
+    transport_proxy: str | None = None, browser_context: object | None = None,
+    inline: bool = False,
 ) -> dict:
     global _OUTSTANDING
     apply_settings()
@@ -384,17 +395,27 @@ def enqueue_account_totp_setup(
         return {"accepted": False, "busy": True, "error": "该账号正在设置 2FA"}
 
     _append_log(email, f"[2FA] 已入队 account_id={account_id} trigger={trigger}", clear=True)
+    worker_kwargs = {
+        "account_id": account_id,
+        "email": email,
+        "access_token": access_token,
+        "proxy": proxy,
+        "trigger": str(trigger or "manual"),
+        "browser_cookies": browser_cookies,
+        "transport_proxy": transport_proxy,
+        "browser_context": browser_context,
+    }
     try:
-        future = _EXECUTOR.submit(
-            _run_twofa,
-            account_id=account_id,
-            email=email,
-            access_token=access_token,
-            proxy=proxy,
-            trigger=str(trigger or "manual"),
-            browser_cookies=browser_cookies,
-            transport_proxy=transport_proxy,
-        )
+        if inline:
+            result = _run_twofa(**worker_kwargs)
+            return {
+                "accepted": True,
+                "busy": False,
+                "future": None,
+                "result": result,
+                "log_path": str(log_path(email)),
+            }
+        future = _EXECUTOR.submit(_run_twofa, **worker_kwargs)
         return {"accepted": True, "busy": False, "future": future, "log_path": str(log_path(email))}
     except Exception as exc:
         _release_outstanding()

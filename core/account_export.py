@@ -84,7 +84,11 @@ def capture_browser_session_context(source) -> dict:
         transport_proxy = str(getattr(relay, "proxy_url", "") or "").strip()
     except Exception:
         transport_proxy = ""
-    return {"cookies": cookies, "transport_proxy": transport_proxy or None}
+    return {
+        "cookies": cookies,
+        "transport_proxy": transport_proxy or None,
+        "browser_context": context if callable(getattr(context, "request", None)) else None,
+    }
 
 
 class TwofaReauthTransientError(RuntimeError):
@@ -994,6 +998,7 @@ def run_twofa_before_codex(
     proxy: str | None = None,
     browser_cookies: list[dict] | None = None,
     transport_proxy: str | None = None,
+    browser_context: object | None = None,
 ) -> dict:
     """Persisted registration accounts complete 2FA before Codex."""
     try:
@@ -1023,7 +1028,13 @@ def run_twofa_before_codex(
             enqueue_kwargs["browser_cookies"] = browser_cookies
         if transport_proxy:
             enqueue_kwargs["transport_proxy"] = transport_proxy
+        if browser_context is not None:
+            enqueue_kwargs["browser_context"] = browser_context
+            enqueue_kwargs["inline"] = True
         queued = enqueue_account_totp_setup(**enqueue_kwargs)
+        inline_result = queued.get("result")
+        if isinstance(inline_result, dict):
+            return inline_result
         if not queued.get("accepted"):
             return {
                 "ok": False,

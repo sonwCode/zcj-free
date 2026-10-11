@@ -330,6 +330,7 @@ def _run_cloak_registration_impl(
             proxy=account_proxy,
             browser_cookies=browser_context_state.get("cookies"),
             transport_proxy=browser_context_state.get("transport_proxy"),
+            browser_context=browser_context_state.get("browser_context"),
         )
         if pre_twofa_result.get("ok"):
             totp_secret = str(pre_twofa_result.get("totp_secret") or "") or None
