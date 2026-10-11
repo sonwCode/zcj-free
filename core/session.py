@@ -24,6 +24,21 @@ from config import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_url_for_log(value: object) -> str:
+    """Drop URL credentials, query values, and fragments from logs."""
+    text = str(value or "")
+    if not text:
+        return "-"
+    try:
+        parsed = urlparse(text)
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return parsed._replace(netloc=netloc, query="", fragment="").geturl() or "-"
+    except Exception:
+        return text.split("?", 1)[0].replace("\r", "").replace("\n", "")[:300]
+
+
 _GEO_CACHE: dict[str, dict] = {}
 _GEO_CACHE_LOCK = threading.Lock()
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
@@ -792,8 +807,9 @@ class BrowserSession:
         retry_after = self._parse_retry_after(getattr(resp, "headers", {}).get("retry-after") if getattr(resp, "headers", None) else None)
         cool_down = retry_after if retry_after > 0 else (300 if status == 429 else 900)
         self.blocked_until = max(self.blocked_until, time.time() + min(cool_down, 3600))
-        self.blocked_reason = f"HTTP {status} from {url}"
-        logger.warning("[熔断] 当前会话收到 HTTP %s，进入冷却 %ss，停止后续请求：%s", status, min(cool_down, 3600), url)
+        safe_url = _safe_url_for_log(url)
+        self.blocked_reason = f"HTTP {status} from {safe_url}"
+        logger.warning("[熔断] 当前会话收到 HTTP %s，进入冷却 %ss，停止后续请求：%s", status, min(cool_down, 3600), safe_url)
         return resp
 
     def get(self, url: str, headers: dict = None, **kwargs):
