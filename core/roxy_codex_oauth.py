@@ -35,6 +35,7 @@ from core.roxy_registration import (
     _maybe_accept,
     _human_click,
     _human_type_text,
+    _set_element_value,
     _type_any,
     _type_email_address,
     _submit_email_step,
@@ -476,13 +477,35 @@ def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 45) -> boo
                 _stop_sleep(0.4)
                 continue
 
+            # 避开30秒TOTP临界点，减少输入过程中验证码刚好换码的概率。
             code = _account_totp_code_for_email(email)
+            remaining = 30 - (int(time.time()) % 30)
+            if code and remaining <= 6:
+                _stop_sleep(remaining + 0.4)
+                code = _account_totp_code_for_email(email)
             if not code:
                 logger.warning("[Codex][Browser] MFA 页面存在但账号没有可用 TOTP")
                 return False
             attempts += 1
             last_code = code
-            _human_type_text(driver, result.get("input"), code, clear=True)
+            input_element = result.get("input")
+            _human_type_text(driver, input_element, code, clear=True)
+            try:
+                input_state = driver.execute_script(r"""
+                const el = arguments[0];
+                return {
+                  value: String(el.value || ''),
+                  name: el.name || '',
+                  autocomplete: el.autocomplete || '',
+                  maxLength: el.maxLength || 0,
+                  formAction: el.form?.getAttribute('action') || '',
+                };
+                """, input_element) or {}
+                if str(input_state.get("value") or "").strip() != str(code):
+                    _set_element_value(driver, input_element, code)
+                    logger.info("[Codex][Browser] MFA 输入值已通过受控 setter 同步")
+            except Exception as input_exc:
+                logger.debug("[Codex][Browser] MFA 输入值校验失败，继续提交：%s", str(input_exc)[:120])
             human_delay("otp_input")
             try:
                 _human_click(driver, result.get("button"), label="codex_mfa_submit")
