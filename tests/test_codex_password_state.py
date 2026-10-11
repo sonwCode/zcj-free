@@ -24,6 +24,8 @@ def load_email_flow(stubs):
     namespace = {
         "time": time,
         "logger": Mock(),
+        "_safe_url_for_log": lambda value: "<url>",
+        "_mask_otp": lambda value: "<redacted>",
         "human_delay": Mock(),
         "_maybe_accept": Mock(),
         "_type_email_address": Mock(),

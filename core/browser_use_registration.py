@@ -2862,10 +2862,19 @@ def run_browser_use_registration(
             if pre_twofa_result.get("ok"):
                 logger.info("[BrowserUse][2FA] 注册后 Codex 前设置完成")
             twofa_blocked = bool(_twofa_cfg.ENABLE_2FA) and not bool(pre_twofa_result.get("ok"))
+            try:
+                from config import codex as _codex_required_cfg
+                codex_required = bool(getattr(_codex_required_cfg, "CODEX_REQUIRED_ON_REGISTRATION", True))
+            except Exception:
+                codex_required = True
             codex_result = {
-                "status": "skipped",
+                "status": "failed" if codex_required else "skipped",
                 "ok": False,
-                "message": "ENABLE_CODEX_AUTO=False，跳过 Codex",
+                "error_code": "codex_disabled" if codex_required else None,
+                "message": (
+                    "ENABLE_CODEX_AUTO=False，已保留账号并标记为可补跑"
+                    if codex_required else "ENABLE_CODEX_AUTO=False，跳过 Codex"
+                ),
             }
             if twofa_blocked:
                 codex_result = {
@@ -2928,7 +2937,7 @@ def run_browser_use_registration(
             )
             _t_all.done("success")
             codex_status = str(codex_result.get("status") or ("success" if bool(codex_result.get("ok")) else "failed"))
-            codex_ok = bool(codex_result.get("ok")) or codex_status == "skipped"
+            codex_ok = bool(codex_result.get("ok")) or codex_status == "success"
             return {
                 "success": True,
                 "task_status": "success" if codex_ok else "partial_success",

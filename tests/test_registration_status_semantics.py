@@ -81,14 +81,14 @@ class RegistrationStatusSemanticsTests(unittest.TestCase):
     def setUpClass(cls):
         cls.builders = {path: _load_status_builder(path) for path in SOURCES}
 
-    def test_explicit_codex_skip_is_complete_success(self):
+    def test_explicit_codex_skip_is_partial_success_and_retryable(self):
         expected = {
-            "task_status": "success",
+            "task_status": "partial_success",
             "account_status": "success",
             "codex_status": "skipped",
-            "phase": "completed",
-            "error_code": None,
-            "retryable": False,
+            "phase": "codex",
+            "error_code": "codex_skipped",
+            "retryable": True,
         }
         for path, build_status in self.builders.items():
             with self.subTest(path=path):

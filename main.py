@@ -607,7 +607,7 @@ def run_registration(
 
         # success 只表示账号主体已经注册并落库；Codex 是可独立补跑的后置阶段。
         codex_status = str(codex_result.get("status") or ("success" if bool(codex_result.get("ok")) else "failed"))
-        codex_ok = bool(codex_result.get("ok")) or codex_status == "skipped"
+        codex_ok = bool(codex_result.get("ok")) or codex_status == "success"
         task_status = "success" if codex_ok else "partial_success"
         task_error = None
         if not codex_ok:

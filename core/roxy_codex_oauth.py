@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import time
 from contextvars import ContextVar
 from urllib.parse import urlparse
@@ -108,6 +109,20 @@ class _CodexLogger:
 logger = _CodexLogger(_base_logger)
 
 
+def _safe_url_for_log(value: object) -> str:
+    """保留认证URL路径，隐藏查询参数和MFA challenge标识。"""
+    text = str(value or "")
+    if not text:
+        return "-"
+    try:
+        parsed = urlparse(text)
+        safe = parsed._replace(query="", fragment="").geturl()
+    except Exception:
+        safe = text.split("?", 1)[0]
+    safe = re.sub(r"(/mfa-challenge/)[^/]+", r"\1<redacted>", safe, flags=re.IGNORECASE)
+    return safe.replace("\r", "").replace("\n", "")[:300]
+
+
 def _is_callback_url(url: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -150,7 +165,7 @@ def _extract_callback_url_from_performance_log(driver) -> str:
                 if _is_callback_url(candidate):
                     logger.info(
                         "[Codex][Browser] 从 Chrome performance log 捕获 callback URL：%s",
-                        candidate[:160],
+                        _safe_url_for_log(candidate),
                     )
                     return candidate
         except Exception:
@@ -184,7 +199,7 @@ def _extract_callback_url_from_page(driver) -> str:
         """) or []
         for url in urls:
             if _is_callback_url(str(url)):
-                logger.info("[Codex][Browser] 已从浏览器性能记录提取 callback URL：%s", str(url)[:160])
+                logger.info("[Codex][Browser] 已从浏览器性能记录提取 callback URL：%s", _safe_url_for_log(url))
                 return str(url)
     except Exception as exc:
         logger.debug("[Codex][Browser] 从页面提取 callback URL 失败：%s", exc)
@@ -232,7 +247,7 @@ def _wait_for_callback(driver, timeout: int | None = None) -> str:
         try:
             current = str(driver.current_url or "")
             if current != last_url:
-                logger.debug("[Codex][Browser] 当前 URL: %s", current)
+                logger.debug("[Codex][Browser] 当前 URL: %s", _safe_url_for_log(current))
                 last_url = current
             callback = _extract_callback_url_from_any_window(driver)
             if callback:
@@ -267,7 +282,7 @@ def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 18)
                 return
             url = str(driver.current_url or "")
             if url != last_url:
-                logger.info("[Codex][Browser] 提交邮箱后检测密码/OTP 跳转：url=%s", url or "-")
+                logger.info("[Codex][Browser] 提交邮箱后检测密码/OTP 跳转：url=%s", _safe_url_for_log(url))
                 last_url = url
             lower = url.lower()
             if any(x in lower for x in ("phone", "workspace", "consent", "authorize", "localhost:1455")):
@@ -381,6 +396,23 @@ def _account_totp_code_for_email(email: str) -> str:
         return ""
 
 
+def _mfa_page_snapshot(driver) -> dict:
+    """读取 MFA 页面是否仍停留及是否出现验证码错误；不返回页面正文。"""
+    try:
+        state = driver.execute_script(r"""
+        const text = String(document.body?.innerText || '').toLowerCase();
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const invalid = [...document.querySelectorAll('input, [aria-invalid="true"]')]
+          .some(el => visible(el) && String(el.getAttribute('aria-invalid') || '').toLowerCase() === 'true');
+        const error = invalid || /(invalid|incorrect|wrong|expired|try again|验证码错误|验证码无效|验证码已过期)/i.test(text);
+        return {url: location.href, error};
+        """) or {}
+        return state if isinstance(state, dict) else {}
+    except Exception:
+        return {}
+
+
 def _is_mfa_challenge_page(driver) -> bool:
     try:
         url = str(driver.current_url or "").lower()
@@ -389,8 +421,16 @@ def _is_mfa_challenge_page(driver) -> bool:
         state = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
-        const form = [...document.querySelectorAll('form')].find(f => /\/mfa-challenge/i.test(f.getAttribute('action') || ''));
-        const input = form ? [...form.querySelectorAll('input[name="code"], input[autocomplete="one-time-code"], input[maxlength="6"]')].find(visible) : null;
+        const isCode = el => {
+          const attrs = [el.name, el.id, el.autocomplete, el.inputMode, el.placeholder].join(' ').toLowerCase();
+          return el.autocomplete === 'one-time-code' || /code|otp|totp|verification/.test(attrs)
+            || (Number(el.maxLength) === 6 && /numeric|tel/.test(String(el.inputMode || '').toLowerCase()));
+        };
+        const form = [...document.querySelectorAll('form')].find(f => {
+          const action = String(f.getAttribute('action') || '').toLowerCase();
+          return /mfa-challenge|mfa|totp/.test(action) || [...f.querySelectorAll('input')].some(isCode);
+        });
+        const input = form ? [...form.querySelectorAll('input')].find(el => visible(el) && isCode(el)) : null;
         return {ok: !!(form && input), url: location.href};
         """) or {}
         return bool(state.get("ok"))
@@ -398,46 +438,101 @@ def _is_mfa_challenge_page(driver) -> bool:
         return False
 
 
-def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 15) -> bool:
-    """如果当前进入 MFA challenge 页面，自动填入账号 TOTP 并提交。"""
-    code = _account_totp_code_for_email(email)
-    if not code:
-        return False
-    end = time.time() + timeout
-    while time.time() < end:
+def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 45) -> bool:
+    """提交当前账号的TOTP，并确认 MFA 页面实际离开后才返回成功。"""
+    deadline = time.monotonic() + max(5, int(timeout or 45))
+    attempts = 0
+    last_code = ""
+    while time.monotonic() < deadline and attempts < 3:
         try:
             if not _is_mfa_challenge_page(driver):
-                time.sleep(0.4)
-                continue
+                return True
             result = driver.execute_script(r"""
             const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
               && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
               && !el.disabled && !el.readOnly;
-            const form = [...document.querySelectorAll('form')].find(f => /\/mfa-challenge/i.test(f.getAttribute('action') || ''));
+            const isCode = el => {
+              const attrs = [el.name, el.id, el.autocomplete, el.inputMode, el.placeholder].join(' ').toLowerCase();
+              return el.autocomplete === 'one-time-code' || /code|otp|totp|verification/.test(attrs)
+                || (Number(el.maxLength) === 6 && /numeric|tel/.test(String(el.inputMode || '').toLowerCase()));
+            };
+            const forms = [...document.querySelectorAll('form')];
+            const form = forms.find(f => {
+              const action = String(f.getAttribute('action') || '').toLowerCase();
+              return /mfa-challenge|mfa|totp/.test(action) || [...f.querySelectorAll('input')].some(isCode);
+            });
             if (!form) return {ok:false, reason:'missing_form'};
-            const input = [...form.querySelectorAll('input[name="code"], input[autocomplete="one-time-code"], input[maxlength="6"]')].find(visible);
+            const input = [...form.querySelectorAll('input')].find(el => visible(el) && isCode(el));
             if (!input) return {ok:false, reason:'missing_code_input'};
-            const button = [...form.querySelectorAll('button[type="submit"], button[data-dd-action-name="Continue"], button')].find(visible);
+            const buttons = [...form.querySelectorAll('button, input[type="submit"]')].filter(visible);
+            const button = buttons.find(el => String(el.type || '').toLowerCase() === 'submit')
+              || buttons.find(el => /continue|verify|confirm|submit|继续|验证|确认/i.test(String(el.innerText || el.value || ''))
+                && !/another|method|cancel|其他|取消/i.test(String(el.innerText || el.value || '')))
+              || buttons[0];
             if (!button) return {ok:false, reason:'missing_submit'};
             return {ok:true, input, button};
             """) or {}
             if not result.get("ok"):
-                time.sleep(0.4)
+                _stop_sleep(0.4)
                 continue
+
+            code = _account_totp_code_for_email(email)
+            if not code:
+                logger.warning("[Codex][Browser] MFA 页面存在但账号没有可用 TOTP")
+                return False
+            attempts += 1
+            last_code = code
             _human_type_text(driver, result.get("input"), code, clear=True)
             human_delay("otp_input")
-            _human_click(driver, result.get("button"), label="codex_mfa_submit")
-            logger.info("[Codex][Browser] 已填写并提交 MFA 验证码：%s", email)
-            wait_end = time.time() + 12
-            while time.time() < wait_end:
+            try:
+                _human_click(driver, result.get("button"), label="codex_mfa_submit")
+            except Exception:
+                # 输入后页面可能已自动提交；只有页面仍停留时才把它视为失败。
                 if not _is_mfa_challenge_page(driver):
                     return True
-                time.sleep(0.4)
-            return True
+                raise
+            logger.info("[Codex][Browser] 已提交 MFA TOTP（第 %s 次），等待页面确认：%s", attempts, email)
+
+            settle_deadline = min(deadline, time.monotonic() + 18)
+            while time.monotonic() < settle_deadline:
+                try:
+                    current = str(driver.current_url or "")
+                    if _is_callback_url(current) or not _is_mfa_challenge_page(driver):
+                        return True
+                    state = _mfa_page_snapshot(driver)
+                    if state.get("error"):
+                        logger.warning("[Codex][Browser] MFA TOTP 未通过，页面仍停留在 challenge，将刷新验证码重试")
+                        break
+                except Exception:
+                    pass
+                _stop_sleep(0.4)
+
+            if attempts >= 3:
+                break
+            # 等到下一枚动态口令，避免连续提交同一个过期码。
+            for _ in range(12):
+                if time.monotonic() >= deadline:
+                    break
+                fresh = _account_totp_code_for_email(email)
+                if fresh and fresh != last_code:
+                    break
+                _stop_sleep(0.8)
         except Exception as exc:
             logger.debug("[Codex][Browser] MFA challenge 处理失败：%s", str(exc)[:160])
-            time.sleep(0.5)
+            _stop_sleep(0.5)
+
+    state = _mfa_page_snapshot(driver)
+    logger.warning(
+        "[Codex][Browser] MFA challenge 未完成：attempts=%s still_on_page=%s page_error=%s",
+        attempts, _is_mfa_challenge_page(driver), bool(state.get("error")),
+    )
     return False
+
+
+def _require_mfa_completion(driver, email: str, timeout: int = 45) -> None:
+    """MFA 未离开 challenge 时立即终止授权，避免伪装成 callback 超时。"""
+    if _is_mfa_challenge_page(driver) and not _fill_mfa_challenge_if_present(driver, email, timeout=timeout):
+        raise RuntimeError("codex_mfa_step_stalled: MFA challenge 提交后仍未完成")
 
 
 def _human_type_password_by_selector(driver, password: str) -> None:
@@ -517,7 +612,7 @@ def _fill_login_password_if_present(
         wait_end = time.time() + 12
         while time.time() < wait_end:
             if _is_mfa_challenge_page(driver):
-                _fill_mfa_challenge_if_present(driver, email, timeout=15)
+                _require_mfa_completion(driver, email, timeout=45)
                 return "next_step"
             if _is_email_verification_page(driver):
                 return "email_otp"
@@ -534,7 +629,7 @@ def _fill_login_password_if_present(
                 return "email_otp"
             raise RuntimeError(
                 "codex_password_step_stalled: 登录密码提交后仍停留在密码页 "
-                f"url={str(getattr(driver, 'current_url', '') or '')[:240]} "
+                f"url={_safe_url_for_log(getattr(driver, 'current_url', ''))} "
                 f"passwordless={passwordless}"
             )
         return "next_step"
@@ -574,7 +669,7 @@ def _fill_email_and_otp(
         nonlocal otp_after_ts
         logger.warning(
             "[Codex][Browser] 邮箱提交停在登录页，重开 authorize 并完整重提一次：url=%s",
-            str(auth_url)[:180],
+            _safe_url_for_log(auth_url),
         )
         driver.get(auth_url)
         human_delay("navigate")
@@ -592,7 +687,7 @@ def _fill_email_and_otp(
                 otp_after_ts = time.time()
             return recovered_password_state
         if _is_mfa_challenge_page(driver):
-            _fill_mfa_challenge_if_present(driver, email, timeout=15)
+            _require_mfa_completion(driver, email, timeout=45)
             return "mfa"
         if _is_email_verification_page(driver):
             otp_after_ts = time.time()
@@ -604,7 +699,7 @@ def _fill_email_and_otp(
         return entry_state
 
     logger.info("[Codex][Browser] 打开授权地址")
-    logger.info("[Codex][Browser] 完整授权地址: %s", auth_url)
+    logger.info("[Codex][Browser] 授权地址路径: %s", _safe_url_for_log(auth_url))
     driver.get(auth_url)
     human_delay("navigate")
     logger.info("[Codex][Browser] 授权页加载完成，检查是否需要邮箱登录")
@@ -656,7 +751,7 @@ def _fill_email_and_otp(
                     logger.info("[Codex][Browser] 邮箱提交后延迟进入邮箱 OTP 页面")
                     pw_result = "email_otp"
                 elif entry_state == "mfa":
-                    _fill_mfa_challenge_if_present(driver, email, timeout=15)
+                    _require_mfa_completion(driver, email, timeout=45)
                     return
                 else:
                     current_url = str(getattr(driver, "current_url", "") or "")
@@ -666,7 +761,7 @@ def _fill_email_and_otp(
                     )):
                         logger.info(
                             "[Codex][Browser] 邮箱提交异常后已进入后续授权状态，继续 callback：url=%s",
-                            current_url[:180],
+                            _safe_url_for_log(current_url),
                         )
                         return
                     try:
@@ -695,7 +790,7 @@ def _fill_email_and_otp(
                         )):
                             logger.info(
                                 "[Codex][Browser] authorize 恢复后已进入后续授权状态，继续 callback：url=%s",
-                                current_url[:180],
+                                _safe_url_for_log(current_url),
                             )
                             return
                         raise RuntimeError(
@@ -718,7 +813,7 @@ def _fill_email_and_otp(
         otp_after_ts = time.time()
     if pw_result == "next_step":
         if _is_mfa_challenge_page(driver):
-            _fill_mfa_challenge_if_present(driver, email, timeout=15)
+            _require_mfa_completion(driver, email, timeout=45)
         logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
         return
     if pw_result == "email_otp":
@@ -750,7 +845,7 @@ def _fill_email_and_otp(
             )
             if pw_result == "next_step":
                 if _is_mfa_challenge_page(driver):
-                    _fill_mfa_challenge_if_present(driver, email, timeout=15)
+                    _require_mfa_completion(driver, email, timeout=45)
                 logger.info("[Codex][Browser] 重新提交邮箱后已用密码完成登录，进入后续步骤")
                 return
             if pw_result != "email_otp":
@@ -815,7 +910,7 @@ def _fill_email_and_otp(
         outcome = _wait_after_email_otp_submit(driver, timeout=45)
         logger.info("[Codex][Browser] 邮箱 OTP 提交后状态：%s", outcome)
         if _is_mfa_challenge_page(driver):
-            _fill_mfa_challenge_if_present(driver, email, timeout=15)
+            _require_mfa_completion(driver, email, timeout=45)
             return
         if outcome == "accepted":
             return
@@ -1352,7 +1447,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
                 return f"deactivated:{dead_code}"
             url = str(driver.current_url or "")
             if url != last_url:
-                logger.info("[Codex][Browser] 邮箱 OTP 后等待跳转：url=%s", url)
+                logger.info("[Codex][Browser] 邮箱 OTP 后等待跳转：url=%s", _safe_url_for_log(url))
                 last_url = url
             if _is_callback_url(url):
                 return "accepted"
@@ -1392,7 +1487,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
         except Exception:
             pass
         _stop_sleep(0.5)
-    logger.warning("[Codex][Browser] 邮箱 OTP 后等待跳转超时，当前 url=%s，按验证码无效/过期处理", getattr(driver, "current_url", ""))
+    logger.warning("[Codex][Browser] 邮箱 OTP 后等待跳转超时，当前 url=%s，按验证码无效/过期处理", _safe_url_for_log(getattr(driver, "current_url", "")))
     return "invalid"
 
 
@@ -2797,6 +2892,8 @@ def _finish_consent_workspace(driver) -> str:
         if callback:
             return callback
         current = str(driver.current_url or "")
+        if _is_mfa_challenge_page(driver):
+            raise RuntimeError("codex_mfa_step_stalled: callback前仍停留在MFA challenge")
         clicked = False
         for selectors in [
             ["//button[contains(., 'Allow')]", "//button[contains(., 'Authorize')]", "//button[contains(., 'Continue')]"],
@@ -2901,17 +2998,17 @@ def _run_roxy_codex_oauth_once(
             cpa_auth = proto._request_cpa_authorize_url()
             state = cpa_auth["state"]
             auth_url = cpa_auth["auth_url"]
-            logger.info("[Codex][Browser] 当前使用 CPA 授权地址: %s", auth_url)
+            logger.info("[Codex][Browser] 当前使用 CPA 授权地址路径: %s", _safe_url_for_log(auth_url))
         elif auth_source == "sub2":
             sub2_auth = proto._request_sub2_authorize_url()
             state = sub2_auth["state"]
             auth_url = sub2_auth["auth_url"]
-            logger.info("[Codex][Browser] 当前使用 sub2 授权地址: %s", auth_url)
+            logger.info("[Codex][Browser] 当前使用 sub2 授权地址路径: %s", _safe_url_for_log(auth_url))
         elif auth_source == "local":
             code_verifier, code_challenge = proto._generate_pkce()
             state = proto._generate_state()
             auth_url = proto._build_authorize_url(state, code_challenge, prompt="login")
-            logger.info("[Codex][Browser] 当前使用本地 PKCE 授权地址: %s", auth_url)
+            logger.info("[Codex][Browser] 当前使用本地 PKCE 授权地址路径: %s", _safe_url_for_log(auth_url))
         else:
             raise RuntimeError(f"[Codex][Browser] 不支持的 CODEX_AUTH_URL_SOURCE={auth_source!r}")
 

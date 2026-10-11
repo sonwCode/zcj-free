@@ -3759,7 +3759,7 @@ def recover_interrupted_registration_jobs(exclude_job_ids: set[int] | None = Non
             elif account is not None:
                 account_id = int(account.get("id"))
                 codex_status = str(account.get("codex_status") or "not_started").strip().lower()
-                codex_complete = codex_status in {"success", "skipped"}
+                codex_complete = codex_status == "success"
                 row.update({
                     "status": "success" if codex_complete else "partial_success",
                     "phase": "completed" if codex_complete else "codex",

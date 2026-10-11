@@ -458,7 +458,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     if result_status not in {"success", "partial_success"}:
                         result_status = "partial_success"
                     result_codex_status = str(result_dict.get("codex_status") or "not_started").strip().lower()
-                    codex_complete = result_codex_status in {"success", "skipped"}
+                    codex_complete = result_codex_status == "success"
                     if codex_complete:
                         result_status = "success"
                     elif result_status == "success":

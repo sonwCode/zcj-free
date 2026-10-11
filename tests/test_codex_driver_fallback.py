@@ -121,6 +121,12 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertTrue(fn(ImportError("No module named 'selenium'")))
         self.assertTrue(fn(RuntimeError("Roxy API 返回失败: connection reset")))
 
+    def test_mfa_and_callback_failures_are_recoverable(self):
+        ns = _extract(CODEX, {"_is_codex_driver_recoverable"})
+        fn = ns["_is_codex_driver_recoverable"]
+        self.assertTrue(fn(RuntimeError("codex_mfa_step_stalled: MFA challenge 提交后仍未完成")))
+        self.assertTrue(fn(RuntimeError("等待 Codex callback 超时，最后 URL=...")))
+
     def test_account_level_failure_is_not_recoverable(self):
         """换驱动也救不了账号级失败，继续尝试只会浪费邮箱和短信。"""
         ns = _extract(CODEX, {"_is_codex_driver_recoverable"})
@@ -135,6 +141,8 @@ class DriverConfigTests(unittest.TestCase):
         source = CFG.read_text(encoding="utf-8")
         self.assertIn("CODEX_OAUTH_DRIVER_FALLBACK", source)
         self.assertIn("'CODEX_OAUTH_DRIVER_FALLBACK': 'bool'", source)
+        self.assertIn("CODEX_REQUIRED_ON_REGISTRATION", source)
+        self.assertIn("'CODEX_REQUIRED_ON_REGISTRATION': 'bool'", source)
 
 
 if __name__ == "__main__":

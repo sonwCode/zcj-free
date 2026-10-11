@@ -9,8 +9,8 @@
 from config.env_loader import env_str, apply_env_overrides
 
 
-# 是否启用 Codex OAuth 授权（False = 跳过，不影响注册结果）
-ENABLE_CODEX: bool = False
+# 兼容旧配置名；注册流程由 ENABLE_CODEX_AUTO 控制。
+ENABLE_CODEX: bool = True
 
 # Codex OAuth 客户端 ID（固定值，来自 CLIProxyAPI openai_auth.go:27 ClientID）
 CODEX_CLIENT_ID: str = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -44,8 +44,12 @@ CODEX_REQUEST_TIMEOUT: int = 30
 # 手机验证通过 SMSBower 或 Tiger SMS 自动取号和收码。
 # ============================================================
 
-# 注册成功后是否自动跑 Codex 授权（True=自动，False=跳过）
-ENABLE_CODEX_AUTO: bool = False
+# 注册成功后是否自动跑 Codex 授权。
+ENABLE_CODEX_AUTO: bool = True
+
+# 注册任务必须完成 Codex；关闭自动授权时也会标记为部分成功并允许补跑，
+# 不再把 skipped 伪装成完整成功。
+CODEX_REQUIRED_ON_REGISTRATION: bool = True
 
 # Codex OAuth 授权驱动：
 #   "protocol" = 原有 curl_cffi 协议授权
@@ -184,4 +188,4 @@ SMS_RELEASE_RETRIES: int = 3
 SMS_RELEASE_RETRY_DELAY: int = 1
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_OAUTH_DRIVER_FALLBACK': 'bool', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_REQUEST_RETRIES': 'int', 'CPA_REQUEST_RETRY_DELAY': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_PROVIDER_CHAIN': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_URLS': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_LAST_KNOWN_USD_CNY_RATE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_FRAUD_GUARD_RETRY_MIN': 'int', 'SMS_FRAUD_GUARD_RETRY_MAX': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_RELEASE_RETRIES': 'int', 'SMS_RELEASE_RETRY_DELAY': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_PREFLIGHT_RETRIES': 'int', 'SMS_PREFLIGHT_RETRY_DELAY': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_COUNTRY_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_REQUIRED_ON_REGISTRATION': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_OAUTH_DRIVER_FALLBACK': 'bool', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_REQUEST_RETRIES': 'int', 'CPA_REQUEST_RETRY_DELAY': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_PROVIDER_CHAIN': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_URLS': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_LAST_KNOWN_USD_CNY_RATE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_FRAUD_GUARD_RETRY_MIN': 'int', 'SMS_FRAUD_GUARD_RETRY_MAX': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_RELEASE_RETRIES': 'int', 'SMS_RELEASE_RETRY_DELAY': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_PREFLIGHT_RETRIES': 'int', 'SMS_PREFLIGHT_RETRY_DELAY': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_COUNTRY_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int'})

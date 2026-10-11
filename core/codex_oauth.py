@@ -2023,6 +2023,8 @@ _CODEX_DRIVER_RESOURCE_ERROR_MARKERS = (
     "服务不可用", "service unavailable", "connection refused",
     "connection reset", "connection closed", "econnrefused",
     "temporarily unavailable", "circuit breaker",
+    "codex_mfa_step_stalled", "等待 codex callback 超时",
+    "callback 超时", "timeout waiting for oauth callback",
 )
 
 # 依赖缺失类错误：本机没装对应驱动所需的组件，同样应降级。
@@ -2224,6 +2226,17 @@ def run_codex_oauth(
             # 没装 selenium / 未提供 roxy 配置时继续走协议模式，保持旧行为。
             break
         if result is not None:
+            if result.get("ok"):
+                return result
+            result_message = str(result.get("message") or result.get("error") or "")
+            if has_next and _is_codex_driver_recoverable(result_message):
+                _LAST_DRIVER_ERROR.append(result_message[:300])
+                last_driver_result = {"driver": oauth_driver, "error": result_message}
+                logger.warning(
+                    "[Codex] 驱动 %s 返回可恢复失败，降级到下一个驱动 %s：%s",
+                    oauth_driver, resolved_drivers[index + 1], result_message[:220],
+                )
+                continue
             return result
         # 到这里说明该驱动自身出了问题（额度/依赖缺失等），记录后尝试下一个。
         last_driver_result = {"driver": oauth_driver, "error": _last_driver_error()}
@@ -2489,10 +2502,18 @@ def run_codex_oauth(
                 message=sms_outcome["message"][:240],
                 phone_activation=phone_activation,
             )
+        error_text = str(exc)
+        error_lower = error_text.lower()
+        error_code = None
+        if "codex_mfa_step_stalled" in error_lower:
+            error_code = "codex_mfa_step_stalled"
+        elif "callback" in error_lower and "timeout" in error_lower:
+            error_code = "codex_callback_timeout"
         return _codex_result(
             status="failed",
             email=email,
-            message=f"{type(exc).__name__}: {str(exc)[:200]}",
+            error_code=error_code,
+            message=f"{type(exc).__name__}: {error_text[:200]}",
             phone_activation=phone_activation,
         )
     finally:

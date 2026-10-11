@@ -48,7 +48,7 @@ EDITABLE_FIELDS = [
     # ---- 功能开关 ----
     {
         "key": "ENABLE_CODEX_AUTO", "file": "codex.py", "type": "bool", "group": "功能开关",
-        "label": "启用 Codex OAuth", "help": "注册成功后自动跑 Codex 授权（全新session+接码），落盘 codex-邮箱.json",
+        "label": "注册后必须完成 Codex", "help": "注册流程先完成2FA，再自动执行Codex；关闭后注册结果会保留为部分成功并允许补跑，不会显示为完整成功",
     },
     {
         "key": "REGISTRATION_DRIVER", "file": "roxybrowser.py", "type": "str", "group": "注册方式",

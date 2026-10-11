@@ -3468,10 +3468,19 @@ def run_roxy_registration(
         if pre_twofa_result.get("ok"):
             logger.info("[Roxy注册][2FA] 注册后 Codex 前设置完成")
         twofa_blocked = bool(_twofa_cfg.ENABLE_2FA) and not bool(pre_twofa_result.get("ok"))
+        try:
+            from config import codex as _codex_required_cfg
+            codex_required = bool(getattr(_codex_required_cfg, "CODEX_REQUIRED_ON_REGISTRATION", True))
+        except Exception:
+            codex_required = True
         codex_result = {
-            "status": "skipped",
+            "status": "failed" if codex_required else "skipped",
             "ok": False,
-            "message": "ENABLE_CODEX_AUTO=False，跳过 Codex",
+            "error_code": "codex_disabled" if codex_required else None,
+            "message": (
+                "ENABLE_CODEX_AUTO=False，已保留账号并标记为可补跑"
+                if codex_required else "ENABLE_CODEX_AUTO=False，跳过 Codex"
+            ),
         }
         if twofa_blocked:
             codex_result = {
@@ -3498,6 +3507,27 @@ def run_roxy_registration(
                         registration_password=openai_password,
                     )
                     _traffic_checkpoint()
+                    failure_text = str(codex_result.get("message") or "")
+                    if (
+                        not codex_result.get("ok")
+                        and any(marker in failure_text.lower() for marker in (
+                            "codex_mfa_step_stalled", "callback 超时", "timeout waiting for oauth callback",
+                        ))
+                    ):
+                        logger.warning("[Roxy注册][Codex] 浏览器授权未完成，释放窗口后降级协议驱动")
+                        if driver and not driver_quit:
+                            driver_quit = True
+                            try:
+                                _bounded_stop_cleanup("codex.driver.quit", driver.quit, always=True)
+                            except Exception:
+                                pass
+                        from core.codex_oauth import run_codex_oauth
+                        codex_result = run_codex_oauth(
+                            email,
+                            force=True,
+                            driver="protocol",
+                            proxy=account_proxy,
+                        )
                 else:
                     logger.info("[Roxy注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
             except Exception as exc:
@@ -3539,7 +3569,7 @@ def run_roxy_registration(
             },
         )
         codex_status = str(codex_result.get("status") or ("success" if bool(codex_result.get("ok")) else "failed"))
-        codex_ok = bool(codex_result.get("ok")) or codex_status == "skipped"
+        codex_ok = bool(codex_result.get("ok")) or codex_status == "success"
         return {
             "success": True,
             "task_status": "success" if codex_ok else "partial_success",
