@@ -3046,8 +3046,9 @@ def _read_chatgpt_session_once(driver) -> dict | None:
         if context_data.get("accessToken"):
             logger.info("%s /api/auth/session 已返回 accessToken via=context", _log_prefix(driver))
             return context_data
-        logger.info("%s context session 无 accessToken，HTTP=%s keys=%s", _log_prefix(driver), context_data.get("_http_status"), list(context_data.keys()))
-        return context_data
+        # APIRequestContext 与真实页面的 Cookie/导航状态在部分 Cloak 版本中
+        # 不完全同步；无 token 只能作为诊断结果，必须继续用页面 fetch 读取。
+        logger.info("%s context session 无 accessToken，继续页面 fetch：HTTP=%s keys=%s", _log_prefix(driver), context_data.get("_http_status"), list(context_data.keys()))
     script = r"""
     const done = arguments[0];
     fetch('/api/auth/session', {
@@ -3065,8 +3066,12 @@ def _read_chatgpt_session_once(driver) -> dict | None:
             logger.info("%s /api/auth/session 已返回 accessToken via=page", _log_prefix(driver))
             return data
         logger.info("%s 页面 session 无 accessToken，HTTP=%s keys=%s", _log_prefix(driver), result.get("status"), list(data.keys()))
+        if isinstance(context_data, dict):
+            merged = dict(context_data)
+            merged.update(data)
+            return merged
         return data
-    return None
+    return context_data if isinstance(context_data, dict) else None
 
 
 def _switch_to_chatgpt_window_if_any(driver) -> bool:

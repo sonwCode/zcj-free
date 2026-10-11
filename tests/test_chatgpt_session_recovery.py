@@ -33,8 +33,9 @@ class ChatGPTSessionRecoveryTests(unittest.TestCase):
 
     def test_empty_session_state_reaches_warning_recovery_loop(self):
         source = ROXY.read_text(encoding="utf-8")
-        self.assertIn("return context_data", source)
-        self.assertIn("return data\n    return None", source)
+        self.assertIn("继续页面 fetch", source)
+        self.assertIn("merged = dict(context_data)", source)
+        self.assertIn("return context_data if isinstance(context_data, dict) else None", source)
         self.assertIn('if isinstance(data, dict) and data.get("accessToken"):', source)
         self.assertIn("warning_only = isinstance(data, dict)", source)
 
