@@ -18,7 +18,17 @@ class _CircuitSession:
         self.blocked_reason = ""
 
 
+class _CookieRequest:
+    def get(self, *args, **kwargs):
+        return None
+
+    def post(self, *args, **kwargs):
+        return None
+
+
 class _CookieContext:
+    request = _CookieRequest()
+
     def cookies(self):
         return [
             {"name": "__Secure-next-auth.session-token", "value": "session", "domain": ".chatgpt.com", "path": "/"},
@@ -37,6 +47,7 @@ class AccountExportTwofaTests(unittest.TestCase):
             SimpleNamespace(context=_CookieContext(), _proxy_relay=_Relay())
         )
         self.assertEqual(result["transport_proxy"], "http://127.0.0.1:4567")
+        self.assertIs(result["browser_context"].request, _CookieContext.request)
         self.assertEqual(
             {item["name"] for item in result["cookies"]},
             {"__Secure-next-auth.session-token", "oai-did"},

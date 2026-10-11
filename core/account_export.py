@@ -87,7 +87,12 @@ def capture_browser_session_context(source) -> dict:
     return {
         "cookies": cookies,
         "transport_proxy": transport_proxy or None,
-        "browser_context": context if callable(getattr(context, "request", None)) else None,
+        "browser_context": (
+            context
+            if callable(getattr(getattr(context, "request", None), "get", None))
+            and callable(getattr(getattr(context, "request", None), "post", None))
+            else None
+        ),
     }
 
 
