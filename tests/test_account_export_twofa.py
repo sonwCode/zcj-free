@@ -18,7 +18,30 @@ class _CircuitSession:
         self.blocked_reason = ""
 
 
+class _CookieContext:
+    def cookies(self):
+        return [
+            {"name": "__Secure-next-auth.session-token", "value": "session", "domain": ".chatgpt.com", "path": "/"},
+            {"name": "oai-did", "value": "device", "domain": "chatgpt.com", "path": "/"},
+            {"name": "ignored", "value": "x", "domain": "example.invalid", "path": "/"},
+        ]
+
+
+class _Relay:
+    proxy_url = "http://127.0.0.1:4567"
+
+
 class AccountExportTwofaTests(unittest.TestCase):
+    def test_capture_browser_context_filters_domains_and_keeps_relay(self):
+        result = account_export.capture_browser_session_context(
+            SimpleNamespace(context=_CookieContext(), _proxy_relay=_Relay())
+        )
+        self.assertEqual(result["transport_proxy"], "http://127.0.0.1:4567")
+        self.assertEqual(
+            {item["name"] for item in result["cookies"]},
+            {"__Secure-next-auth.session-token", "oai-did"},
+        )
+
     def test_pre_codex_twofa_skips_when_disabled(self):
         with patch("config.twofa.ENABLE_2FA", False):
             result = account_export.run_twofa_before_codex(
@@ -47,6 +70,27 @@ class AccountExportTwofaTests(unittest.TestCase):
             proxy="proxy",
         )
         future.result.assert_called_once()
+
+    def test_pre_codex_twofa_passes_browser_context_state(self):
+        future = Mock()
+        future.result.return_value = {"ok": True, "status": "success", "totp_secret": "secret"}
+        cookies = [{"name": "session", "value": "redacted", "domain": "chatgpt.com", "path": "/"}]
+        with patch("config.twofa.ENABLE_2FA", True), patch(
+            "core.twofa_service.enqueue_account_totp_setup",
+            return_value={"accepted": True, "future": future},
+        ) as enqueue:
+            result = account_export.run_twofa_before_codex(
+                account_id=8,
+                email="user@example.com",
+                access_token="token",
+                browser_cookies=cookies,
+                transport_proxy="http://127.0.0.1:4567",
+            )
+
+        self.assertTrue(result["ok"])
+        kwargs = enqueue.call_args.kwargs
+        self.assertEqual(kwargs["browser_cookies"], cookies)
+        self.assertEqual(kwargs["transport_proxy"], "http://127.0.0.1:4567")
 
     def test_pre_codex_twofa_returns_queue_failure_without_codex_side_effect(self):
         with patch("config.twofa.ENABLE_2FA", True), patch(

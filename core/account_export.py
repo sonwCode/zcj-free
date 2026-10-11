@@ -16,7 +16,7 @@ import time
 from core.stop_control import sleep as _stop_sleep
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import pyotp
 
@@ -26,6 +26,65 @@ from core.humanize import delay as human_delay
 from core.otp_utils import mask_otp as _mask_otp, normalize_totp_secret
 
 logger = logging.getLogger(__name__)
+
+
+_BROWSER_COOKIE_DOMAINS = ("chatgpt.com", "auth.openai.com", "sentinel.openai.com")
+
+
+def capture_browser_session_context(source) -> dict:
+    """Capture in-memory browser cookies and the live local proxy relay."""
+    context = getattr(source, "context", None) or source
+    raw_cookies = None
+    for owner in (context, source):
+        getter = getattr(owner, "cookies", None)
+        if callable(getter):
+            try:
+                candidate = getter()
+            except Exception:
+                candidate = None
+            if isinstance(candidate, (list, tuple)):
+                raw_cookies = candidate
+                break
+        getter = getattr(owner, "get_cookies", None)
+        if callable(getter):
+            try:
+                candidate = getter()
+            except Exception:
+                candidate = None
+            if isinstance(candidate, (list, tuple)):
+                raw_cookies = candidate
+                break
+
+    cookies = []
+    for raw in raw_cookies or ():
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name or raw.get("value") is None:
+            continue
+        domain = str(raw.get("domain") or "").strip()
+        if not domain:
+            try:
+                domain = str(urlparse(str(raw.get("url") or "")).hostname or "")
+            except Exception:
+                domain = ""
+        normalized_domain = domain.lower().lstrip(".")
+        if normalized_domain not in _BROWSER_COOKIE_DOMAINS:
+            continue
+        cookies.append({
+            "name": name,
+            "value": str(raw.get("value") or ""),
+            "domain": domain,
+            "path": str(raw.get("path") or "/") or "/",
+        })
+
+    relay = getattr(source, "_proxy_relay", None)
+    transport_proxy = ""
+    try:
+        transport_proxy = str(getattr(relay, "proxy_url", "") or "").strip()
+    except Exception:
+        transport_proxy = ""
+    return {"cookies": cookies, "transport_proxy": transport_proxy or None}
 
 
 class TwofaReauthTransientError(RuntimeError):
@@ -933,6 +992,8 @@ def run_twofa_before_codex(
     email: str,
     access_token: str,
     proxy: str | None = None,
+    browser_cookies: list[dict] | None = None,
+    transport_proxy: str | None = None,
 ) -> dict:
     """Persisted registration accounts complete 2FA before Codex."""
     try:
@@ -951,13 +1012,18 @@ def run_twofa_before_codex(
         timeout_seconds = max(60, min(1800, timeout_seconds))
         from core.twofa_service import enqueue_account_totp_setup
 
-        queued = enqueue_account_totp_setup(
-            account_id=int(account_id),
-            email=str(email or ""),
-            access_token=str(access_token or ""),
-            trigger="registration_pre_codex",
-            proxy=proxy,
-        )
+        enqueue_kwargs = {
+            "account_id": int(account_id),
+            "email": str(email or ""),
+            "access_token": str(access_token or ""),
+            "trigger": "registration_pre_codex",
+            "proxy": proxy,
+        }
+        if browser_cookies:
+            enqueue_kwargs["browser_cookies"] = browser_cookies
+        if transport_proxy:
+            enqueue_kwargs["transport_proxy"] = transport_proxy
+        queued = enqueue_account_totp_setup(**enqueue_kwargs)
         if not queued.get("accepted"):
             return {
                 "ok": False,

@@ -108,6 +108,7 @@ class BrowserSession:
         sentinel_sid: str | None = None,
         browser_profile: dict | None = None,
         fingerprint_seed: str | None = None,
+        browser_cookies: list[dict] | None = None,
     ):
         """
         初始化会话。
@@ -233,8 +234,15 @@ class BrowserSession:
                 logger.warning("[指纹] 浏览器画像存在不一致: %s", "; ".join(issues))
 
             # HTTP Cookie、OAuth 参数与 Sentinel 共用同一个设备上下文。
+            # 先导入注册浏览器Cookie，再为缺失域补充默认设备/语言Cookie，避免同名
+            # oai-did 在不同域属性下重复发送并造成设备上下文不一致。
+            self._import_browser_cookies(browser_cookies)
+            browser_device_id = self._find_cookie_value("oai-did")
+            if browser_device_id:
+                self.device_id = browser_device_id
             for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
-                self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
+                if not self._has_cookie_for_domain("oai-did", domain):
+                    self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
             locale = self.navigator_language()
             for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
                 self.session.cookies.set("oai-locale", locale, domain=domain, path="/")
@@ -244,6 +252,61 @@ class BrowserSession:
         except BaseException:
             close_browser_session(self)
             raise
+
+    @staticmethod
+    def _allowed_cookie_domain(domain: str) -> bool:
+        normalized = str(domain or "").strip().lower().lstrip(".")
+        return normalized in {"chatgpt.com", "auth.openai.com", "sentinel.openai.com"}
+
+    def _import_browser_cookies(self, cookies: list[dict] | None) -> None:
+        """Import an in-memory Playwright cookie snapshot into the HTTP jar."""
+        if not cookies or self.session is None:
+            return
+        for raw in cookies:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "").strip()
+            if not name or raw.get("value") is None:
+                continue
+            domain = str(raw.get("domain") or "").strip()
+            if not domain:
+                try:
+                    domain = str(urlparse(str(raw.get("url") or "")).hostname or "")
+                except Exception:
+                    domain = ""
+            if not self._allowed_cookie_domain(domain):
+                continue
+            value = str(raw.get("value") or "")
+            path = str(raw.get("path") or "/") or "/"
+            try:
+                self.session.cookies.set(name, value, domain=domain, path=path)
+            except Exception as exc:
+                logger.debug("导入浏览器Cookie失败 name=%s domain=%s: %s", name, domain, type(exc).__name__)
+
+    def _has_cookie_for_domain(self, name: str, domain: str) -> bool:
+        wanted = str(domain or "").lower().lstrip(".")
+        wanted_name = str(name or "").lower()
+        try:
+            for cookie in self.session.cookies.jar:
+                c_name = str(getattr(cookie, "name", "") or "").lower()
+                c_domain = str(getattr(cookie, "domain", "") or "").lower().lstrip(".")
+                if c_name == wanted_name and (not c_domain or wanted == c_domain or wanted.endswith("." + c_domain)):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _find_cookie_value(self, name: str) -> str:
+        wanted = str(name or "").lower()
+        try:
+            for cookie in self.session.cookies.jar:
+                if str(getattr(cookie, "name", "") or "").lower() == wanted:
+                    value = str(getattr(cookie, "value", "") or "")
+                    if value:
+                        return value
+        except Exception:
+            pass
+        return ""
 
     def cf_cookie_snapshot(self) -> dict:
         """返回当前 CookieJar 中的 Cloudflare 关键 Cookie 摘要，便于确认同 IP/同会话连续性。"""

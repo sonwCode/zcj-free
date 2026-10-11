@@ -22,7 +22,10 @@ from typing import Any, Callable
 
 from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import run_twofa_before_codex, save_account_data, _post_register_dwell_seconds
+from core.account_export import (
+    run_twofa_before_codex, save_account_data, _post_register_dwell_seconds,
+    capture_browser_session_context,
+)
 from core.otp_utils import mask_otp as _mask_otp
 from core.browser_use_client import BrowserUseClient
 from core.cloud_browser_lifecycle import CloudBrowserLease
@@ -2852,11 +2855,14 @@ def run_browser_use_registration(
                     "codex": {"status": "pending", "ok": False, "message": "等待 2FA 完成后执行 Codex"},
                 },
             )
+            browser_context_state = capture_browser_session_context(context)
             pre_twofa_result = run_twofa_before_codex(
                 account_id=pre_account_id,
                 email=email,
                 access_token=access_token,
                 proxy=account_proxy,
+                browser_cookies=browser_context_state.get("cookies"),
+                transport_proxy=browser_context_state.get("transport_proxy"),
             )
             totp_secret = str(pre_twofa_result.get("totp_secret") or "") or None if pre_twofa_result.get("ok") else None
             if pre_twofa_result.get("ok"):

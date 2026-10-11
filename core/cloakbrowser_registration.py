@@ -12,7 +12,9 @@ from typing import Callable
 from config import cloakbrowser as _cfg
 from config import email as _email_cfg
 from config import twofa as _twofa_cfg
-from core.account_export import run_twofa_before_codex, save_account_data, post_register_dwell
+from core.account_export import (
+    run_twofa_before_codex, save_account_data, post_register_dwell, capture_browser_session_context,
+)
 from core.otp_utils import mask_otp as _mask_otp
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import PlaywrightTrafficTracker
@@ -320,11 +322,14 @@ def _run_cloak_registration_impl(
                 "codex": {"status": "pending", "ok": False, "message": "等待 2FA 完成后执行 Codex"},
             },
         )
+        browser_context_state = capture_browser_session_context(driver)
         pre_twofa_result = run_twofa_before_codex(
             account_id=pre_account_id,
             email=email,
             access_token=access_token,
             proxy=account_proxy,
+            browser_cookies=browser_context_state.get("cookies"),
+            transport_proxy=browser_context_state.get("transport_proxy"),
         )
         if pre_twofa_result.get("ok"):
             totp_secret = str(pre_twofa_result.get("totp_secret") or "") or None

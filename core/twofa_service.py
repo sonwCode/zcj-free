@@ -151,7 +151,8 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
 
 def _run_twofa(
     *, account_id: int, email: str, access_token: str, proxy: str | None,
-    trigger: str,
+    trigger: str, browser_cookies: list[dict] | None = None,
+    transport_proxy: str | None = None,
 ) -> dict:
     global _OUTSTANDING
     fh: logging.FileHandler | None = None
@@ -176,8 +177,6 @@ def _run_twofa(
         root_logger.addHandler(fh)
         logger.info("[2FA] 开始后台设置：email=%s trigger=%s", email, trigger)
         identity = email.strip().lower()
-        real_proxy, relay, proxy_source = _resolve_twofa_proxy(proxy)
-
         def _log_session_created() -> None:
             target_label = mask_proxy_url(
                 getattr(session, "proxy_target", None) or session.proxy or "direct"
@@ -203,7 +202,19 @@ def _run_twofa(
                 finally:
                     relay = None
 
-        session = BrowserSession(proxy=real_proxy, fingerprint_seed=f"account:{identity}")
+        if transport_proxy:
+            real_proxy = str(transport_proxy).strip()
+            relay = None
+            proxy_source = "browser_context"
+        else:
+            real_proxy, relay, proxy_source = _resolve_twofa_proxy(proxy)
+        session_kwargs = {
+            "proxy": real_proxy,
+            "fingerprint_seed": f"account:{identity}",
+        }
+        if browser_cookies:
+            session_kwargs["browser_cookies"] = browser_cookies
+        session = BrowserSession(**session_kwargs)
         _log_session_created()
         fallback_count = 0
         used_otp_codes: set[str] = set()
@@ -222,7 +233,7 @@ def _run_twofa(
                 if (
                     not fallback_enabled
                     or exc.stage not in {"initial", "otp_validate"}
-                    or proxy_source not in {"saved", "pool", "fallback_pool"}
+                    or proxy_source not in {"saved", "pool", "fallback_pool", "browser_context"}
                     or fallback_count >= fallback_limit
                 ):
                     raise
@@ -252,10 +263,13 @@ def _run_twofa(
                     excluded_targets=old_targets,
                     force_fallback_pool=True,
                 )
-                session = BrowserSession(
-                    proxy=real_proxy,
-                    fingerprint_seed=f"account:{identity}:2fa-fallback:{fallback_count}",
-                )
+                fallback_session_kwargs = {
+                    "proxy": real_proxy,
+                    "fingerprint_seed": f"account:{identity}:2fa-fallback:{fallback_count}",
+                }
+                if browser_cookies:
+                    fallback_session_kwargs["browser_cookies"] = browser_cookies
+                session = BrowserSession(**fallback_session_kwargs)
                 _log_session_created()
 
         normalized_secret = normalize_totp_secret(secret)
@@ -347,6 +361,8 @@ def enqueue_account_totp_setup(
     access_token: str,
     trigger: str = "manual",
     proxy: str | None = None,
+    browser_cookies: list[dict] | None = None,
+    transport_proxy: str | None = None,
 ) -> dict:
     global _OUTSTANDING
     apply_settings()
@@ -376,6 +392,8 @@ def enqueue_account_totp_setup(
             access_token=access_token,
             proxy=proxy,
             trigger=str(trigger or "manual"),
+            browser_cookies=browser_cookies,
+            transport_proxy=transport_proxy,
         )
         return {"accepted": True, "busy": False, "future": future, "log_path": str(log_path(email))}
     except Exception as exc:
