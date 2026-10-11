@@ -449,21 +449,22 @@ def _is_mfa_challenge_page(driver) -> bool:
             || (Number(el.maxLength) === 1 && /code|otp|totp|verification/.test(attrs));
         };
         const forms = [...document.querySelectorAll('form')];
+        const pageIsMfa = /mfa-challenge|\/mfa\b|totp/.test(location.pathname.toLowerCase());
         const form = forms.find(f => {
           const action = String(f.getAttribute('action') || '').toLowerCase();
-          const pageIsMfa = /mfa-challenge|\/mfa\b|totp/.test(location.pathname.toLowerCase());
           return /mfa-challenge|mfa|totp/.test(action)
             || (pageIsMfa && [...f.querySelectorAll('input')].some(isCode));
         });
-        const inputs = form ? [...form.querySelectorAll('input')].filter(el => visible(el) && isCode(el)) : [];
-        const buttons = form ? [...form.querySelectorAll('button, input[type="submit"]')].filter(visible) : [];
+        const scope = form || (pageIsMfa ? document : null);
+        const inputs = scope ? [...scope.querySelectorAll('input')].filter(el => visible(el) && isCode(el)) : [];
+        const buttons = scope ? [...scope.querySelectorAll('button, input[type="submit"]')].filter(visible) : [];
         const postMfaAction = !inputs.length && buttons.some(el => {
           const text = String(el.innerText || el.value || '').toLowerCase();
           const disabled = !!el.disabled || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
           return !disabled && /continue|authorize|allow|done|继续|授权|完成/.test(text)
             && !/verify|submit|验证|提交/.test(text);
         });
-        return {ok: !!(form && inputs.length), post_mfa_action: postMfaAction, url: location.href};
+        return {ok: !!(scope && inputs.length), post_mfa_action: postMfaAction, url: location.href};
         """)
         if isinstance(raw_state, dict):
             if raw_state.get("ok"):
@@ -527,16 +528,17 @@ def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 90) -> boo
                 || (Number(el.maxLength) === 1 && /code|otp|totp|verification/.test(attrs));
             };
             const forms = [...document.querySelectorAll('form')];
+            const pageIsMfa = /mfa-challenge|\/mfa\b|totp/.test(location.pathname.toLowerCase());
             const form = forms.find(f => {
               const action = String(f.getAttribute('action') || '').toLowerCase();
-              const pageIsMfa = /mfa-challenge|\/mfa\b|totp/.test(location.pathname.toLowerCase());
               return /mfa-challenge|mfa|totp/.test(action)
                 || (pageIsMfa && [...f.querySelectorAll('input')].some(isCode));
             });
-            if (!form) return {ok:false, reason:'missing_form'};
-            const inputs = [...form.querySelectorAll('input')].filter(el => visible(el) && isCode(el));
+            const scope = form || (pageIsMfa ? document : null);
+            if (!scope) return {ok:false, reason:'missing_mfa_scope'};
+            const inputs = [...scope.querySelectorAll('input')].filter(el => visible(el) && isCode(el));
             if (!inputs.length) return {ok:false, reason:'missing_code_input'};
-            const buttons = [...form.querySelectorAll('button, input[type="submit"]')].filter(visible);
+            const buttons = [...scope.querySelectorAll('button, input[type="submit"]')].filter(visible);
             const isAlternative = el => /another|method|cancel|其他|取消/i.test(String(el.innerText || el.value || ''));
             const button = buttons.find(el => String(el.type || '').toLowerCase() === 'submit' && !isAlternative(el))
               || buttons.find(el => /continue|verify|confirm|submit|继续|验证|确认/i.test(String(el.innerText || el.value || '')) && !isAlternative(el))
