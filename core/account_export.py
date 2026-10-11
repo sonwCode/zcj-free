@@ -795,6 +795,7 @@ def save_account_data(
     proxy_used: str | None = None,
     batch_dir: Path | None = None,
     auto_plan_check: bool | None = None,
+    auto_twofa: bool | None = None,
 ) -> int:
     """
     将账号信息保存到 SQLite；output_path 仅为兼容旧调用方保留。
@@ -858,13 +859,15 @@ def save_account_data(
     )
     logger.info("[Save] 账号及凭证已保存到 SQLite, id=%s, email=%s", row_id, email)
 
-    auto_twofa = False
-    try:
-        from config import twofa as _twofa_cfg
+    if auto_twofa is None:
+        try:
+            from config import twofa as _twofa_cfg
 
-        auto_twofa = bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
-    except Exception:
-        auto_twofa = False
+            auto_twofa = bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
+        except Exception:
+            auto_twofa = False
+    else:
+        auto_twofa = bool(auto_twofa)
     if auto_twofa and not str(totp_secret or "").strip():
         try:
             from core.twofa_service import enqueue_account_totp_setup
@@ -921,3 +924,76 @@ def save_account_data(
             f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
         )
     return row_id
+
+
+def run_twofa_before_codex(
+    *,
+    account_id: int,
+    email: str,
+    access_token: str,
+    proxy: str | None = None,
+) -> dict:
+    """Persisted registration accounts complete 2FA before Codex."""
+    try:
+        from config import twofa as _twofa_cfg
+
+        if not bool(getattr(_twofa_cfg, "ENABLE_2FA", False)):
+            return {
+                "ok": False,
+                "status": "skipped",
+                "message": "ENABLE_2FA=False，跳过注册前 2FA",
+            }
+        try:
+            timeout_seconds = int(getattr(_twofa_cfg, "TWOFA_PRE_CODEX_TIMEOUT_SECONDS", 900) or 900)
+        except (TypeError, ValueError):
+            timeout_seconds = 900
+        timeout_seconds = max(60, min(1800, timeout_seconds))
+        from core.twofa_service import enqueue_account_totp_setup
+
+        queued = enqueue_account_totp_setup(
+            account_id=int(account_id),
+            email=str(email or ""),
+            access_token=str(access_token or ""),
+            trigger="registration_pre_codex",
+            proxy=proxy,
+        )
+        if not queued.get("accepted"):
+            return {
+                "ok": False,
+                "status": "failed",
+                "error_code": "twofa_queue_rejected",
+                "message": str(queued.get("error") or "2FA 任务未入队")[:300],
+            }
+        future = queued.get("future")
+        if future is None:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error_code": "twofa_future_missing",
+                "message": "2FA 任务缺少 future",
+            }
+        try:
+            result = future.result(timeout=timeout_seconds)
+        except TimeoutError:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error_code": "twofa_timeout",
+                "message": f"注册前 2FA 超时（{timeout_seconds}s）",
+            }
+        if isinstance(result, dict):
+            return result
+        return {
+            "ok": False,
+            "status": "failed",
+            "error_code": "twofa_invalid_result",
+            "message": "2FA 任务返回格式无效",
+        }
+    except Exception as exc:
+        logger.warning("[2FA] 注册前同步执行异常：%s: %s", type(exc).__name__, str(exc)[:180])
+        return {
+            "ok": False,
+            "status": "failed",
+            "error_code": "twofa_runner_exception",
+            "message": f"{type(exc).__name__}: {str(exc)[:180]}",
+        }

@@ -12,7 +12,7 @@ from typing import Callable
 from config import cloakbrowser as _cfg
 from config import email as _email_cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data, post_register_dwell
+from core.account_export import run_twofa_before_codex, save_account_data, post_register_dwell
 from core.otp_utils import mask_otp as _mask_otp
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import PlaywrightTrafficTracker
@@ -302,36 +302,69 @@ def _run_cloak_registration_impl(
         logger.info("[Cloak注册] 已拿到 accessToken：%s", email)
         logger.info("[Cloak注册][阶段] ChatGPT会话完成：access_token=present")
 
-        if _twofa_cfg.ENABLE_2FA:
-            logger.warning("[Cloak注册] 当前 CloakBrowser 自动化路径暂不执行 2FA 设置，已跳过")
-        totp_secret = None
-
+        account_proxy = ((opened.raw or {}).get("proxy_pool_target") if opened else None) or proxy or None
+        pre_account_id = save_account_data(
+            email=email,
+            access_token=access_token,
+            totp_secret=None,
+            email_source=resolve_email_source(email),
+            proxy_used=account_proxy,
+            batch_dir=batch_dir,
+            auto_plan_check=False,
+            auto_twofa=False,
+            extra={
+                "user": session_info.get("user"),
+                "account": session_info.get("account"),
+                "expires": session_info.get("expires"),
+                "registration_password": openai_password,
+                "codex": {"status": "pending", "ok": False, "message": "等待 2FA 完成后执行 Codex"},
+            },
+        )
+        pre_twofa_result = run_twofa_before_codex(
+            account_id=pre_account_id,
+            email=email,
+            access_token=access_token,
+            proxy=account_proxy,
+        )
+        if pre_twofa_result.get("ok"):
+            totp_secret = str(pre_twofa_result.get("totp_secret") or "") or None
+            logger.info("[Cloak注册][2FA] 注册后 Codex 前设置完成")
+        else:
+            totp_secret = None
+        twofa_blocked = bool(_twofa_cfg.ENABLE_2FA) and not bool(pre_twofa_result.get("ok"))
         codex_result = {
             "status": "skipped",
             "ok": False,
             "message": "ENABLE_CODEX_AUTO=False，跳过 Codex",
         }
-        try:
-            from config import codex as _codex_cfg
-            if bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False)):
-                from core.roxy_codex_oauth import run_roxy_codex_oauth
-                logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=True，复用当前 CloakBrowser 窗口执行 Codex 授权")
-                _check_manual_stop()
-                codex_result = run_roxy_codex_oauth(
-                    email,
-                    reuse_existing_profile=True,
-                    existing_driver=driver,
-                    existing_opened=opened,
-                    force=True,
-                    clear_existing_state=True,
-                    # 账号要到本轮注册收尾才落库，Codex 授权必须用刚设好的密码，
-                    # 否则密码登录会被静默跳过。
-                    registration_password=openai_password,
-                )
-            else:
-                logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
-        except Exception as exc:
-            codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
+        if twofa_blocked:
+            codex_result = {
+                "status": "failed",
+                "ok": False,
+                "error_code": str(pre_twofa_result.get("error_code") or "twofa_failed"),
+                "message": f"2FA 未完成，已阻止 Codex：{str(pre_twofa_result.get('message') or pre_twofa_result.get('error') or '')[:180]}",
+            }
+            logger.warning("[Cloak注册][2FA] 2FA 未完成，跳过 Codex：code=%s", codex_result["error_code"])
+        else:
+            try:
+                from config import codex as _codex_cfg
+                if bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False)):
+                    from core.roxy_codex_oauth import run_roxy_codex_oauth
+                    logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=True，2FA 完成后复用当前 CloakBrowser 窗口授权")
+                    _check_manual_stop()
+                    codex_result = run_roxy_codex_oauth(
+                        email,
+                        reuse_existing_profile=True,
+                        existing_driver=driver,
+                        existing_opened=opened,
+                        force=True,
+                        clear_existing_state=True,
+                        registration_password=openai_password,
+                    )
+                else:
+                    logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
+            except Exception as exc:
+                codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
 
         phone_activation = codex_result.get("phone_activation") if isinstance(codex_result, dict) else None
         phone_status = "-"
@@ -371,8 +404,9 @@ def _run_cloak_registration_impl(
             access_token=access_token,
             totp_secret=totp_secret,
             email_source=resolve_email_source(email),
-            proxy_used=((opened.raw or {}).get("proxy_pool_target") if opened else None) or proxy or None,
+            proxy_used=account_proxy,
             batch_dir=batch_dir,
+            auto_twofa=False,
             extra={
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
@@ -401,8 +435,12 @@ def _run_cloak_registration_impl(
             "account_status": "success",
             "codex_status": codex_status,
             "phase": "completed" if codex_ok else "codex",
-            "error_code": None if codex_ok else f"codex_{codex_status}",
-            "retryable": not codex_ok and codex_status != "deactivated",
+            "error_code": None if codex_ok else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
+            "retryable": (
+                not codex_ok
+                and codex_status != "deactivated"
+                and str(codex_result.get("error_code") or "") not in {"account_deactivated", "account_deleted", "account_banned"}
+            ),
             "email": email,
             "account_id": account_id,
             "access_token": access_token,

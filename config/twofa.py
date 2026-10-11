@@ -28,6 +28,9 @@ TWOFA_REAUTH_RETRY_DELAY = 3.0
 TWOFA_REAUTH_PROXY_FALLBACK = True
 TWOFA_REAUTH_PROXY_FALLBACK_ATTEMPTS = 1
 
+# 注册后置流程开启 2FA 时，Codex 必须等待 2FA 终态；超时后保留账号并阻止本轮 Codex。
+TWOFA_PRE_CODEX_TIMEOUT_SECONDS = 900
+
 # 2FA 后台队列。workers 是实际同时执行的账号数，修改后需重启进程以重建线程池。
 TWOFA_WORKERS = 4
 TWOFA_QUEUE_LIMIT = 200
@@ -41,6 +44,7 @@ apply_env_overrides(globals(), {
     'TWOFA_REAUTH_RETRY_DELAY': 'float',
     'TWOFA_REAUTH_PROXY_FALLBACK': 'bool',
     'TWOFA_REAUTH_PROXY_FALLBACK_ATTEMPTS': 'int',
+    'TWOFA_PRE_CODEX_TIMEOUT_SECONDS': 'int',
     'TWOFA_WORKERS': 'int',
     'TWOFA_QUEUE_LIMIT': 'int',
 })

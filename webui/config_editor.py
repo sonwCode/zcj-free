@@ -314,6 +314,10 @@ EDITABLE_FIELDS = [
         ],
     },
     {
+        "key": "TWOFA_PRE_CODEX_TIMEOUT_SECONDS", "file": "twofa.py", "type": "int", "group": "功能开关",
+        "label": "Codex前2FA等待(秒)", "help": "注册账号先完成2FA再执行Codex；等待超时会保留主账号并跳过本轮Codex，默认900秒",
+    },
+    {
         "key": "TWOFA_WORKERS", "file": "twofa.py", "type": "int", "group": "功能开关",
         "label": "2FA并发数", "help": "同时执行的2FA设置任务数，默认4，范围1-16；保存后立即生效",
     },

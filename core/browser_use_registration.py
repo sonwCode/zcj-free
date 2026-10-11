@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data, _post_register_dwell_seconds
+from core.account_export import run_twofa_before_codex, save_account_data, _post_register_dwell_seconds
 from core.otp_utils import mask_otp as _mask_otp
 from core.browser_use_client import BrowserUseClient
 from core.cloud_browser_lifecycle import CloudBrowserLease
@@ -2828,41 +2828,78 @@ def run_browser_use_registration(
             create_acknowledged = True
             logger.info("[BrowserUse] 已拿到 accessToken：%s", email)
 
-            if _twofa_cfg.ENABLE_2FA:
-                logger.warning("[BrowserUse] 当前路径暂不自动设置 2FA，已跳过")
-            totp_secret = None
-
+            account_proxy = proxy or f"{provider_prefix}:{session_info_open.proxy_country_code or 'default'}"
+            pre_account_id = save_account_data(
+                email=email,
+                access_token=access_token,
+                totp_secret=None,
+                email_source=resolve_email_source(email),
+                proxy_used=account_proxy,
+                batch_dir=batch_dir,
+                auto_plan_check=False,
+                auto_twofa=False,
+                extra={
+                    "user": session_info.get("user"),
+                    "account": session_info.get("account"),
+                    "expires": session_info.get("expires"),
+                    provider_prefix: {
+                        "proxy_country_code": session_info_open.proxy_country_code,
+                        "profile_id": session_info_open.profile_id,
+                        "session_id": getattr(session_info_open, "session_id", ""),
+                        "connect": session_info_open.raw,
+                    },
+                    "registration_password": openai_password,
+                    "codex": {"status": "pending", "ok": False, "message": "等待 2FA 完成后执行 Codex"},
+                },
+            )
+            pre_twofa_result = run_twofa_before_codex(
+                account_id=pre_account_id,
+                email=email,
+                access_token=access_token,
+                proxy=account_proxy,
+            )
+            totp_secret = str(pre_twofa_result.get("totp_secret") or "") or None if pre_twofa_result.get("ok") else None
+            if pre_twofa_result.get("ok"):
+                logger.info("[BrowserUse][2FA] 注册后 Codex 前设置完成")
+            twofa_blocked = bool(_twofa_cfg.ENABLE_2FA) and not bool(pre_twofa_result.get("ok"))
             codex_result = {
                 "status": "skipped",
                 "ok": False,
                 "message": "ENABLE_CODEX_AUTO=False，跳过 Codex",
             }
-            try:
-                from config import codex as _codex_cfg
-                codex_auto_enabled = bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False))
-                oauth_driver = str(getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "") or "").strip() or "same_as_registration"
-                if codex_auto_enabled:
-                    logger.info(
-                        "[BrowserUse][Codex] ENABLE_CODEX_AUTO=True，注册成功后自动执行 Codex OAuth：driver=%s",
-                        oauth_driver,
-                    )
-                    # Codex OAuth 会创建自己的授权 session。先关闭注册阶段的 Browser Use
-                    # CDP 连接，避免注册浏览器继续占用远端会话/代理资源并干扰后续 OAuth。
-                    lease.close(force=True, reason="即将执行 Codex OAuth")
-                    browser = None
-                    context = None
-                    page = None
-                    from core.codex_oauth import run_codex_oauth
-                    codex_result = run_codex_oauth(email, otp_provider=wait_for_otp, proxy=proxy, force=True)
-                else:
-                    logger.info("[BrowserUse][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
-            except Exception as exc:
-                logger.warning("[BrowserUse][Codex] 自动授权失败：%s: %s", type(exc).__name__, str(exc)[:220])
+            if twofa_blocked:
                 codex_result = {
                     "status": "failed",
                     "ok": False,
-                    "message": f"{type(exc).__name__}: {str(exc)[:220]}",
+                    "error_code": str(pre_twofa_result.get("error_code") or "twofa_failed"),
+                    "message": f"2FA 未完成，已阻止 Codex：{str(pre_twofa_result.get('message') or pre_twofa_result.get('error') or '')[:180]}",
                 }
+                logger.warning("[BrowserUse][2FA] 2FA 未完成，跳过 Codex：code=%s", codex_result["error_code"])
+            else:
+                try:
+                    from config import codex as _codex_cfg
+                    codex_auto_enabled = bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False))
+                    oauth_driver = str(getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "") or "").strip() or "same_as_registration"
+                    if codex_auto_enabled:
+                        logger.info(
+                            "[BrowserUse][Codex] ENABLE_CODEX_AUTO=True，2FA 完成后执行 Codex OAuth：driver=%s",
+                            oauth_driver,
+                        )
+                        lease.close(force=True, reason="即将执行 Codex OAuth")
+                        browser = None
+                        context = None
+                        page = None
+                        from core.codex_oauth import run_codex_oauth
+                        codex_result = run_codex_oauth(email, otp_provider=wait_for_otp, proxy=proxy, force=True)
+                    else:
+                        logger.info("[BrowserUse][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
+                except Exception as exc:
+                    logger.warning("[BrowserUse][Codex] 自动授权失败：%s: %s", type(exc).__name__, str(exc)[:220])
+                    codex_result = {
+                        "status": "failed",
+                        "ok": False,
+                        "message": f"{type(exc).__name__}: {str(exc)[:220]}",
+                    }
 
             # 云端浏览器不采集本地流量明细；注册后停留仅用于完成页面流程。
             _post_register_dwell(page, context, provider_prefix=provider_prefix, email=email)
@@ -2871,8 +2908,9 @@ def run_browser_use_registration(
                 access_token=access_token,
                 totp_secret=totp_secret,
                 email_source=resolve_email_source(email),
-                proxy_used=proxy or f"{provider_prefix}:{session_info_open.proxy_country_code or 'default'}",
+                proxy_used=account_proxy,
                 batch_dir=batch_dir,
+                auto_twofa=False,
                 extra={
                     "user": session_info.get("user"),
                     "account": session_info.get("account"),
@@ -2897,8 +2935,12 @@ def run_browser_use_registration(
                 "account_status": "success",
                 "codex_status": codex_status,
                 "phase": "completed" if codex_ok else "codex",
-                "error_code": None if codex_ok else f"codex_{codex_status}",
-                "retryable": not codex_ok and codex_status != "deactivated",
+                "error_code": None if codex_ok else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
+                "retryable": (
+                    not codex_ok
+                    and codex_status != "deactivated"
+                    and str(codex_result.get("error_code") or "") not in {"account_deactivated", "account_deleted", "account_banned"}
+                ),
                 "email": email,
                 "account_id": account_id,
                 "access_token": access_token,

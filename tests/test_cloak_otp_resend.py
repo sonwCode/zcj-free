@@ -99,7 +99,7 @@ class CloakOtpResendTests(unittest.TestCase):
         self.assertIn("close_cloak_driver(driver, timeout_seconds=_CLOAK_CLEANUP_TIMEOUT_SECONDS)", body)
         self.assertIn("成功路径开始有界优雅关闭浏览器", body)
         self.assertLess(body.index("close_cloak_driver(driver"), body.index("snapshot_without_browser()"))
-        self.assertLess(body.index("snapshot_without_browser()"), body.index("account_id = save_account_data("))
+        self.assertLess(body.index("snapshot_without_browser()"), body.rindex("account_id = save_account_data("))
         self.assertIn("if hard_cleanup:", body)
 
 

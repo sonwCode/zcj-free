@@ -19,6 +19,46 @@ class _CircuitSession:
 
 
 class AccountExportTwofaTests(unittest.TestCase):
+    def test_pre_codex_twofa_skips_when_disabled(self):
+        with patch("config.twofa.ENABLE_2FA", False):
+            result = account_export.run_twofa_before_codex(
+                account_id=1, email="user@example.com", access_token="token"
+            )
+
+        self.assertEqual(result["status"], "skipped")
+
+    def test_pre_codex_twofa_waits_for_worker_result(self):
+        future = Mock()
+        future.result.return_value = {"ok": True, "status": "success", "totp_secret": "secret"}
+        with patch("config.twofa.ENABLE_2FA", True), patch(
+            "core.twofa_service.enqueue_account_totp_setup",
+            return_value={"accepted": True, "future": future},
+        ) as enqueue:
+            result = account_export.run_twofa_before_codex(
+                account_id=7, email="user@example.com", access_token="token", proxy="proxy"
+            )
+
+        self.assertTrue(result["ok"])
+        enqueue.assert_called_once_with(
+            account_id=7,
+            email="user@example.com",
+            access_token="token",
+            trigger="registration_pre_codex",
+            proxy="proxy",
+        )
+        future.result.assert_called_once()
+
+    def test_pre_codex_twofa_returns_queue_failure_without_codex_side_effect(self):
+        with patch("config.twofa.ENABLE_2FA", True), patch(
+            "core.twofa_service.enqueue_account_totp_setup",
+            return_value={"accepted": False, "error": "queue full"},
+        ):
+            result = account_export.run_twofa_before_codex(
+                account_id=7, email="user@example.com", access_token="token"
+            )
+
+        self.assertEqual(result["error_code"], "twofa_queue_rejected")
+
     def test_authorize_403_reuses_cf_cookie_and_retries(self):
         session = _CircuitSession()
         calls = []
