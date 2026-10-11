@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
+from core.otp_utils import normalize_totp_secret
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT
 _LEGACY_DATA_DIR = _PROJECT_ROOT / "data"
@@ -876,8 +878,11 @@ def _save_jobs(rows: list[dict]) -> None:
 
 
 def _find_by_email(rows: list[dict], email: str) -> dict | None:
-    target = (email or "").lower()
-    return next((r for r in rows if (r.get("email") or "").lower() == target), None)
+    target = str(email or "").strip().casefold()
+    return next(
+        (r for r in rows if str(r.get("email") or "").strip().casefold() == target),
+        None,
+    )
 
 
 def _decorate_account(row: dict) -> dict:
@@ -1162,6 +1167,7 @@ def insert_account(
         imap_row = _find_by_email(imap_rows, email)
         domain_row = _find_by_email(domain_rows, email)
         extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
+        normalized_totp_secret = normalize_totp_secret(totp_secret) if totp_secret is not None else None
 
         if existing is None:
             row_id = _next_id(accounts)
@@ -1177,7 +1183,7 @@ def insert_account(
 
         row.update({
             "access_token": access_token,
-            "totp_secret": totp_secret if totp_secret is not None else row.get("totp_secret"),
+            "totp_secret": normalized_totp_secret if normalized_totp_secret is not None else row.get("totp_secret"),
             "user_id": user_id if user_id is not None else row.get("user_id"),
             "user_name": user_name if user_name is not None else row.get("user_name"),
             "plan_type": plan_type if plan_type is not None else row.get("plan_type"),
@@ -1230,8 +1236,8 @@ def insert_account(
             pool_row["access_token"] = access_token
             pool_row["completed_at"] = pool_now
             pool_row["updated_at"] = pool_now
-            if totp_secret:
-                pool_row["totp_secret"] = totp_secret
+            if normalized_totp_secret:
+                pool_row["totp_secret"] = normalized_totp_secret
 
         if outlook_row and source_hint == "outlook":
             row["password"] = outlook_row.get("password")
@@ -2224,7 +2230,7 @@ def update_account_totp_secret(acc_id: int, result: dict | None = None) -> bool:
             row["totp_setup_completed_at"] = _now()
         row["totp_setup_error"] = None if ok or status == "running" else result.get("error")
         row["totp_setup_error_code"] = None if ok or status == "running" else result.get("error_code")
-        secret = str(result.get("totp_secret") or "").strip()
+        secret = normalize_totp_secret(result.get("totp_secret"))
         if ok and secret:
             row["totp_secret"] = secret
         if result.get("message") is not None:
@@ -2734,7 +2740,7 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
 
             row_id = _next_id(accounts)
             access_token = (raw.get("access_token") or raw.get("token") or "").strip()
-            totp_secret = (raw.get("totp_secret") or raw.get("totp") or "").strip() or None
+            totp_secret = normalize_totp_secret(raw.get("totp_secret") or raw.get("totp")) or None
             account = {
                 "id": row_id,
                 "email": email,

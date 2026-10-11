@@ -8,6 +8,7 @@ OTP 检测与抽取通用工具，被 outlook_client（Outlook 邮箱）使用�
     - 上下文优先：在多个 6 位数中，选择离"验证码"等关键字最近的那个
 """
 import re
+from urllib.parse import parse_qs, urlparse
 
 _OPENAI_SENDER_HINT = "openai"
 
@@ -38,6 +39,17 @@ _OTP_REGEX = re.compile(r"\b(\d{6})\b")
 def mask_otp(value: object) -> str:
     """Return a non-reversible marker for OTP values in logs."""
     return "<redacted>" if str(value or "").strip() else "<empty>"
+
+
+def normalize_totp_secret(value: object) -> str:
+    """Normalize a raw Base32 secret or otpauth URI for pyotp."""
+    text = str(value or "").strip()
+    if text.lower().startswith("otpauth://"):
+        try:
+            text = (parse_qs(urlparse(text).query).get("secret") or [""])[0]
+        except Exception:
+            text = ""
+    return re.sub(r"[\s-]+", "", text).strip().upper()
 
 
 def _get_field(item: dict, *names: str) -> str:

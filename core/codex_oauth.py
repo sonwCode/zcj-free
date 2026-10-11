@@ -34,7 +34,7 @@ import pyotp
 from config import codex as _cfg
 from core.session import BrowserSession, close_browser_session
 from core.humanize import delay as human_delay
-from core.otp_utils import mask_otp
+from core.otp_utils import mask_otp, normalize_totp_secret
 from core.stop_control import sleep as _stop_sleep
 from core.openai_auth import (
     _is_transient_network_error,
@@ -243,7 +243,7 @@ def _account_totp_secret(email: str) -> str:
         acc = db.get_account_by_email(email)
         if not acc:
             return ""
-        return str(acc.get("totp_secret") or "").strip()
+        return normalize_totp_secret(acc.get("totp_secret"))
     except Exception:
         return ""
 

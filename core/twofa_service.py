@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import random
+
+import pyotp
 import threading
 from datetime import datetime
 from urllib.parse import urlsplit
@@ -16,6 +18,7 @@ from core import db
 from core.account_export import AccountUnusableError, TwofaReauthTransientError, setup_2fa
 from core.session import BrowserSession, close_browser_session
 from core.proxy_utils import mask_proxy_url
+from core.otp_utils import normalize_totp_secret
 
 logger = logging.getLogger(__name__)
 
@@ -255,10 +258,22 @@ def _run_twofa(
                 )
                 _log_session_created()
 
-        db.update_account_totp_secret(
+        normalized_secret = normalize_totp_secret(secret)
+        if not normalized_secret:
+            raise RuntimeError("2FA enroll 返回空 TOTP secret")
+        try:
+            pyotp.TOTP(normalized_secret).now()
+        except Exception as exc:
+            raise RuntimeError("2FA enroll 返回无效 TOTP secret") from exc
+        persisted = db.update_account_totp_secret(
             account_id,
-            {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"},
+            {"ok": True, "status": "success", "totp_secret": normalized_secret, "message": "2FA 设置完成"},
         )
+        stored_account = db.get_account(account_id) or {}
+        stored_secret = normalize_totp_secret(stored_account.get("totp_secret"))
+        if not persisted or stored_secret != normalized_secret:
+            raise RuntimeError("2FA TOTP secret 持久化校验失败")
+        secret = normalized_secret
         _append_log(email, "[2FA] 完成：secret=<redacted>")
         logger.info("[2FA] 完成：email=%s secret=<redacted>", email)
         return {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"}

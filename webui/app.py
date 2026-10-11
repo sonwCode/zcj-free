@@ -25,6 +25,7 @@ import pyotp
 from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service, live_check_service, codex_oauth_check_service, exchange_rates
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
+from core.otp_utils import normalize_totp_secret
 from webui import config_editor
 
 logger = logging.getLogger(__name__)
@@ -264,16 +265,16 @@ def _account_secret_value(row: dict, field: str) -> str:
     if field == "codex_agent_token":
         return str(row.get("codex_agent_token") or "")
     if field == "totp_secret":
-        return str(row.get("totp_secret") or "")
+        return normalize_totp_secret(row.get("totp_secret"))
     if field == "totp_code":
-        secret = str(row.get("totp_secret") or "").strip()
+        secret = normalize_totp_secret(row.get("totp_secret"))
         return pyotp.TOTP(secret).now() if secret else ""
     if field == "login_credentials":
         password = _account_secret_value(row, "password")
         if password == "未设置":
             password = ""
         return "---".join((
-            str(row.get("email") or "").strip(), password, str(row.get("totp_secret") or "").strip(),
+            str(row.get("email") or "").strip(), password, normalize_totp_secret(row.get("totp_secret")),
         ))
     if field == "password":
         extra_raw = row.get("extra_json")

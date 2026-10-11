@@ -23,7 +23,7 @@ import pyotp
 from core.session import BrowserSession
 from core.openai_auth import AccountUnusableError
 from core.humanize import delay as human_delay
-from core.otp_utils import mask_otp as _mask_otp
+from core.otp_utils import mask_otp as _mask_otp, normalize_totp_secret
 
 logger = logging.getLogger(__name__)
 
@@ -578,7 +578,7 @@ def _enroll_totp(session: BrowserSession, access_token: str) -> tuple[str, str]:
         logger.error("[2FA] enroll 失败，status=%s", resp.status_code)
         resp.raise_for_status()
     data = resp.json()
-    secret = data.get("secret")
+    secret = normalize_totp_secret(data.get("secret"))
     session_id = data.get("session_id")
     if not secret or not session_id:
         raise RuntimeError("enroll 响应缺少 secret 或 session_id")
@@ -601,6 +601,7 @@ def _activate_totp(
     headers["oai-device-id"] = session.device_id
     headers["oai-language"] = session.navigator_language()
 
+    secret = normalize_totp_secret(secret)
     totp_code = pyotp.TOTP(secret).now()
     body = json.dumps({
         "code": totp_code,

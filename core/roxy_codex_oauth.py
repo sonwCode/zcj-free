@@ -398,16 +398,36 @@ def _account_totp_code_for_email(email: str) -> str:
 
 
 def _mfa_page_snapshot(driver) -> dict:
-    """读取 MFA 页面是否仍停留及是否出现验证码错误；不返回页面正文。"""
+    """读取MFA表单和可见错误节点；不把页面正文写入日志。"""
     try:
         state = driver.execute_script(r"""
-        const text = String(document.body?.innerText || '').toLowerCase();
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
-        const invalid = [...document.querySelectorAll('input, [aria-invalid="true"]')]
-          .some(el => visible(el) && String(el.getAttribute('aria-invalid') || '').toLowerCase() === 'true');
-        const error = invalid || /(invalid|incorrect|wrong|expired|try again|验证码错误|验证码无效|验证码已过期)/i.test(text);
-        return {url: location.href, error};
+        const isCode = el => {
+          const attrs = [el.name, el.id, el.autocomplete, el.inputMode, el.placeholder].join(' ').toLowerCase();
+          return el.autocomplete === 'one-time-code' || /code|otp|totp|verification/.test(attrs)
+            || Number(el.maxLength) === 6
+            || (Number(el.maxLength) === 1 && /code|otp|totp|verification/.test(attrs));
+        };
+        const invalid = [...document.querySelectorAll('input[aria-invalid="true"]')]
+          .some(el => visible(el) && isCode(el));
+        const errorNodes = [...document.querySelectorAll(
+          '[role="alert"], [aria-live="assertive"], [data-state="error"], '
+          '[data-testid*="error"], [class*="error"], [class*="Error"]'
+        )].filter(visible);
+        const errorText = errorNodes.map(el => String(el.innerText || '').trim()).join(' ');
+        const error = invalid || /(invalid|incorrect|wrong|expired|try again|验证码错误|验证码无效|验证码已过期)/i.test(errorText);
+        return {
+          url: location.href,
+          error,
+          error_node_count: errorNodes.length,
+          code_input_count: [...document.querySelectorAll('input')].filter(visible).filter(el => {
+            const attrs = [el.name, el.id, el.autocomplete, el.inputMode, el.placeholder].join(' ').toLowerCase();
+            return el.autocomplete === 'one-time-code' || /code|otp|totp|verification/.test(attrs)
+              || Number(el.maxLength) === 6
+               || (Number(el.maxLength) === 1 && /code|otp|totp|verification/.test(attrs));
+          }).length,
+        };
         """) or {}
         return state if isinstance(state, dict) else {}
     except Exception:
@@ -417,30 +437,78 @@ def _mfa_page_snapshot(driver) -> dict:
 def _is_mfa_challenge_page(driver) -> bool:
     try:
         url = str(driver.current_url or "").lower()
-        if "/mfa-challenge/" in url or "/mfa-challenge" in url:
-            return True
-        state = driver.execute_script(r"""
+        if "/email-verification" in url or "email-verification" in url:
+            return False
+        raw_state = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
         const isCode = el => {
           const attrs = [el.name, el.id, el.autocomplete, el.inputMode, el.placeholder].join(' ').toLowerCase();
           return el.autocomplete === 'one-time-code' || /code|otp|totp|verification/.test(attrs)
-            || (Number(el.maxLength) === 6 && /numeric|tel/.test(String(el.inputMode || '').toLowerCase()));
+            || Number(el.maxLength) === 6
+            || (Number(el.maxLength) === 1 && /code|otp|totp|verification/.test(attrs));
         };
-        const form = [...document.querySelectorAll('form')].find(f => {
+        const forms = [...document.querySelectorAll('form')];
+        const form = forms.find(f => {
           const action = String(f.getAttribute('action') || '').toLowerCase();
-          return /mfa-challenge|mfa|totp/.test(action) || [...f.querySelectorAll('input')].some(isCode);
+          const pageIsMfa = /mfa-challenge|\/mfa\b|totp/.test(location.pathname.toLowerCase());
+          return /mfa-challenge|mfa|totp/.test(action)
+            || (pageIsMfa && [...f.querySelectorAll('input')].some(isCode));
         });
-        const input = form ? [...form.querySelectorAll('input')].find(el => visible(el) && isCode(el)) : null;
-        return {ok: !!(form && input), url: location.href};
-        """) or {}
-        return bool(state.get("ok"))
+        const inputs = form ? [...form.querySelectorAll('input')].filter(el => visible(el) && isCode(el)) : [];
+        const buttons = form ? [...form.querySelectorAll('button, input[type="submit"]')].filter(visible) : [];
+        const postMfaAction = !inputs.length && buttons.some(el => {
+          const text = String(el.innerText || el.value || '').toLowerCase();
+          const disabled = !!el.disabled || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+          return !disabled && /continue|authorize|allow|done|继续|授权|完成/.test(text)
+            && !/verify|submit|验证|提交/.test(text);
+        });
+        return {ok: !!(form && inputs.length), post_mfa_action: postMfaAction, url: location.href};
+        """)
+        if isinstance(raw_state, dict):
+            if raw_state.get("ok"):
+                return True
+            if raw_state.get("post_mfa_action"):
+                return False
+            # No recognizable post-submit action means the challenge is still
+            # pending or the DOM is an error state; keep it inside MFA handling.
+            return "/mfa-challenge/" in url or "/mfa-challenge" in url
+        # If DOM inspection failed during navigation, keep the URL fallback.
+        return "/mfa-challenge/" in url or "/mfa-challenge" in url
     except Exception:
         return False
 
 
-def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 45) -> bool:
+def _wait_mfa_inputs_ready(driver, input_elements, button, code: str, timeout: float = 4.0) -> bool:
+    """Wait until controlled MFA fields contain the code and submit is enabled."""
+    deadline = time.monotonic() + max(0.5, float(timeout or 4.0))
+    while time.monotonic() < deadline:
+        try:
+            current_values = []
+            for element in input_elements:
+                current_values.append(driver.execute_script("return String(arguments[0].value || '');", element) or "")
+            button_state = driver.execute_script(r"""
+            const el = arguments[0];
+            return {
+              disabled: !!el.disabled,
+              ariaDisabled: String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true',
+            };
+            """, button) or {}
+            if "".join(str(value).strip() for value in current_values) == str(code) \
+                and not button_state.get("disabled") and not button_state.get("ariaDisabled"):
+                return True
+        except Exception:
+            # A React rerender can invalidate a handle; the caller will re-query the form.
+            return False
+        _stop_sleep(0.25)
+    return False
+
+
+def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 90) -> bool:
     """提交当前账号的TOTP，并确认 MFA 页面实际离开后才返回成功。"""
+    current_url = str(getattr(driver, "current_url", "") or "").lower()
+    if "email-verification" in current_url:
+        return True
     deadline = time.monotonic() + max(5, int(timeout or 45))
     attempts = 0
     last_code = ""
@@ -455,32 +523,37 @@ def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 45) -> boo
             const isCode = el => {
               const attrs = [el.name, el.id, el.autocomplete, el.inputMode, el.placeholder].join(' ').toLowerCase();
               return el.autocomplete === 'one-time-code' || /code|otp|totp|verification/.test(attrs)
-                || (Number(el.maxLength) === 6 && /numeric|tel/.test(String(el.inputMode || '').toLowerCase()));
+                || Number(el.maxLength) === 6
+                || (Number(el.maxLength) === 1 && /code|otp|totp|verification/.test(attrs));
             };
             const forms = [...document.querySelectorAll('form')];
             const form = forms.find(f => {
               const action = String(f.getAttribute('action') || '').toLowerCase();
-              return /mfa-challenge|mfa|totp/.test(action) || [...f.querySelectorAll('input')].some(isCode);
+              const pageIsMfa = /mfa-challenge|\/mfa\b|totp/.test(location.pathname.toLowerCase());
+              return /mfa-challenge|mfa|totp/.test(action)
+                || (pageIsMfa && [...f.querySelectorAll('input')].some(isCode));
             });
             if (!form) return {ok:false, reason:'missing_form'};
-            const input = [...form.querySelectorAll('input')].find(el => visible(el) && isCode(el));
-            if (!input) return {ok:false, reason:'missing_code_input'};
+            const inputs = [...form.querySelectorAll('input')].filter(el => visible(el) && isCode(el));
+            if (!inputs.length) return {ok:false, reason:'missing_code_input'};
             const buttons = [...form.querySelectorAll('button, input[type="submit"]')].filter(visible);
-            const button = buttons.find(el => String(el.type || '').toLowerCase() === 'submit')
-              || buttons.find(el => /continue|verify|confirm|submit|继续|验证|确认/i.test(String(el.innerText || el.value || ''))
-                && !/another|method|cancel|其他|取消/i.test(String(el.innerText || el.value || '')))
+            const isAlternative = el => /another|method|cancel|其他|取消/i.test(String(el.innerText || el.value || ''));
+            const button = buttons.find(el => String(el.type || '').toLowerCase() === 'submit' && !isAlternative(el))
+              || buttons.find(el => /continue|verify|confirm|submit|继续|验证|确认/i.test(String(el.innerText || el.value || '')) && !isAlternative(el))
+              || buttons.find(el => String(el.type || '').toLowerCase() === 'submit')
+              || buttons.find(el => !isAlternative(el))
               || buttons[0];
             if (!button) return {ok:false, reason:'missing_submit'};
-            return {ok:true, input, button};
+            return {ok:true, input: inputs[0], inputs, button, multi: inputs.length > 1};
             """) or {}
             if not result.get("ok"):
                 _stop_sleep(0.4)
                 continue
 
-            # 避开30秒TOTP临界点，减少输入过程中验证码刚好换码的概率。
+            # TOTP输入还包含人工化停顿和逐字符事件，至少预留15秒提交预算。
             code = _account_totp_code_for_email(email)
             remaining = 30 - (int(time.time()) % 30)
-            if code and remaining <= 6:
+            if code and remaining < 15:
                 _stop_sleep(remaining + 0.4)
                 code = _account_totp_code_for_email(email)
             if not code:
@@ -488,25 +561,74 @@ def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 45) -> boo
                 return False
             attempts += 1
             last_code = code
-            input_element = result.get("input")
-            _human_type_text(driver, input_element, code, clear=True)
+            input_elements = [item for item in (result.get("inputs") or [result.get("input")]) if item is not None]
+            if not input_elements:
+                logger.warning("[Codex][Browser] MFA 页面没有可操作的验证码输入框")
+                return False
+            # 不依赖宿主机的 Ctrl/Command 键，先用受控 setter 清空每个框，
+            # 再输入新码，避免重试时旧码与新码拼接。
+            for element in input_elements[:len(code)]:
+                try:
+                    _set_element_value(driver, element, "")
+                except Exception:
+                    pass
+            if len(input_elements) > 1:
+                for index, element in enumerate(input_elements[:len(code)]):
+                    _human_type_text(driver, element, code[index], clear=False)
+            else:
+                _human_type_text(driver, input_elements[0], code, clear=False)
             try:
-                input_state = driver.execute_script(r"""
-                const el = arguments[0];
-                return {
-                  value: String(el.value || ''),
-                  name: el.name || '',
-                  autocomplete: el.autocomplete || '',
-                  maxLength: el.maxLength || 0,
-                  formAction: el.form?.getAttribute('action') || '',
-                };
-                """, input_element) or {}
-                if str(input_state.get("value") or "").strip() != str(code):
-                    _set_element_value(driver, input_element, code)
+                input_states = []
+                for element in input_elements:
+                    input_states.append(driver.execute_script(r"""
+                    const el = arguments[0];
+                    return {
+                      value: String(el.value || ''),
+                      name: el.name || '',
+                      autocomplete: el.autocomplete || '',
+                      maxLength: el.maxLength || 0,
+                      formAction: el.form?.getAttribute('action') || '',
+                    };
+                    """, element) or {})
+                typed_value = "".join(str(item.get("value") or "").strip() for item in input_states)
+                first_state = input_states[0] if input_states else {}
+                logger.info(
+                    "[Codex][Browser] MFA 输入字段：count=%s value_len=%s name=%s autocomplete=%s max_length=%s action=%s",
+                    len(input_elements),
+                    len(typed_value),
+                    str(first_state.get("name") or "")[:40],
+                    str(first_state.get("autocomplete") or "")[:40],
+                    first_state.get("maxLength"),
+                    _safe_url_for_log(first_state.get("formAction") or ""),
+                )
+                if typed_value != str(code):
+                    if len(input_elements) > 1:
+                        for index, element in enumerate(input_elements[:len(code)]):
+                            _set_element_value(driver, element, code[index])
+                    else:
+                        _set_element_value(driver, input_elements[0], code)
                     logger.info("[Codex][Browser] MFA 输入值已通过受控 setter 同步")
             except Exception as input_exc:
                 logger.debug("[Codex][Browser] MFA 输入值校验失败，继续提交：%s", str(input_exc)[:120])
-            human_delay("otp_input")
+            # React受控表单的DOM value更新与submit可用状态可能不同步；
+            # 等待字段和按钮都进入可提交状态后再点击。
+            if not _wait_mfa_inputs_ready(driver, input_elements, result.get("button"), code, timeout=4.0):
+                logger.warning("[Codex][Browser] MFA 表单在4秒内未进入可提交状态，重新查询输入框")
+                continue
+            # 输入过程可能刚好跨过周期边界，点击前再次读取当前验证码。
+            latest_code = _account_totp_code_for_email(email)
+            if latest_code and latest_code != code:
+                code = latest_code
+                last_code = code
+                if len(input_elements) > 1:
+                    for index, element in enumerate(input_elements[:len(code)]):
+                        _set_element_value(driver, element, code[index])
+                else:
+                    _set_element_value(driver, input_elements[0], code)
+                if not _wait_mfa_inputs_ready(driver, input_elements, result.get("button"), code, timeout=2.0):
+                    logger.warning("[Codex][Browser] MFA 换码后表单未重新就绪，重新查询输入框")
+                    continue
+                logger.info("[Codex][Browser] MFA 输入期间发生换码，已同步当前TOTP")
             try:
                 _human_click(driver, result.get("button"), label="codex_mfa_submit")
             except Exception:
@@ -552,7 +674,7 @@ def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 45) -> boo
     return False
 
 
-def _require_mfa_completion(driver, email: str, timeout: int = 45) -> None:
+def _require_mfa_completion(driver, email: str, timeout: int = 90) -> None:
     """MFA 未离开 challenge 时立即终止授权，避免伪装成 callback 超时。"""
     if _is_mfa_challenge_page(driver) and not _fill_mfa_challenge_if_present(driver, email, timeout=timeout):
         raise RuntimeError("codex_mfa_step_stalled: MFA challenge 提交后仍未完成")
@@ -635,7 +757,7 @@ def _fill_login_password_if_present(
         wait_end = time.time() + 12
         while time.time() < wait_end:
             if _is_mfa_challenge_page(driver):
-                _require_mfa_completion(driver, email, timeout=45)
+                _require_mfa_completion(driver, email, timeout=90)
                 return "next_step"
             if _is_email_verification_page(driver):
                 return "email_otp"
@@ -710,7 +832,7 @@ def _fill_email_and_otp(
                 otp_after_ts = time.time()
             return recovered_password_state
         if _is_mfa_challenge_page(driver):
-            _require_mfa_completion(driver, email, timeout=45)
+            _require_mfa_completion(driver, email, timeout=90)
             return "mfa"
         if _is_email_verification_page(driver):
             otp_after_ts = time.time()
@@ -774,7 +896,7 @@ def _fill_email_and_otp(
                     logger.info("[Codex][Browser] 邮箱提交后延迟进入邮箱 OTP 页面")
                     pw_result = "email_otp"
                 elif entry_state == "mfa":
-                    _require_mfa_completion(driver, email, timeout=45)
+                    _require_mfa_completion(driver, email, timeout=90)
                     return
                 else:
                     current_url = str(getattr(driver, "current_url", "") or "")
@@ -836,7 +958,7 @@ def _fill_email_and_otp(
         otp_after_ts = time.time()
     if pw_result == "next_step":
         if _is_mfa_challenge_page(driver):
-            _require_mfa_completion(driver, email, timeout=45)
+            _require_mfa_completion(driver, email, timeout=90)
         logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
         return
     if pw_result == "email_otp":
@@ -868,7 +990,7 @@ def _fill_email_and_otp(
             )
             if pw_result == "next_step":
                 if _is_mfa_challenge_page(driver):
-                    _require_mfa_completion(driver, email, timeout=45)
+                    _require_mfa_completion(driver, email, timeout=90)
                 logger.info("[Codex][Browser] 重新提交邮箱后已用密码完成登录，进入后续步骤")
                 return
             if pw_result != "email_otp":
@@ -933,7 +1055,7 @@ def _fill_email_and_otp(
         outcome = _wait_after_email_otp_submit(driver, timeout=45)
         logger.info("[Codex][Browser] 邮箱 OTP 提交后状态：%s", outcome)
         if _is_mfa_challenge_page(driver):
-            _require_mfa_completion(driver, email, timeout=45)
+            _require_mfa_completion(driver, email, timeout=90)
             return
         if outcome == "accepted":
             return
