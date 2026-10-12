@@ -2556,6 +2556,7 @@ def _fill_password_page_if_present(
         retried_submit = False
         empty_form_since: float | None = None
         empty_shell_reload_requested = False
+        navigation_error_recovery_used = False
         while time.time() < wait_end:
             if _is_email_verification_page(driver):
                 logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
@@ -2565,7 +2566,51 @@ def _fill_password_page_if_present(
                 return password
             current_url = str(getattr(driver, "current_url", "") or "")
             if _is_navigation_error_url(current_url):
-                raise RuntimeError(f"密码提交后浏览器导航失败: url={current_url}")
+                if _recovery_round >= 1 or navigation_error_recovery_used:
+                    raise RuntimeError(f"密码提交后有限恢复仍落入浏览器导航错误页: url={current_url}")
+                navigation_error_recovery_used = True
+                logger.warning(
+                    "%s 密码提交后落入浏览器导航错误页，返回密码页恢复一次：url=%s",
+                    _log_prefix(driver), current_url,
+                )
+                try:
+                    # chrome-error 页面通常是上一次 Auth 导航的错误落点；
+                    # 返回原密码表单后复用同一密码重新提交，避免重新领取邮箱。
+                    driver.execute_script("window.history.back()")
+                except Exception as back_exc:
+                    logger.info(
+                        "%s 导航错误页返回密码页触发异常，继续观察：%s: %s",
+                        _log_prefix(driver), type(back_exc).__name__, str(back_exc)[:120],
+                    )
+                recovery_end = min(wait_end, time.time() + 18)
+                while time.time() < recovery_end:
+                    if _is_email_verification_page(driver):
+                        logger.info("%s 返回后已进入邮箱验证码页，密码提交恢复成功", _log_prefix(driver))
+                        return password
+                    if _has_access_token(driver):
+                        logger.info("%s 返回后已检测到登录态，密码提交恢复成功", _log_prefix(driver))
+                        return password
+                    recovered_url = str(getattr(driver, "current_url", "") or "")
+                    if _is_navigation_error_url(recovered_url):
+                        _stop_aware_sleep(0.5)
+                        continue
+                    if not _is_signup_password_page(driver):
+                        return password
+                    recovered_state = _password_page_state(driver)
+                    if not recovered_state.get("errors") and _password_state_has_form(recovered_state):
+                        logger.info("%s 导航错误页返回后密码表单已恢复，复用原密码重新提交", _log_prefix(driver))
+                        recovered_password = _fill_password_page_if_present(
+                            driver,
+                            email,
+                            timeout=timeout,
+                            _recovery_round=_recovery_round + 1,
+                            _password_value=password,
+                        )
+                        return recovered_password or password
+                    _stop_aware_sleep(0.5)
+                raise RuntimeError(
+                    f"密码提交后导航错误页恢复超时: url={getattr(driver, 'current_url', '')}"
+                )
 
             error_state = None
             if _is_signup_password_page(driver):

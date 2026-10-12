@@ -37,6 +37,9 @@ class NavigationErrorUrlTests(unittest.TestCase):
         self.assertIn("_recovery_round >= 1", body)
         self.assertIn("password_route_requested and any", body)
         self.assertIn("_is_navigation_error_url(current_url)", body)
+        self.assertIn("navigation_error_recovery_used", body)
+        self.assertIn("window.history.back()", body)
+        self.assertIn("导航错误页恢复超时", body)
 
 
 if __name__ == "__main__":

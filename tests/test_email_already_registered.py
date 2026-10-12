@@ -72,7 +72,7 @@ class AlreadyRegisteredHandlingTests(unittest.TestCase):
         """旧逻辑会点“一次性验证码登录”静默降级，产出无密码账号。"""
         body = _fn(ROXY, "_fill_password_page_if_present")
         login_at = body.index("if is_login_password:")
-        signup_at = body.index("password = _registration_password()")
+        signup_at = body.index("_registration_password()")
         login_branch = body[login_at:signup_at]
         self.assertNotIn("_click_passwordless_signup_if_present", login_branch)
 
