@@ -139,30 +139,47 @@ def _codex_auth_preflight(session: BrowserSession) -> None:
 
 
 def _codex_protocol_fingerprint_warmup(session: BrowserSession) -> None:
-    """用同一协议会话预热 ChatGPT Web 指纹、版本信息和匿名 Cookie。"""
+    """尽力预热 ChatGPT 指纹；辅助端点失败时继续 Auth 主流程。"""
     logger.info("[Codex][指纹预热] 开始：ChatGPT document + 匿名前端初始化")
-    headers = session.get_chatgpt_navigate_headers(referer="", user_initiated=False)
-    resp = _with_auth_navigation_retry(
-        session,
-        "ChatGPT 指纹 document 预热",
-        lambda: session.get(
-            "https://chatgpt.com/auth/login",
-            headers=headers,
-            allow_redirects=True,
-        ),
-    )
-    observe = getattr(session, "observe_chatgpt_document", None)
-    if callable(observe):
-        observe(resp)
+    try:
+        headers = session.get_chatgpt_navigate_headers(referer="", user_initiated=False)
+        resp = _with_auth_navigation_retry(
+            session,
+            "ChatGPT 指纹 document 预热",
+            lambda: session.get(
+                "https://chatgpt.com/auth/login",
+                headers=headers,
+                allow_redirects=True,
+            ),
+        )
+        observe = getattr(session, "observe_chatgpt_document", None)
+        if callable(observe):
+            observe(resp)
+    except Exception as exc:
+        logger.warning(
+            "[Codex][指纹预热] ChatGPT 辅助端点失败，继续 Auth document 预检：%s: %s",
+            type(exc).__name__, str(exc)[:180],
+        )
+        reset = getattr(session, "reset_circuit_breaker", None)
+        if callable(reset):
+            reset()
+        return
 
     # 复用注册协议链已有的匿名初始化，使 oai-did、locale、真实前端 build、
     # Cookie Jar 与随后 Auth OAuth 导航处于同一网络和浏览器身份上下文。
-    from core.chatgpt_bootstrap import anonymous_bootstrap
-    anonymous_bootstrap(session, strict=False)
-    reset = getattr(session, "reset_circuit_breaker", None)
-    if callable(reset):
-        reset()
-    logger.info("[Codex][指纹预热] 完成，继续 Auth document 预检")
+    try:
+        from core.chatgpt_bootstrap import anonymous_bootstrap
+        anonymous_bootstrap(session, strict=False)
+    except Exception as exc:
+        logger.warning(
+            "[Codex][指纹预热] 匿名初始化失败，继续 Auth document 预检：%s: %s",
+            type(exc).__name__, str(exc)[:180],
+        )
+    finally:
+        reset = getattr(session, "reset_circuit_breaker", None)
+        if callable(reset):
+            reset()
+    logger.info("[Codex][指纹预热] 完成或降级，继续 Auth document 预检")
 
 
 def _codex_result(

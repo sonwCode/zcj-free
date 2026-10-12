@@ -127,6 +127,12 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertTrue(fn(RuntimeError("codex_mfa_step_stalled: MFA challenge 提交后仍未完成")))
         self.assertTrue(fn(RuntimeError("等待 Codex callback 超时，最后 URL=...")))
 
+    def test_chatgpt_fingerprint_warmup_is_optional_before_auth(self):
+        source = CODEX.read_text(encoding="utf-8")
+        self.assertIn("继续 Auth document 预检", source)
+        self.assertIn("ChatGPT 辅助端点失败", source)
+        self.assertIn("匿名初始化失败", source)
+
     def test_proxy_bootstrap_failures_are_classified_for_rotation(self):
         ns = _extract(CODEX, {"_is_codex_proxy_bootstrap_error", "_CODEX_PROXY_BOOTSTRAP_ERROR_MARKERS"})
         fn = ns["_is_codex_proxy_bootstrap_error"]
