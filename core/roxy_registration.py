@@ -793,12 +793,27 @@ def _assert_not_external_idp(driver, label: str = '') -> None:
         raise RuntimeError(f"误入第三方账号授权页（{label}）：{current}")
 
 
+def _optional_email_entry_script(driver, script):
+    """导航切换期间，邮箱入口探测允许丢弃一次失效执行上下文。"""
+    try:
+        return driver.execute_script(script)
+    except Exception as exc:
+        text = str(exc or "").lower()
+        if "execution context was destroyed" in text or "most likely because of a navigation" in text:
+            logger.debug(
+                "%s 邮箱入口探测遇到页面导航竞态，等待下一轮状态采样：%s",
+                _log_prefix(driver), type(exc).__name__,
+            )
+            return None
+        raise
+
+
 def _click_email_entry_option(driver) -> bool:
     """点击“邮箱方式”入口；只看 DOM 技术属性，不看按钮可见文案，并显式排除 Google 等第三方。"""
     if _is_oauth_consent_like(driver):
         logger.info("%s 当前疑似 OAuth 授权页，跳过邮箱入口兜底点击", _log_prefix(driver))
         return False
-    target = driver.execute_script(r"""
+    target = _optional_email_entry_script(driver, r"""
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
       && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
       && !el.disabled && el.getAttribute('aria-disabled') !== 'true';

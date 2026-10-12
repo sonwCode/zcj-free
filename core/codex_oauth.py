@@ -2076,9 +2076,24 @@ _CODEX_DRIVER_RESOURCE_ERROR_MARKERS = (
     "服务不可用", "service unavailable", "connection refused",
     "connection reset", "connection closed", "econnrefused",
     "temporarily unavailable", "circuit breaker",
+    "fraud_guard", "suspicious behavior from phone",
     "codex_mfa_step_stalled", "codex_browser_cleanup_timeout", "等待 codex callback 超时",
     "callback 超时", "timeout waiting for oauth callback",
 )
+
+
+def _is_codex_fraud_guard_error(value: BaseException | str) -> bool:
+    text = str(value or "").lower()
+    return "fraud_guard" in text or "suspicious behavior from phone" in text
+
+
+def _pick_next_codex_proxy(current_proxy: str | None) -> str:
+    """风控耗尽号码时换出口；代理池为空则保持原有直连行为。"""
+    try:
+        from config import proxy as proxy_cfg
+        return str(proxy_cfg.pick_proxy_excluding([current_proxy]) or "").strip()
+    except Exception:
+        return ""
 
 # 依赖缺失类错误：本机没装对应驱动所需的组件，同样应降级。
 _CODEX_DRIVER_DEPENDENCY_ERROR_MARKERS = (
@@ -2276,6 +2291,7 @@ def run_codex_oauth(
     # 或临时故障时整轮补跑直接失败。
     resolved_drivers = _resolve_oauth_drivers(driver)
     last_driver_result: dict | None = None
+    active_proxy = proxy
     for index, oauth_driver in enumerate(resolved_drivers):
         # protocol 是内置主流程，不经过外部驱动包装器；包装器返回 None 只表示“交回这里继续执行”。
         if str(oauth_driver or "").strip().lower() == "protocol":
@@ -2286,7 +2302,7 @@ def run_codex_oauth(
                 oauth_driver,
                 email=email,
                 otp_provider=otp_provider,
-                proxy=proxy,
+                proxy=active_proxy,
             )
         except ImportError:
             # 没装 selenium / 未提供 roxy 配置时继续走协议模式，保持旧行为。
@@ -2298,6 +2314,14 @@ def run_codex_oauth(
             if has_next and _is_codex_driver_recoverable(result_message):
                 _LAST_DRIVER_ERROR.append(result_message[:300])
                 last_driver_result = {"driver": oauth_driver, "error": result_message}
+                if _is_codex_fraud_guard_error(result_message):
+                    next_proxy = _pick_next_codex_proxy(active_proxy)
+                    if next_proxy and next_proxy != active_proxy:
+                        logger.warning(
+                            "[Codex] fraud_guard 触发驱动回退，切换代理后进入 %s",
+                            resolved_drivers[index + 1],
+                        )
+                        active_proxy = next_proxy
                 logger.warning(
                     "[Codex] 驱动 %s 返回可恢复失败，降级到下一个驱动 %s：%s",
                     oauth_driver, resolved_drivers[index + 1], result_message[:220],
@@ -2305,7 +2329,16 @@ def run_codex_oauth(
                 continue
             return result
         # 到这里说明该驱动自身出了问题（额度/依赖缺失等），记录后尝试下一个。
-        last_driver_result = {"driver": oauth_driver, "error": _last_driver_error()}
+        driver_error = _last_driver_error()
+        last_driver_result = {"driver": oauth_driver, "error": driver_error}
+        if has_next and _is_codex_fraud_guard_error(driver_error):
+            next_proxy = _pick_next_codex_proxy(active_proxy)
+            if next_proxy and next_proxy != active_proxy:
+                logger.warning(
+                    "[Codex] fraud_guard 触发驱动异常回退，切换代理后进入 %s",
+                    resolved_drivers[index + 1],
+                )
+                active_proxy = next_proxy
         if not has_next:
             message = (
                 f"[Codex] 所有 OAuth 驱动均不可用：{resolved_drivers}；"
@@ -2326,7 +2359,7 @@ def run_codex_oauth(
     # 单次 Codex 授权全程统一身份；下一任务即使是同一账号也生成全新的隔离身份。
     task_seed = f"codex-oauth:{email.lower()}:{uuid.uuid4()}"
     stage = "preflight"
-    session = BrowserSession(proxy=proxy, fingerprint_seed=task_seed)
+    session = BrowserSession(proxy=active_proxy, fingerprint_seed=task_seed)
     try:
         logger.info(f"[Codex] 开始授权（全新 session）：{email}")
         logger.info(
