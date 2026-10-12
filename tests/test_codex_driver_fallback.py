@@ -147,6 +147,8 @@ class DriverErrorClassificationTests(unittest.TestCase):
         config = CLOAK_CFG.read_text(encoding="utf-8")
         self.assertIn("CLOAK_PROXY_BOOTSTRAP_RETRIES", source)
         self.assertIn("_is_cloak_proxy_bootstrap_error", source)
+        self.assertIn("_CloakProxyBootstrapError", source)
+        self.assertIn("_run_in_isolated_thread", source)
         self.assertIn("excluded_proxies", source)
         self.assertIn("CLOAK_PROXY_BOOTSTRAP_RETRIES: int = 3", config)
 
