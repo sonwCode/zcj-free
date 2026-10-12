@@ -67,7 +67,7 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn("sms_channel_select_failed", switch_block)
 
     def test_phone_failure_is_released_before_retry(self):
-        acquire = TEXT.index("activation_id, phone = sms_provider.acquire_number(http)")
+        acquire = TEXT.index("activation_id, phone = sms_provider.acquire_number(http, country=configured_country)")
         release = TEXT.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)")
         self.assertLess(acquire, release)
         self.assertIn("_prepare_and_submit_add_phone(", TEXT)
@@ -187,7 +187,8 @@ class ResubmitLoopWiringTests(unittest.TestCase):
     def test_retry_acquires_a_new_activation_after_release(self):
         loop_start = TEXT.index("def _do_phone_verification_if_present")
         loop_block = TEXT[loop_start:]
-        acquire = loop_block.index("activation_id, phone = sms_provider.acquire_number(http)")
+        acquire = loop_block.index("activation_id, phone = sms_provider.acquire_number(http, country=configured_country)")
+        self.assertIn("configured_country = str(getattr(sms_provider._cfg, \"SMS_COUNTRY\", \"\") or \"\").strip() or None", loop_block)
         preflight = loop_block.index("_ensure_add_phone_input(driver, reason=f\"before-acquire-attempt-{attempt}\")")
         release = loop_block.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)")
         next_attempt = loop_block.index("for attempt in range(1, max_retries + 1)")

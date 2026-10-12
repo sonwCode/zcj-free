@@ -2901,7 +2901,8 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 # 页面断连时先恢复 add-phone，再采购号码；否则会把新激活号
                 # 立刻取消，连续消耗短信库存和重试次数。
                 _ensure_add_phone_input(driver, reason=f"before-acquire-attempt-{attempt}")
-                activation_id, phone = sms_provider.acquire_number(http)
+                configured_country = str(getattr(sms_provider._cfg, "SMS_COUNTRY", "") or "").strip() or None
+                activation_id, phone = sms_provider.acquire_number(http, country=configured_country)
                 snapshot = {}
                 try:
                     snapshot = sms_provider.get_activation_info(activation_id) or {}
