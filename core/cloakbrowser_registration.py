@@ -46,6 +46,7 @@ class _CloakProxyBootstrapError(RuntimeError):
     def __init__(self, message: str, failed_proxy: str | None = None):
         super().__init__(message)
         self.failed_proxy = str(failed_proxy or "").strip()
+        self.error_code = "proxy_bootstrap_exhausted"
         self.retryable = True
 
 
@@ -638,7 +639,7 @@ def run_cloak_registration(
     try:
         from config import cloakbrowser as _cloak_cfg
         max_attempts = max(1, int(
-            getattr(_cloak_cfg, "CLOAK_PROXY_BOOTSTRAP_RETRIES", 3) or 3
+            getattr(_cloak_cfg, "CLOAK_PROXY_BOOTSTRAP_RETRIES", 5) or 5
         ))
     except (ImportError, TypeError, ValueError):
         max_attempts = 3

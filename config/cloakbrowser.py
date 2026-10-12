@@ -35,7 +35,7 @@ CLOAK_EXTRA_ARGS: list = []
 CLOAK_SELENIUM_TIMEOUT: int = 90
 
 # 首个登录页遭遇代理隧道/连接错误时，换出口重建浏览器的总尝试次数。
-CLOAK_PROXY_BOOTSTRAP_RETRIES: int = 3
+CLOAK_PROXY_BOOTSTRAP_RETRIES: int = 5
 
 # 调试时保留浏览器不自动关闭。
 CLOAK_KEEP_BROWSER_OPEN: bool = False

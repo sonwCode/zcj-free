@@ -148,9 +148,10 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertIn("CLOAK_PROXY_BOOTSTRAP_RETRIES", source)
         self.assertIn("_is_cloak_proxy_bootstrap_error", source)
         self.assertIn("_CloakProxyBootstrapError", source)
+        self.assertIn("proxy_bootstrap_exhausted", source)
         self.assertIn("_run_in_isolated_thread", source)
         self.assertIn("excluded_proxies", source)
-        self.assertIn("CLOAK_PROXY_BOOTSTRAP_RETRIES: int = 3", config)
+        self.assertIn("CLOAK_PROXY_BOOTSTRAP_RETRIES: int = 5", config)
 
     def test_email_verified_follows_about_you_continue_url(self):
         source = (ROOT / "core" / "roxy_registration.py").read_text(encoding="utf-8")
