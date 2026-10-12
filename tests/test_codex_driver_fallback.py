@@ -127,6 +127,13 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertTrue(fn(RuntimeError("codex_mfa_step_stalled: MFA challenge 提交后仍未完成")))
         self.assertTrue(fn(RuntimeError("等待 Codex callback 超时，最后 URL=...")))
 
+    def test_proxy_bootstrap_failures_are_classified_for_rotation(self):
+        ns = _extract(CODEX, {"_is_codex_proxy_bootstrap_error", "_CODEX_PROXY_BOOTSTRAP_ERROR_MARKERS"})
+        fn = ns["_is_codex_proxy_bootstrap_error"]
+        self.assertTrue(fn(RuntimeError("ChatGPT fingerprint document preheat status=403")))
+        self.assertTrue(fn(RuntimeError("Page.goto: net::ERR_TIMED_OUT")))
+        self.assertTrue(fn(RuntimeError("curl: (56) Recv failure: Connection reset by peer")))
+
     def test_account_level_failure_is_not_recoverable(self):
         """换驱动也救不了账号级失败，继续尝试只会浪费邮箱和短信。"""
         ns = _extract(CODEX, {"_is_codex_driver_recoverable"})
@@ -143,6 +150,8 @@ class DriverConfigTests(unittest.TestCase):
         self.assertIn("'CODEX_OAUTH_DRIVER_FALLBACK': 'bool'", source)
         self.assertIn("CODEX_REQUIRED_ON_REGISTRATION", source)
         self.assertIn("'CODEX_REQUIRED_ON_REGISTRATION': 'bool'", source)
+        self.assertIn("CODEX_PROXY_RETRY_ATTEMPTS: int = 2", source)
+        self.assertIn("'CODEX_PROXY_RETRY_ATTEMPTS': 'int'", source)
 
 
 if __name__ == "__main__":

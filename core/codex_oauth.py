@@ -2035,6 +2035,18 @@ _CODEX_DRIVER_DEPENDENCY_ERROR_MARKERS = (
     "api key 不能为空", "api_base 不能为空", "token 不能为空",
 )
 
+_CODEX_PROXY_BOOTSTRAP_ERROR_MARKERS = (
+    "page.goto", "net::err_", "connection reset", "connection refused",
+    "timed out", "timeout", "proxy connection", "status=403",
+    "fingerprint document", "curl: (56)",
+)
+
+
+def _is_codex_proxy_bootstrap_error(exc: BaseException | str) -> bool:
+    text = str(exc or "").lower()
+    return bool(text) and any(marker in text for marker in _CODEX_PROXY_BOOTSTRAP_ERROR_MARKERS)
+
+
 _CODEX_DRIVER_ALIASES: dict[str, str] = {
     "roxy": "roxy", "roxybrowser": "roxy", "fingerprint": "roxy", "browser": "roxy",
     "cloak": "cloak", "cloakbrowser": "cloak",
@@ -2180,6 +2192,7 @@ def run_codex_oauth(
     driver: str | None = None,
     _cpa_reauth_round: int = 1,
     _phone_activation: dict | None = None,
+    _proxy_retry_attempt: int = 0,
 ) -> dict:
     """
     注册成功后的 Codex OAuth 授权入口（全新 session + 接码方案）。
@@ -2261,6 +2274,7 @@ def run_codex_oauth(
 
     # 单次 Codex 授权全程统一身份；下一任务即使是同一账号也生成全新的隔离身份。
     task_seed = f"codex-oauth:{email.lower()}:{uuid.uuid4()}"
+    stage = "preflight"
     session = BrowserSession(proxy=proxy, fingerprint_seed=task_seed)
     try:
         logger.info(f"[Codex] 开始授权（全新 session）：{email}")
@@ -2308,6 +2322,7 @@ def run_codex_oauth(
 
         # 3. 提交邮箱。后续不根据“账号有没有密码”猜流程，而是以 Auth 实际返回的
         #    page/type/continue_url 为准；账号密码只是密码页出现时的可用凭证。
+        stage = "email"
         otp_after_ts = time.time()
         auth_result = _submit_email(session, email)
         human_delay("form")
@@ -2478,6 +2493,34 @@ def run_codex_oauth(
             phone_activation=phone_activation,
         )
     except Exception as exc:
+        if stage == "preflight" and _is_codex_proxy_bootstrap_error(exc):
+            try:
+                max_proxy_retries = max(0, min(3, int(getattr(_cfg, "CODEX_PROXY_RETRY_ATTEMPTS", 2) or 0)))
+            except (TypeError, ValueError):
+                max_proxy_retries = 2
+            if _proxy_retry_attempt < max_proxy_retries:
+                try:
+                    from config import proxy as proxy_cfg
+                    current_proxy = str(getattr(session, "proxy", "") or proxy or "").strip()
+                    next_proxy = str(proxy_cfg.pick_proxy_excluding([current_proxy]) or "").strip()
+                except Exception:
+                    next_proxy = ""
+                if next_proxy and next_proxy != current_proxy:
+                    logger.warning(
+                        "[Codex] 预检阶段代理异常，轮换出口重试 %s/%s（不重复提交邮箱）",
+                        _proxy_retry_attempt + 1, max_proxy_retries,
+                    )
+                    close_browser_session(session)
+                    return run_codex_oauth(
+                        email,
+                        otp_provider=otp_provider,
+                        proxy=next_proxy,
+                        force=force,
+                        driver="protocol",
+                        _cpa_reauth_round=_cpa_reauth_round,
+                        _phone_activation=phone_activation,
+                        _proxy_retry_attempt=_proxy_retry_attempt + 1,
+                    )
         if _is_cpa_callback_reauth_error(exc) and _cpa_reauth_round < 2:
             logger.warning(
                 "[Codex][CPA] callback 返回 Timeout waiting for OAuth callback，重新开启第 %s/2 轮 Codex 授权：%s",
