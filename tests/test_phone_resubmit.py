@@ -7,6 +7,8 @@ ROOT = Path(__file__).parents[1]
 CODEX = ROOT / "core" / "roxy_codex_oauth.py"
 CFG = ROOT / "config" / "codex.py"
 TEXT = CODEX.read_text(encoding="utf-8")
+PROTOCOL = ROOT / "core" / "codex_oauth.py"
+PROTOCOL_TEXT = PROTOCOL.read_text(encoding="utf-8")
 
 
 def _load(names):
@@ -129,6 +131,16 @@ class FraudGuardBackoffTests(unittest.TestCase):
         ns["_sleep_before_phone_retry"](1, 10, reason='add_phone_response code=fraud_guard')
         self.assertEqual(delays, [(21, 39)])
         self.assertTrue(messages)
+
+
+class ProtocolFraudGuardBackoffWiringTests(unittest.TestCase):
+    def test_protocol_retry_passes_failure_reason_to_backoff(self):
+        self.assertIn('reason: str = ""', PROTOCOL_TEXT)
+        self.assertIn('"suspicious behavior from phone"', PROTOCOL_TEXT)
+        self.assertIn('SMS_FRAUD_GUARD_RETRY_MIN', PROTOCOL_TEXT)
+        self.assertIn('reason=send_reason or send_text', PROTOCOL_TEXT)
+        self.assertIn('reason=val_reason', PROTOCOL_TEXT)
+        self.assertIn('reason=err_text', PROTOCOL_TEXT)
 
 
 class ChannelMarkerSplitTests(unittest.TestCase):

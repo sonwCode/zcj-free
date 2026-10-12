@@ -1499,12 +1499,32 @@ def _sms_provider_name() -> str:
     return sms_provider._provider()
 
 
-def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "[Codex]") -> None:
-    """换号前随机等待，至少 3 秒，避免连续提交号码过快。"""
+def _sleep_before_phone_retry(
+    attempt: int,
+    max_retries: int,
+    *,
+    prefix: str = "[Codex]",
+    reason: str = "",
+) -> None:
+    """按手机号拒绝类型退避，避免 fraud_guard 窗口内连续换号。"""
     if attempt >= max_retries:
         return
-    seconds = random.uniform(3.0, 8.0)
-    logger.info(f"{prefix} 换号前随机等待 {seconds:.1f} 秒")
+    reason_text = str(reason or "").lower()
+    fraud_guard = any(marker in reason_text for marker in (
+        "fraud_guard",
+        "suspicious behavior from phone",
+    ))
+    if fraud_guard:
+        minimum = max(1, int(getattr(_cfg, "SMS_FRAUD_GUARD_RETRY_MIN", 20) or 20))
+        maximum = max(minimum, int(getattr(_cfg, "SMS_FRAUD_GUARD_RETRY_MAX", 45) or 45))
+        seconds = random.uniform(minimum, maximum)
+        logger.info(
+            "%s 检测到 fraud_guard，换号前退避 %.1f 秒（范围 %s-%ss）",
+            prefix, seconds, minimum, maximum,
+        )
+    else:
+        seconds = random.uniform(3.0, 8.0)
+        logger.info(f"{prefix} 换号前随机等待 {seconds:.1f} 秒")
     _stop_sleep(seconds)
 
 
@@ -1583,7 +1603,9 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                         f"status={send_resp.status_code}: {send_text[:240]}，换号重试"
                     )
                     cancel_and_report_failure(activation_id, send_reason or send_text or "send_failed")
-                    _sleep_before_phone_retry(attempt, max_retries)
+                    _sleep_before_phone_retry(
+                        attempt, max_retries, reason=send_reason or send_text
+                    )
                     continue
 
                 # 通知平台短信已发出（status=1）
@@ -1600,7 +1622,9 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 except sms_provider.SmsCodeTimeout:
                     logger.warning(f"[Codex] 号码 {_mask_phone_for_log(phone)} 在 {_cfg.SMS_CODE_WAIT}s 内未收到短信，取消换号")
                     cancel_and_report_failure(activation_id, "code_timeout")
-                    _sleep_before_phone_retry(attempt, max_retries)
+                    _sleep_before_phone_retry(
+                        attempt, max_retries, reason="code_timeout"
+                    )
                     continue
 
                 # 验手机码
@@ -1618,7 +1642,9 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                         f"{val_text[:240]}，换号重试"
                     )
                     cancel_and_report_failure(activation_id, val_reason)
-                    _sleep_before_phone_retry(attempt, max_retries)
+                    _sleep_before_phone_retry(
+                        attempt, max_retries, reason=val_reason
+                    )
                     continue
 
                 # 成功
@@ -1639,7 +1665,9 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 last_err = exc
                 logger.warning(f"[Codex] 接码尝试 {attempt} 失败：{exc}")
                 cancel_and_report_failure(activation_id, exc)
-                _sleep_before_phone_retry(attempt, max_retries)
+                _sleep_before_phone_retry(
+                    attempt, max_retries, reason=str(exc)
+                )
                 continue
             except Exception as exc:
                 last_err = exc
@@ -1649,7 +1677,9 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 if "invalid_auth_step" in err_text.lower():
                     raise
                 if attempt < max_retries:
-                    _sleep_before_phone_retry(attempt, max_retries)
+                    _sleep_before_phone_retry(
+                        attempt, max_retries, reason=err_text
+                    )
                     continue
                 raise
 
