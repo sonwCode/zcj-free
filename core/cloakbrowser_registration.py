@@ -641,8 +641,12 @@ def run_cloak_registration(
         max_attempts = max(1, int(
             getattr(_cloak_cfg, "CLOAK_PROXY_BOOTSTRAP_RETRIES", 5) or 5
         ))
+        direct_fallback_enabled = bool(
+            getattr(_cloak_cfg, "CLOAK_DIRECT_FALLBACK_ON_PROXY_FAILURE", True)
+        )
     except (ImportError, TypeError, ValueError):
-        max_attempts = 3
+        max_attempts = 5
+        direct_fallback_enabled = True
 
     excluded_proxies: set[str] = set()
     for attempt in range(1, max_attempts + 1):
@@ -660,12 +664,32 @@ def run_cloak_registration(
                 _excluded_proxies=excluded_proxies,
             )
         except _CloakProxyBootstrapError as exc:
-            if proxy is not None or attempt >= max_attempts:
+            if proxy is not None:
                 raise
             if exc.failed_proxy:
                 excluded_proxies.add(exc.failed_proxy)
-            logger.warning(
-                "[Cloak注册] 初始代理故障后重建隔离Playwright线程（%s/%s，排除出口=%s）：%s",
-                attempt, max_attempts, len(excluded_proxies), str(exc)[:200],
-            )
+            if attempt < max_attempts:
+                logger.warning(
+                    "[Cloak注册] 初始代理故障后重建隔离Playwright线程（%s/%s，排除出口=%s）：%s",
+                    attempt, max_attempts, len(excluded_proxies), str(exc)[:200],
+                )
+                continue
+            if direct_fallback_enabled:
+                logger.warning(
+                    "[Cloak注册] 已耗尽代理池凭据，最后使用服务器直连重建隔离Playwright线程（尝试=%s）",
+                    max_attempts,
+                )
+                return _run_in_isolated_thread(
+                    _run_cloak_registration_impl,
+                    email=email,
+                    name=name,
+                    birthday=birthday,
+                    proxy="",
+                    otp_code=otp_code,
+                    batch_dir=batch_dir,
+                    on_email_acquired=on_email_acquired,
+                    exclude_emails=exclude_emails,
+                    _excluded_proxies=excluded_proxies,
+                )
+            raise
     raise RuntimeError("Cloak初始代理重试已耗尽")
