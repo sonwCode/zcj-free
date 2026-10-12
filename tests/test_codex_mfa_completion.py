@@ -86,6 +86,13 @@ class BrowserMfaCompletionTests(unittest.TestCase):
         text = CODEX_CONFIG.read_text(encoding="utf-8")
         self.assertIn("ENABLE_CODEX_AUTO: bool = True", text)
         self.assertIn("CODEX_REQUIRED_ON_REGISTRATION: bool = True", text)
+        self.assertIn("CODEX_EMAIL_OTP_WAIT: int = 120", text)
+        self.assertIn("CODEX_EMAIL_OTP_MAX_ATTEMPTS: int = 4", text)
+
+    def test_codex_email_otp_uses_configured_wait_window(self):
+        body = function_source(CODEX_BROWSER, "_fill_email_and_otp")
+        self.assertIn("otp_wait_seconds", body)
+        self.assertIn("timeout=otp_wait_seconds", body)
 
 
 if __name__ == "__main__":

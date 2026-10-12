@@ -972,7 +972,13 @@ def _fill_email_and_otp(
     # 避免页面已进入 OAuth consent 时误点授权按钮。
 
     used_codes: set[str] = set()
-    max_otp_attempts = 3
+    try:
+        from config import codex as _codex_cfg
+        max_otp_attempts = max(1, min(6, int(getattr(_codex_cfg, "CODEX_EMAIL_OTP_MAX_ATTEMPTS", 3) or 3)))
+        otp_wait_seconds = max(30, min(300, int(getattr(_codex_cfg, "CODEX_EMAIL_OTP_WAIT", 90) or 90)))
+    except (ImportError, TypeError, ValueError):
+        max_otp_attempts = 3
+        otp_wait_seconds = 90
 
     def _restart_email_otp_flow(reason: str) -> None:
         """Codex Auth 上直接点 resend 可能触发服务端 500；这里改为重新打开授权地址并提交邮箱。"""
@@ -1015,7 +1021,7 @@ def _fill_email_and_otp(
                 email,
                 after_ts=otp_after_ts,
                 used_codes=used_codes,
-                timeout=90,
+                timeout=otp_wait_seconds,
             )
         except Exception as exc:
             if otp_attempt >= max_otp_attempts:
