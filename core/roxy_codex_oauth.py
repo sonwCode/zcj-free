@@ -7,6 +7,7 @@ import logging
 import random
 import re
 import time
+import threading
 from contextvars import ContextVar
 from urllib.parse import urlparse
 
@@ -3067,8 +3068,31 @@ def _finish_consent_workspace(driver) -> str:
 
 
 
-def clear_roxy_browser_auth_state(driver) -> None:
-    """清空当前 Roxy 浏览器里的 OpenAI/ChatGPT 登录态与缓存，用于注册后复用同一环境跑 Codex。"""
+def _bounded_codex_browser_call(label: str, callback, timeout_seconds: float = 5.0) -> bool:
+    """Bound a CDP/navigation cleanup call so Codex cannot leave registration running forever."""
+    result: list[object] = []
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result.append(callback())
+        except BaseException as exc:  # noqa: BLE001 - cleanup must not mask task state
+            errors.append(exc)
+
+    worker = threading.Thread(target=_run, name=f"codex-cleanup-{label}", daemon=True)
+    worker.start()
+    worker.join(max(0.5, float(timeout_seconds or 5.0)))
+    if worker.is_alive():
+        logger.warning("[Codex][Browser] 清理 %s 超时 %.1fs，回退其它授权驱动", label, timeout_seconds)
+        return False
+    if errors:
+        logger.info("[Codex][Browser] 清理 %s 失败，回退其它授权驱动：%s", label, str(errors[0])[:180])
+        return False
+    return True
+
+
+def clear_roxy_browser_auth_state(driver) -> bool:
+    """清空复用窗口登录态；任一步卡住时返回False，让调用方回退而不是永久等待。"""
     origins = [
         "https://auth.openai.com",
         "https://chatgpt.com",
@@ -3076,35 +3100,29 @@ def clear_roxy_browser_auth_state(driver) -> None:
         "https://platform.openai.com",
     ]
     logger.info("[Codex][Browser] 复用注册窗口：开始清理 Cookie / localStorage / sessionStorage / cache")
-    try:
-        driver.execute_cdp_cmd("Network.enable", {})
-    except Exception:
-        pass
-    try:
-        driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
-        logger.info("[Codex][Browser] 已清理浏览器 Cookie")
-    except Exception as exc:
-        logger.info("[Codex][Browser] 清理 Cookie 失败，继续尝试其它缓存：%s", str(exc)[:160])
-    try:
-        driver.execute_cdp_cmd("Network.clearBrowserCache", {})
-        logger.info("[Codex][Browser] 已清理浏览器 Cache")
-    except Exception as exc:
-        logger.info("[Codex][Browser] 清理 Cache 失败，继续：%s", str(exc)[:160])
+    if not _bounded_codex_browser_call("Network.enable", lambda: driver.execute_cdp_cmd("Network.enable", {})):
+        return False
+    if not _bounded_codex_browser_call("Network.clearBrowserCookies", lambda: driver.execute_cdp_cmd("Network.clearBrowserCookies", {})):
+        return False
+    logger.info("[Codex][Browser] 已清理浏览器 Cookie")
+    if not _bounded_codex_browser_call("Network.clearBrowserCache", lambda: driver.execute_cdp_cmd("Network.clearBrowserCache", {})):
+        return False
+    logger.info("[Codex][Browser] 已清理浏览器 Cache")
     for origin in origins:
-        try:
-            driver.execute_cdp_cmd("Storage.clearDataForOrigin", {
+        if not _bounded_codex_browser_call(
+            f"Storage.clearDataForOrigin:{origin}",
+            lambda origin=origin: driver.execute_cdp_cmd("Storage.clearDataForOrigin", {
                 "origin": origin,
                 "storageTypes": "all",
-            })
-            logger.info("[Codex][Browser] 已清理站点数据：%s", origin)
-        except Exception as exc:
-            logger.debug("[Codex][Browser] 清理站点数据失败 %s: %s", origin, exc)
-    try:
-        driver.get("about:blank")
-    except Exception:
-        pass
+            }),
+        ):
+            return False
+        logger.info("[Codex][Browser] 已清理站点数据：%s", origin)
+    if not _bounded_codex_browser_call("about:blank", lambda: driver.get("about:blank")):
+        return False
     _stop_sleep(1.0)
     logger.info("[Codex][Browser] 注册窗口登录态清理完成，准备开始 Codex 授权")
+    return True
 
 def _run_roxy_codex_oauth_once(
     email: str,
@@ -3173,7 +3191,8 @@ def _run_roxy_codex_oauth_once(
         driver.set_page_load_timeout(int(_roxy_cfg.ROXY_SELENIUM_TIMEOUT))
         logger.info("[Codex][Browser] 开始授权：%s，profile=%s，reuse_existing_profile=%s", email, opened.profile_id, reuse_existing_profile)
         if reuse_existing_profile and clear_existing_state:
-            clear_roxy_browser_auth_state(driver)
+            if not clear_roxy_browser_auth_state(driver):
+                raise RuntimeError("codex_browser_cleanup_timeout: 复用浏览器登录态清理未在限定时间内完成")
 
         _fill_email_and_otp(
             driver, email, otp_provider, auth_url, registration_password=registration_password

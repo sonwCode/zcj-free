@@ -1,5 +1,8 @@
 import ast
 import json
+import re
+import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.parse import urlparse
@@ -10,6 +13,12 @@ SOURCE = Path(__file__).parents[1] / "core" / "roxy_codex_oauth.py"
 
 class _Logger:
     def info(self, *args, **kwargs):
+        return None
+
+    def warning(self, *args, **kwargs):
+        return None
+
+    def debug(self, *args, **kwargs):
         return None
 
 
@@ -26,12 +35,13 @@ class _Driver:
 def _load_callback_helpers():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
     wanted = {
+        "_safe_url_for_log",
         "_is_callback_url",
         "_extract_callback_url_from_performance_log",
         "_phone_otp_outcome_accepted",
     }
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
-    namespace = {"json": json, "urlparse": urlparse, "logger": _Logger()}
+    namespace = {"json": json, "urlparse": urlparse, "re": re, "logger": _Logger()}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
     return (
         namespace["_is_callback_url"],
@@ -48,7 +58,30 @@ def _entry(method, params):
     }
 
 
+def _load_cleanup_helper():
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+    wanted = {"_bounded_codex_browser_call"}
+    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    namespace = {"threading": threading, "logger": _Logger()}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
+    return namespace["_bounded_codex_browser_call"]
+
+
 class RoxyCodexCallbackTests(unittest.TestCase):
+    def test_browser_cleanup_call_is_bounded(self):
+        bounded = _load_cleanup_helper()
+        started = threading.Event()
+
+        def stuck_call():
+            started.set()
+            time.sleep(2)
+
+        begin = time.monotonic()
+        self.assertFalse(bounded("fixture", stuck_call, timeout_seconds=0.05))
+        elapsed = time.monotonic() - begin
+        self.assertTrue(started.is_set())
+        self.assertLess(elapsed, 1.5)
+
     @classmethod
     def setUpClass(cls):
         is_callback_url, extract_callback, phone_otp_accepted = _load_callback_helpers()

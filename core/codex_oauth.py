@@ -2042,7 +2042,7 @@ _CODEX_DRIVER_RESOURCE_ERROR_MARKERS = (
     "服务不可用", "service unavailable", "connection refused",
     "connection reset", "connection closed", "econnrefused",
     "temporarily unavailable", "circuit breaker",
-    "codex_mfa_step_stalled", "等待 codex callback 超时",
+    "codex_mfa_step_stalled", "codex_browser_cleanup_timeout", "等待 codex callback 超时",
     "callback 超时", "timeout waiting for oauth callback",
 )
 

@@ -69,6 +69,7 @@ class RegistrationPostprocessOrderTests(unittest.TestCase):
         self.assertIn("page.goto", text)
         self.assertIn("net::err_", text)
         self.assertIn("proxy connection", text)
+        self.assertIn("codex_browser_cleanup_timeout", text)
         self.assertIn('driver="protocol"', text)
 
     def test_twofa_failure_branch_precedes_codex_branch(self):

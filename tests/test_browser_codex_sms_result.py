@@ -129,6 +129,10 @@ def _run_browser_use(code):
         def close_remote(self, *args, **kwargs):
             pass
 
+        def close(self, *args, **kwargs):
+            self.close_remote(*args, **kwargs)
+            self.close_browser(*args, **kwargs)
+
     class _StepTimer:
         def __init__(self, *args, **kwargs):
             pass

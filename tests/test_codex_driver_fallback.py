@@ -125,6 +125,7 @@ class DriverErrorClassificationTests(unittest.TestCase):
         ns = _extract(CODEX, {"_is_codex_driver_recoverable"})
         fn = ns["_is_codex_driver_recoverable"]
         self.assertTrue(fn(RuntimeError("codex_mfa_step_stalled: MFA challenge 提交后仍未完成")))
+        self.assertTrue(fn(RuntimeError("codex_browser_cleanup_timeout: 清理超时")))
         self.assertTrue(fn(RuntimeError("等待 Codex callback 超时，最后 URL=...")))
 
     def test_chatgpt_fingerprint_warmup_is_optional_before_auth(self):
