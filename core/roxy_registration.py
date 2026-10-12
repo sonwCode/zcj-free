@@ -2904,17 +2904,28 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
             if not verified_recovery_done:
                 verified_recovery_done = True
                 logger.warning(
-                    '%s 邮箱已验证但资料页未跳转，刷新当前认证页恢复：url=%s',
+                    '%s 邮箱已验证但资料页未跳转，跟随验证响应的 about-you 继续地址：url=%s',
                     _log_prefix(driver), snap.get('url'),
                 )
                 try:
-                    driver.refresh()
+                    # email-otp/validate 的协议响应以 about-you 作为 continue_url。
+                    # 浏览器页面偶尔只显示 Email verified 静态中间页，直接跟随
+                    # 该继续地址可恢复资料页，而不是在中间页反复刷新。
+                    driver.get('https://auth.openai.com/about-you')
                     _stop_aware_sleep(2)
                 except Exception as exc:
                     logger.warning(
-                        '%s 刷新 Email verified 页面失败，继续等待资料页：%s: %s',
+                        '%s 跟随 about-you 继续地址失败，刷新 Email verified 页面：%s: %s',
                         _log_prefix(driver), type(exc).__name__, str(exc)[:160],
                     )
+                    try:
+                        driver.refresh()
+                        _stop_aware_sleep(2)
+                    except Exception as refresh_exc:
+                        logger.warning(
+                            '%s 刷新 Email verified 页面失败，继续等待资料页：%s: %s',
+                            _log_prefix(driver), type(refresh_exc).__name__, str(refresh_exc)[:160],
+                        )
             else:
                 logger.info('%s Email verified 页面仍未跳转资料页，继续等待：url=%s', _log_prefix(driver), snap.get('url'))
             continue

@@ -150,6 +150,11 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertIn("excluded_proxies", source)
         self.assertIn("CLOAK_PROXY_BOOTSTRAP_RETRIES: int = 3", config)
 
+    def test_email_verified_follows_about_you_continue_url(self):
+        source = (ROOT / "core" / "roxy_registration.py").read_text(encoding="utf-8")
+        self.assertIn("auth.openai.com/about-you", source)
+        self.assertIn("跟随验证响应的 about-you 继续地址", source)
+
     def test_chatgpt_fingerprint_warmup_is_optional_before_auth(self):
         source = CODEX.read_text(encoding="utf-8")
         self.assertIn("继续 Auth document 预检", source)
