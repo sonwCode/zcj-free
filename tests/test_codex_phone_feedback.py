@@ -67,8 +67,8 @@ class _SmsProvider:
         if self.mode == "preflight_error":
             raise _SmsNoBalanceError("preflight no balance")
 
-    def acquire_number(self, http):
-        self.events.append(("acquire",))
+    def acquire_number(self, http, country=None):
+        self.events.append(("acquire", country))
         return "activation-1", "15550001111"
 
     def cancel(self, activation_id, http):

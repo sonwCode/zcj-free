@@ -1523,11 +1523,13 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
 
     try:
         sms_provider.preflight_sms_dependency(http=http)
+        # 固定国家必须在整轮手机号重试中保持不变；热加载/反馈路径可能更新配置对象。
+        configured_country = str(getattr(_cfg, "SMS_COUNTRY", "") or "").strip() or None
         last_err = None
         for attempt in range(1, max_retries + 1):
             activation_id = None
             try:
-                activation_id, phone = sms_provider.acquire_number(http)
+                activation_id, phone = sms_provider.acquire_number(http, country=configured_country)
                 snapshot = {}
                 try:
                     snapshot = sms_provider.get_activation_info(activation_id) or {}

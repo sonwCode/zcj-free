@@ -195,6 +195,20 @@ class ResubmitLoopWiringTests(unittest.TestCase):
         self.assertLess(next_attempt, preflight)
         self.assertLess(preflight, acquire)
         self.assertLess(acquire, release)
+        self.assertLess(loop_block.index("configured_country = str("), next_attempt)
+
+    def test_all_codex_drivers_capture_country_before_retry_loop(self):
+        sources = [
+            ROOT / "core" / "codex_oauth.py",
+            ROOT / "core" / "browser_use_codex_oauth.py",
+        ]
+        for path in sources:
+            source = path.read_text(encoding="utf-8")
+            capture = source.index("configured_country = str(")
+            loop = source.index("for attempt in range(1, max_retries + 1):", capture)
+            acquire = source.index("acquire_number(http, country=configured_country)", loop)
+            self.assertLess(capture, loop, path.name)
+            self.assertLess(loop, acquire, path.name)
 
     def test_no_bare_cfg_reference(self):
         """历史教训：_cfg 未定义会抛 NameError 并被宽泛 except 吞掉。"""

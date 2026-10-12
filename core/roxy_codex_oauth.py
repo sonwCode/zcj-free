@@ -2894,6 +2894,8 @@ def _do_phone_verification_if_present(driver) -> dict | None:
             return
 
         sms_provider.preflight_sms_dependency(http=http)
+        # 固定国家必须在整轮手机号重试中保持不变；热加载/反馈路径可能更新配置对象。
+        configured_country = str(getattr(sms_provider._cfg, "SMS_COUNTRY", "") or "").strip() or None
         last_err = None
         for attempt in range(1, max_retries + 1):
             activation_id = None
@@ -2901,7 +2903,6 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 # 页面断连时先恢复 add-phone，再采购号码；否则会把新激活号
                 # 立刻取消，连续消耗短信库存和重试次数。
                 _ensure_add_phone_input(driver, reason=f"before-acquire-attempt-{attempt}")
-                configured_country = str(getattr(sms_provider._cfg, "SMS_COUNTRY", "") or "").strip() or None
                 activation_id, phone = sms_provider.acquire_number(http, country=configured_country)
                 snapshot = {}
                 try:

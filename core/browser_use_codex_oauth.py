@@ -1435,6 +1435,8 @@ def _do_phone_verification_if_present(page) -> dict | None:
         http.close()
         raise
     max_retries = max(1, int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10)) if hasattr(sms_provider, "_cfg") else 10
+    # 与其他Codex驱动保持一致：显式国家贯穿整轮手机号重试。
+    configured_country = str(getattr(sms_provider._cfg, "SMS_COUNTRY", "") or "").strip() or None
     last_error = ""
     for attempt in range(1, max_retries + 1):
         activation_id = None
@@ -1444,7 +1446,7 @@ def _do_phone_verification_if_present(page) -> dict | None:
                 raise RuntimeError("无法回到手机号输入页，暂不取新号")
             _t_phone_ready.done()
             logger.info("[Codex][BrowserUse] 需要手机验证，开始取号（%s/%s）", attempt, max_retries)
-            activation_id, phone = sms_provider.acquire_number(http)
+            activation_id, phone = sms_provider.acquire_number(http, country=configured_country)
             snapshot = {}
             try:
                 snapshot = sms_provider.get_activation_info(activation_id) or {}
