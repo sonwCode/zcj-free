@@ -381,6 +381,7 @@ def _run_cloak_registration_impl(
                         not codex_result.get("ok")
                         and any(marker in failure_text.lower() for marker in (
                             "codex_mfa_step_stalled", "callback 超时", "timeout waiting for oauth callback",
+                            "page.goto", "net::err_", "proxy connection",
                         ))
                     ):
                         logger.warning("[Cloak注册][Codex] 浏览器授权未完成，释放窗口后降级协议驱动")

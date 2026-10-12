@@ -63,6 +63,14 @@ class RegistrationPostprocessOrderTests(unittest.TestCase):
                     self.assertIsInstance(value, ast.Constant)
                     self.assertIs(value.value, False)
 
+    def test_cloak_browser_navigation_errors_fall_back_to_protocol(self):
+        path = ROOT / "core" / "cloakbrowser_registration.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("page.goto", text)
+        self.assertIn("net::err_", text)
+        self.assertIn("proxy connection", text)
+        self.assertIn('driver="protocol"', text)
+
     def test_twofa_failure_branch_precedes_codex_branch(self):
         for path, function_name in TARGETS.items():
             with self.subTest(path=path.name):
