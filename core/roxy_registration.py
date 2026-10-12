@@ -2848,6 +2848,7 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
     age = today.year - int(y) - ((today.month, today.day) < (int(m), int(d)))
     last_snapshot = {}
     verified_recovery_done = False
+    fetch_error_recovery_done = False
     while time.time() < end:
         _stop_aware_sleep(1)
         if _has_access_token(driver):
@@ -2857,6 +2858,33 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
         snap = _page_snapshot(driver)
         _check_manual_stop()
         last_snapshot = snap
+        snapshot_text = " ".join(
+            str(snap.get(key) or "") for key in ("title", "text")
+        ).lower()
+        if ("failed to fetch" in snapshot_text or "oops, an error occurred" in snapshot_text) and not fetch_error_recovery_done:
+            fetch_error_recovery_done = True
+            logger.warning(
+                "%s 资料页遇到临时 Failed to fetch，点击 Try again/刷新恢复：url=%s",
+                _log_prefix(driver), snap.get("url"),
+            )
+            try:
+                retried = driver.execute_script(r"""
+                    const visible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                    const buttons = [...document.querySelectorAll('button, a')].filter(visible);
+                    const target = buttons.find((el) => /try again|retry|重试/i.test((el.innerText || el.textContent || '').trim()));
+                    if (target) { target.click(); return 'clicked'; }
+                    return 'missing';
+                """)
+                if retried != "clicked":
+                    driver.refresh()
+                end = max(end, time.time() + 25)
+                _stop_aware_sleep(2)
+            except Exception as exc:
+                logger.warning(
+                    "%s 资料页Failed to fetch恢复触发失败，继续观察：%s: %s",
+                    _log_prefix(driver), type(exc).__name__, str(exc)[:160],
+                )
+            continue
         if _is_email_verified_page(snap):
             if not verified_recovery_done:
                 verified_recovery_done = True

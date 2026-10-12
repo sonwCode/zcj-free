@@ -57,6 +57,9 @@ class EmailVerifiedProfileNavigationTests(unittest.TestCase):
         body = next(ast.get_source_segment(TEXT, n) for n in ast.parse(TEXT).body
                     if isinstance(n, ast.FunctionDef) and n.name == "_complete_profile_page")
         self.assertIn("driver.refresh()", body)
+        self.assertIn("failed to fetch", body)
+        self.assertIn("fetch_error_recovery_done", body)
+        self.assertIn("Try again", body)
         self.assertIn("邮箱已验证但资料页导航停滞", body)
         self.assertNotIn("return True", body[body.index("if _is_email_verified_page(snap):"):body.index("if not _is_profile_like(snap):")])
 
