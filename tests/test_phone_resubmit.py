@@ -138,8 +138,8 @@ class ProtocolFraudGuardBackoffWiringTests(unittest.TestCase):
         self.assertIn('reason: str = ""', PROTOCOL_TEXT)
         self.assertIn('"suspicious behavior from phone"', PROTOCOL_TEXT)
         self.assertIn('SMS_FRAUD_GUARD_RETRY_MIN', PROTOCOL_TEXT)
-        self.assertIn('reason=send_reason or send_text', PROTOCOL_TEXT)
-        self.assertIn('reason=val_reason', PROTOCOL_TEXT)
+        self.assertIn('reason=f"{send_reason} {send_text}"', PROTOCOL_TEXT)
+        self.assertIn('reason=f"{val_reason} {val_text}"', PROTOCOL_TEXT)
         self.assertIn('reason=err_text', PROTOCOL_TEXT)
 
 

@@ -1604,7 +1604,9 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                     )
                     cancel_and_report_failure(activation_id, send_reason or send_text or "send_failed")
                     _sleep_before_phone_retry(
-                        attempt, max_retries, reason=send_reason or send_text
+                        attempt,
+                        max_retries,
+                        reason=f"{send_reason} {send_text}",
                     )
                     continue
 
@@ -1643,7 +1645,9 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                     )
                     cancel_and_report_failure(activation_id, val_reason)
                     _sleep_before_phone_retry(
-                        attempt, max_retries, reason=val_reason
+                        attempt,
+                        max_retries,
+                        reason=f"{val_reason} {val_text}",
                     )
                     continue
 
