@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 _CLOAK_CLEANUP_TIMEOUT_SECONDS = 5.0
 _ACTIVE_CLOAK_DRIVERS_LOCK = threading.RLock()
 _ACTIVE_CLOAK_DRIVERS: dict[int, object] = {}
+_CLOAK_PROXY_RETRY_MARKERS = (
+    "err_tunnel_connection_failed", "proxy connection", "connection reset",
+    "connection refused", "timed out", "timeout", "net::err_",
+)
+
+
+def _is_cloak_proxy_bootstrap_error(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return any(marker in text for marker in _CLOAK_PROXY_RETRY_MARKERS)
 
 
 def _register_active_cloak_driver(driver) -> None:
@@ -143,6 +152,7 @@ def _run_cloak_registration_impl(
     """CloakBrowser 自动化注册入口。"""
     driver = None
     opened = None
+    excluded_proxies: set[str] = set()
     create_acknowledged = False
     openai_password: str | None = None
     traffic_tracker: PlaywrightTrafficTracker | None = None
@@ -153,25 +163,71 @@ def _run_cloak_registration_impl(
     driver_quit = False
     hard_cleanup = False
     try:
-        driver, opened = build_cloak_driver(proxy=proxy)
-        _register_active_cloak_driver(driver)
         try:
-            traffic_tracker = PlaywrightTrafficTracker(driver.context, label="Cloak")
-        except Exception as exc:
-            # 统计失败不应影响注册主流程。
-            logger.warning("[Cloak注册] 初始化浏览器流量统计失败，继续注册：%s: %s", type(exc).__name__, str(exc)[:180])
-        data_saver = BrowserDataSaver(label="Cloak")
-        if traffic_tracker is not None:
-            traffic_tracker.attach_data_saver(data_saver)
-        data_saver.install_playwright(driver.context)
-        logger.info("[Cloak注册] 开始：%s，profile=%s", email, opened.profile_id)
+            from config import cloakbrowser as _cloak_cfg
+            bootstrap_attempts = max(1, int(
+                getattr(_cloak_cfg, "CLOAK_PROXY_BOOTSTRAP_RETRIES", 3) or 3
+            ))
+        except (ImportError, TypeError, ValueError):
+            bootstrap_attempts = 3
 
-        otp_after_ts = time.time()
-        logger.info("[Cloak注册] 打开登录页：https://chatgpt.com/auth/login")
-        _safe_get(driver, "https://chatgpt.com/auth/login", timeout=60, attempts=2, accept_hosts=("chatgpt.com",))
-        human_delay("navigate")
-        _maybe_accept(driver)
-        _check_manual_stop()
+        # 只在首个登录页发生代理/隧道故障时换出口；此时尚未领取邮箱，
+        # 可以安全销毁浏览器并重建，不会重复提交注册表单。
+        for bootstrap_attempt in range(1, bootstrap_attempts + 1):
+            driver, opened = build_cloak_driver(
+                proxy=proxy, excluded_proxies=excluded_proxies,
+            )
+            _register_active_cloak_driver(driver)
+            try:
+                traffic_tracker = PlaywrightTrafficTracker(driver.context, label="Cloak")
+            except Exception as exc:
+                # 统计失败不应影响注册主流程。
+                logger.warning("[Cloak注册] 初始化浏览器流量统计失败，继续注册：%s: %s", type(exc).__name__, str(exc)[:180])
+            data_saver = BrowserDataSaver(label="Cloak")
+            if traffic_tracker is not None:
+                traffic_tracker.attach_data_saver(data_saver)
+            data_saver.install_playwright(driver.context)
+            logger.info("[Cloak注册] 开始：%s，profile=%s", email, opened.profile_id)
+
+            otp_after_ts = time.time()
+            logger.info("[Cloak注册] 打开登录页：https://chatgpt.com/auth/login")
+            try:
+                _safe_get(driver, "https://chatgpt.com/auth/login", timeout=60, attempts=2, accept_hosts=("chatgpt.com",))
+            except Exception as exc:
+                can_rotate = (
+                    proxy is None
+                    and bootstrap_attempt < bootstrap_attempts
+                    and _is_cloak_proxy_bootstrap_error(exc)
+                )
+                if not can_rotate:
+                    raise
+                failed_target = str(
+                    ((opened.raw or {}).get("proxy_pool_target") if opened else None)
+                    or ((opened.raw or {}).get("proxy") if opened else None)
+                    or ""
+                ).strip()
+                if failed_target:
+                    excluded_proxies.add(failed_target)
+                logger.warning(
+                    "[Cloak注册] 首个登录页代理/隧道失败，换出口重建浏览器（%s/%s，已排除=%s）：%s",
+                    bootstrap_attempt, bootstrap_attempts, len(excluded_proxies),
+                    type(exc).__name__,
+                )
+                try:
+                    driver.force_kill()
+                except BaseException as kill_exc:
+                    logger.debug("[Cloak注册] 代理重试时回收浏览器失败：%s: %s", type(kill_exc).__name__, kill_exc)
+                _unregister_active_cloak_driver()
+                driver = None
+                opened = None
+                traffic_tracker = None
+                data_saver = None
+                continue
+
+            human_delay("navigate")
+            _maybe_accept(driver)
+            _check_manual_stop()
+            break
 
         def _email_supplier_after_input() -> str:
             nonlocal email

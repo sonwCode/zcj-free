@@ -672,7 +672,11 @@ def _rollback_cloak_resources(browser=None, context=None, proxy_relay=None) -> N
             logger.warning("[Cloak] 回滚代理 relay 失败：%s: %s", type(exc).__name__, str(exc)[:180])
 
 
-def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
+def build_cloak_driver(
+    proxy: str | None = None,
+    *,
+    excluded_proxies=None,
+) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
     """启动 CloakBrowser；返回前的任何失败都会回滚已取得资源。"""
     proxy_relay = None
     proxy_pool_target = ""
@@ -688,7 +692,7 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
                 proxy = None
             else:
                 from core.proxy_chain import open_proxy_pool_proxy
-                proxy_pool_target = str(acquire_proxy_lease() or "").strip()
+                proxy_pool_target = str(acquire_proxy_lease(excluded_proxies) or "").strip()
                 proxy_lease_acquired = bool(proxy_pool_target)
                 proxy, proxy_relay = open_proxy_pool_proxy(proxy_pool_target)
 

@@ -113,13 +113,17 @@ def pick_proxy_excluding(excluded=None) -> str:
     return random.choice(candidates or PROXY_POOL) if PROXY_POOL else ""
 
 
-def acquire_proxy_lease() -> str:
+def acquire_proxy_lease(excluded=None) -> str:
     """选择当前租约最少的代理目标，并登记一个并发租约。"""
+    excluded_set = {str(item or "").strip() for item in (excluded or ()) if str(item or "").strip()}
     with _PROXY_LEASE_LOCK:
         if not PROXY_POOL:
             return ""
-        minimum = min(_PROXY_LEASES.get(proxy, 0) for proxy in PROXY_POOL)
-        candidates = [proxy for proxy in PROXY_POOL if _PROXY_LEASES.get(proxy, 0) == minimum]
+        candidates = [proxy for proxy in PROXY_POOL if proxy not in excluded_set]
+        if not candidates:
+            candidates = list(PROXY_POOL)
+        minimum = min(_PROXY_LEASES.get(proxy, 0) for proxy in candidates)
+        candidates = [proxy for proxy in candidates if _PROXY_LEASES.get(proxy, 0) == minimum]
         selected = random.choice(candidates)
         _PROXY_LEASES[selected] = _PROXY_LEASES.get(selected, 0) + 1
         return selected

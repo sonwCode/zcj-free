@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 CODEX = ROOT / "core" / "codex_oauth.py"
 CLOAK = ROOT / "core" / "cloakbrowser_registration.py"
+CLOAK_CFG = ROOT / "config" / "cloakbrowser.py"
 CFG = ROOT / "config" / "codex.py"
 
 
@@ -141,6 +142,14 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertIn("fraud_guard", source)
         self.assertIn("proxy=fallback_proxy", source)
 
+    def test_cloak_bootstrap_has_bounded_proxy_retry(self):
+        source = CLOAK.read_text(encoding="utf-8")
+        config = CLOAK_CFG.read_text(encoding="utf-8")
+        self.assertIn("CLOAK_PROXY_BOOTSTRAP_RETRIES", source)
+        self.assertIn("_is_cloak_proxy_bootstrap_error", source)
+        self.assertIn("excluded_proxies", source)
+        self.assertIn("CLOAK_PROXY_BOOTSTRAP_RETRIES: int = 3", config)
+
     def test_chatgpt_fingerprint_warmup_is_optional_before_auth(self):
         source = CODEX.read_text(encoding="utf-8")
         self.assertIn("继续 Auth document 预检", source)
@@ -161,6 +170,24 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertFalse(fn(RuntimeError("账号已废（account_deactivated）")))
         self.assertFalse(fn(RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")))
         self.assertFalse(fn(RuntimeError("")))
+
+
+class ProxyLeaseTests(unittest.TestCase):
+    def test_excluded_proxy_is_not_selected_when_alternative_exists(self):
+        import config.proxy as proxy_cfg
+
+        original_pool = list(proxy_cfg.PROXY_POOL)
+        original_leases = dict(proxy_cfg._PROXY_LEASES)
+        try:
+            proxy_cfg.PROXY_POOL = ["http://proxy-a", "http://proxy-b"]
+            proxy_cfg._PROXY_LEASES.clear()
+            selected = proxy_cfg.acquire_proxy_lease(["http://proxy-a"])
+            self.assertEqual(selected, "http://proxy-b")
+            proxy_cfg.release_proxy_lease(selected)
+        finally:
+            proxy_cfg.PROXY_POOL = original_pool
+            proxy_cfg._PROXY_LEASES.clear()
+            proxy_cfg._PROXY_LEASES.update(original_leases)
 
 
 class DriverConfigTests(unittest.TestCase):
