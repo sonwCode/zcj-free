@@ -13,9 +13,10 @@ class ChatGPTSessionRecoveryTests(unittest.TestCase):
         self.assertIn("auto_jump_wait: int = 45", source)
         self.assertIn("_read_chatgpt_session_via_context", source)
         self.assertIn("cache-control", source)
-        self.assertIn("warning_only_rounds >= 20", source)
+        self.assertIn("warning_only_rounds >= 8", source)
         self.assertIn("_recover_chatgpt_login_session", source)
         self.assertIn("session_refreshes < 2", source)
+        self.assertIn("elif not forced_chatgpt_open", source)
 
     def test_registration_passes_credentials_to_session_recovery(self):
         roxy = ROXY.read_text(encoding="utf-8")
@@ -27,7 +28,7 @@ class ChatGPTSessionRecoveryTests(unittest.TestCase):
 
     def test_recovery_starts_after_refresh_budget_is_exhausted(self):
         source = ROXY.read_text(encoding="utf-8")
-        self.assertIn("session_refreshes >= 2 and warning_only_rounds >= 12", source)
+        self.assertIn("warning_started_at is not None and time.time() - warning_started_at >= 12", source)
         self.assertIn('"auth.openai.com"', source)
 
     def test_recovery_is_not_unbounded(self):

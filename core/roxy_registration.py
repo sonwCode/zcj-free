@@ -238,6 +238,9 @@ def _safe_get(driver, url: str, *, timeout: int = 45, attempts: int = 2, accept_
                 "ERR_EMPTY_RESPONSE",
                 "ERR_CONNECTION_RESET",
                 "ERR_CONNECTION_CLOSED",
+                "ERR_SOCKET_NOT_CONNECTED",
+                "ERR_CONNECTION_REFUSED",
+                "ERR_HTTP2_PROTOCOL_ERROR",
                 "ERR_NETWORK_CHANGED",
                 "ERR_FAILED",
                 "ERR_TIMED_OUT",
@@ -513,8 +516,15 @@ def _is_navigation_error_url(url: str) -> bool:
     return any(token in lowered for token in _NAVIGATION_ERROR_URL_TOKENS)
 
 
-def _refresh_after_missing_page_element(driver, step: str, retry_index: int) -> bool:
-    """元素缺失时刷新当前页面，避免把页面迟渲染误判成流程失败。"""
+def _refresh_after_missing_page_element(
+    driver,
+    step: str,
+    retry_index: int,
+    *,
+    recovery_url: str | None = None,
+    accept_hosts: tuple[str, ...] = (),
+) -> bool:
+    """元素缺失时按当前流程恢复页面，避免瞬时网络错误终止注册。"""
     max_retries = _MISSING_PAGE_ELEMENT_REFRESH_RETRIES
     if retry_index >= max_retries:
         return False
@@ -524,13 +534,25 @@ def _refresh_after_missing_page_element(driver, step: str, retry_index: int) -> 
             "%s %s未找到，刷新页面重试（第 %s/%s 次）：url=%s",
             _log_prefix(driver), step, retry_index + 1, max_retries, current_url[:180],
         )
-        if "/auth/error" in current_url.lower() or "chrome-error" in current_url.lower():
+        if recovery_url and (
+            _is_navigation_error_url(current_url)
+            or "/auth/error" in current_url.lower()
+            or "chrome-error" in current_url.lower()
+        ):
+            _safe_get(
+                driver,
+                recovery_url,
+                timeout=45,
+                attempts=4,
+                accept_hosts=accept_hosts or ("chatgpt.com", "auth.openai.com"),
+            )
+        elif "/auth/error" in current_url.lower() or "chrome-error" in current_url.lower():
             _safe_get(
                 driver,
                 "https://chatgpt.com/auth/login",
                 timeout=45,
-                attempts=2,
-                accept_hosts=("chatgpt.com",),
+                attempts=4,
+                accept_hosts=("chatgpt.com", "auth.openai.com"),
             )
         else:
             driver.refresh()
@@ -543,6 +565,11 @@ def _refresh_after_missing_page_element(driver, step: str, retry_index: int) -> 
             _log_prefix(driver), step, retry_index + 1, max_retries,
             type(exc).__name__, str(exc)[:180],
         )
+        # 当前出口可能只短暂断开；保留外层重试机会，不把一次导航失败
+        # 直接收敛成“元素不存在”。
+        if retry_index + 1 < max_retries:
+            _stop_aware_sleep(min(3.0, 0.8 * (retry_index + 1)))
+            return True
         return False
 
 
@@ -871,7 +898,13 @@ def _wait_for_email_input(driver, timeout: int | None = None):
                 _assert_not_external_idp(driver, "点击邮箱入口后")
                 continue
             _stop_aware_sleep(0.4)
-        if not _refresh_after_missing_page_element(driver, "邮箱输入框/邮箱入口", refresh_retry):
+        if not _refresh_after_missing_page_element(
+            driver,
+            "邮箱输入框/邮箱入口",
+            refresh_retry,
+            recovery_url="https://chatgpt.com/auth/login",
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        ):
             break
     raise RuntimeError(
         f"找不到邮箱输入框/邮箱入口，已刷新重试{_MISSING_PAGE_ELEMENT_REFRESH_RETRIES}次"
@@ -1519,7 +1552,13 @@ def _type_otp(driver, code: str) -> None:
                     human_delay("keystroke")
             return
 
-        if not _refresh_after_missing_page_element(driver, "OTP输入框", refresh_retry):
+        if not _refresh_after_missing_page_element(
+            driver,
+            "OTP输入框",
+            refresh_retry,
+            recovery_url="https://auth.openai.com/email-verification",
+            accept_hosts=("auth.openai.com", "chatgpt.com"),
+        ):
             break
 
     raise RuntimeError(
@@ -1631,8 +1670,8 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
     """提交 OTP 后等待页面离开验证码页。
 
     只有页面明确出现验证码错误（aria-invalid / 错误文案）才判定为无效；
-    网络慢时页面跳转可能超过 10s，超时后只要没有错误标记就按 accepted 处理，
-    避免把已提交成功的验证码误判为失败后误点“重新发送”把流程搞乱。
+    网络慢时页面跳转可能超过等待窗口，仍停在验证码页且没有错误标记时返回
+    pending，由调用方刷新确认后再决定是否重发，避免把未完成状态误当成功。
     """
     _check_manual_stop()
     end = time.time() + timeout
@@ -1671,7 +1710,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
     _check_manual_stop()
     if _is_email_verification_page(driver):
         _check_manual_stop()
-        # 超时仍停留：只有稳定存在的错误标记才判定无效，否则按慢跳转放行。
+        # 超时仍停留：只有稳定存在的错误标记才判定无效，否则返回pending交给调用方恢复。
         now = time.time()
         has_stable_error = (
             invalid_since is not None
@@ -1690,11 +1729,51 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
             )
             return 'invalid'
         logger.warning(
-            "%s[OTP] 提交后 %ss 仍在验证码页但错误标记未稳定，按跳转缓慢处理（accepted）",
+            "%s[OTP] 提交后 %ss 仍在验证码页且错误标记未稳定，标记为 pending，先恢复页面再决定是否重发",
             _log_prefix(driver), timeout,
         )
-        return 'accepted'
+        return 'pending'
     return 'accepted'
+
+
+def _recover_pending_email_otp_submit(driver, timeout: int = 18) -> str:
+    """OTP提交后仍停留验证码页时刷新确认，避免把未完成状态当成功。"""
+    try:
+        current_url = str(getattr(driver, "current_url", "") or "")
+        if _is_navigation_error_url(current_url):
+            _safe_get(
+                driver,
+                "https://auth.openai.com/email-verification",
+                timeout=20,
+                attempts=3,
+                accept_hosts=("auth.openai.com", "chatgpt.com"),
+            )
+        else:
+            driver.refresh()
+        _stop_aware_sleep(2)
+    except Exception as exc:
+        logger.warning(
+            "%s[OTP] pending恢复导航失败，准备按未通过处理：%s: %s",
+            _log_prefix(driver), type(exc).__name__, str(exc)[:160],
+        )
+        return "pending"
+
+    end = time.time() + max(3, int(timeout or 18))
+    while time.time() < end:
+        _check_manual_stop()
+        if not _is_email_verification_page(driver):
+            return "accepted"
+        state = _email_otp_page_state(driver)
+        errors = state.get("errors") if isinstance(state, dict) else []
+        invalid_fields = tuple(
+            str(item.get("name") or item.get("id") or item.get("autocomplete") or index)
+            for index, item in enumerate(state.get("inputs") or [])
+            if isinstance(item, dict) and str(item.get("ariaInvalid") or "").lower() == "true"
+        ) if isinstance(state, dict) else ()
+        if errors or invalid_fields:
+            return "invalid"
+        _stop_aware_sleep(0.5)
+    return "pending"
 
 
 def _click_continue(driver, timeout: int = 20) -> None:
@@ -2871,6 +2950,8 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
     last_snapshot = {}
     verified_recovery_done = False
     fetch_error_recovery_done = False
+    navigation_error_recoveries = 0
+    last_good_url = ""
     while time.time() < end:
         _stop_aware_sleep(1)
         if _has_access_token(driver):
@@ -2880,6 +2961,43 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
         snap = _page_snapshot(driver)
         _check_manual_stop()
         last_snapshot = snap
+        snapshot_url = str(snap.get("url") or getattr(driver, "current_url", "") or "")
+        if snapshot_url.lower().startswith(("http://", "https://")) and not _is_navigation_error_url(snapshot_url):
+            last_good_url = snapshot_url
+        if _is_navigation_error_url(snapshot_url):
+            if navigation_error_recoveries < 3:
+                navigation_error_recoveries += 1
+                recovery_url = (
+                    last_good_url
+                    if "/about-you" in last_good_url.lower()
+                    else "https://auth.openai.com/about-you"
+                )
+                logger.warning(
+                    "%s 资料页跳转落入浏览器网络错误页，恢复 about-you（第 %s/3 次）：url=%s",
+                    _log_prefix(driver), navigation_error_recoveries, snapshot_url[:180],
+                )
+                try:
+                    _safe_get(
+                        driver,
+                        recovery_url,
+                        timeout=20,
+                        attempts=3,
+                        accept_hosts=("auth.openai.com", "chatgpt.com"),
+                    )
+                    _stop_aware_sleep(2)
+                except Exception as exc:
+                    logger.warning(
+                        "%s 资料页网络错误恢复失败，保留后续重试：%s: %s",
+                        _log_prefix(driver), type(exc).__name__, str(exc)[:160],
+                    )
+                    _stop_aware_sleep(1.5)
+                end = max(end, time.time() + 8)
+                continue
+            logger.warning(
+                "%s 资料页连续落入浏览器网络错误页，等待窗口内继续观察：url=%s",
+                _log_prefix(driver), snapshot_url[:180],
+            )
+            continue
         snapshot_text = " ".join(
             str(snap.get(key) or "") for key in ("title", "text")
         ).lower()
@@ -3227,6 +3345,7 @@ def _fetch_chatgpt_session(
     last_url = ""
     forced_chatgpt_open = False
     warning_only_rounds = 0
+    warning_started_at: float | None = None
     session_refreshes = 0
     login_recovery_attempted = False
 
@@ -3248,18 +3367,23 @@ def _fetch_chatgpt_session(
                         "%s OAuth 回调等待已达 %ss，主动打开 ChatGPT 读取 session：current=%s",
                         _log_prefix(driver), int(auto_jump_wait or 45), current[:180],
                     )
-                    _safe_get(driver, "https://chatgpt.com/", timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
+                    # 先锁定已执行状态；即使本次导航被代理截断，也要改用
+                    # 当前上下文继续读取 session，避免每轮重复导航把剩余预算耗尽。
                     forced_chatgpt_open = True
+                    try:
+                        _safe_get(driver, "https://chatgpt.com/", timeout=35, attempts=3, accept_hosts=("chatgpt.com",))
+                    except Exception as exc:
+                        last_data = f"chatgpt_open {type(exc).__name__}: {str(exc)[:180]}"
                     _stop_aware_sleep(3)
                     current = str(getattr(driver, "current_url", "") or "")
                     last_url = current[:240]
                 except Exception as exc:
                     last_data = f"{type(exc).__name__}: {exc}"
-            else:
+            elif not forced_chatgpt_open:
                 _stop_aware_sleep(1)
                 continue
 
-        if 'chatgpt.com' in current:
+        if 'chatgpt.com' in current or forced_chatgpt_open:
             try:
                 data = _read_chatgpt_session_once(driver)
                 _check_manual_stop()
@@ -3267,7 +3391,12 @@ def _fetch_chatgpt_session(
                     return data
                 keys = list(data.keys()) if isinstance(data, dict) else []
                 warning_only = isinstance(data, dict) and "WARNING_BANNER" in data and not data.get("accessToken")
-                warning_only_rounds = warning_only_rounds + 1 if warning_only else 0
+                if warning_only:
+                    warning_only_rounds += 1
+                    warning_started_at = warning_started_at or time.time()
+                else:
+                    warning_only_rounds = 0
+                    warning_started_at = None
                 last_data = f"session keys={keys}"
 
                 if forced_chatgpt_open and warning_only:
@@ -3285,8 +3414,8 @@ def _fetch_chatgpt_session(
                             last_data = f"session_refresh {type(refresh_exc).__name__}: {str(refresh_exc)[:180]}"
                     elif (
                         (
-                            warning_only_rounds >= 20
-                            or (session_refreshes >= 2 and warning_only_rounds >= 12)
+                            warning_only_rounds >= 8
+                            or (warning_started_at is not None and time.time() - warning_started_at >= 12)
                         )
                         and not login_recovery_attempted
                         and email
@@ -3527,6 +3656,9 @@ def run_roxy_registration(
 
             outcome = _wait_after_email_otp_submit(driver, timeout=30)
             _traffic_checkpoint()
+            if outcome == 'pending':
+                logger.warning("[Roxy注册][OTP] 提交后仍在验证码页，刷新确认是否已完成")
+                outcome = _recover_pending_email_otp_submit(driver, timeout=18)
             if outcome == 'accepted':
                 break
             if otp_attempt >= max_otp_attempts:

@@ -219,6 +219,19 @@ def _mask_phone_for_log(value: object) -> str:
     return "*" * max(len(digits) - 4, 2) + digits[-4:]
 
 
+def _codex_exception_metadata(exc: Exception) -> tuple[str | None, bool | None]:
+    """把高频上游错误映射成可操作的任务错误码和重试属性。"""
+    text = str(exc or "")
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("ip banned", "ip_banned", "ip has been banned")):
+        return "cpa_ip_banned", True
+    if "codex_mfa_step_stalled" in lowered:
+        return "codex_mfa_step_stalled", True
+    if "callback" in lowered and "timeout" in lowered:
+        return "codex_callback_timeout", True
+    return None, None
+
+
 def _merge_phone_activation(previous: dict | None, current: dict | None) -> dict:
     """合并跨授权轮次的手机号快照，空字段不覆盖已有值。"""
     merged: dict = {}
@@ -2636,16 +2649,12 @@ def run_codex_oauth(
                 phone_activation=phone_activation,
             )
         error_text = str(exc)
-        error_lower = error_text.lower()
-        error_code = None
-        if "codex_mfa_step_stalled" in error_lower:
-            error_code = "codex_mfa_step_stalled"
-        elif "callback" in error_lower and "timeout" in error_lower:
-            error_code = "codex_callback_timeout"
+        error_code, retryable = _codex_exception_metadata(exc)
         return _codex_result(
             status="failed",
             email=email,
             error_code=error_code,
+            retryable=retryable,
             message=f"{type(exc).__name__}: {error_text[:200]}",
             phone_activation=phone_activation,
         )

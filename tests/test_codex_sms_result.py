@@ -48,7 +48,7 @@ class _SmsProvider:
 
 def _load_run():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
-    wanted = {"_codex_result", "run_codex_oauth"}
+    wanted = {"_codex_result", "_codex_exception_metadata", "run_codex_oauth"}
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     namespace = {
         "_cfg": types.SimpleNamespace(ENABLE_CODEX_AUTO=True),
@@ -57,6 +57,8 @@ def _load_run():
         "uuid": __import__("uuid"),
         "AccountUnusableError": type("AccountUnusableError", (Exception,), {}),
         "_is_cpa_callback_reauth_error": lambda exc: False,
+        "_is_codex_proxy_bootstrap_error": lambda exc: False,
+        "close_browser_session": lambda session: None,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
     # 该夹具只验证短信异常映射；驱动解析由独立测试覆盖。
@@ -98,6 +100,10 @@ class CodexSmsResultTests(unittest.TestCase):
         self.namespace["_codex_protocol_fingerprint_warmup"] = _raise_during_warmup
         with patch.dict(sys.modules, {"config": config, "core.email_provider": email_provider}):
             return self.namespace["run_codex_oauth"]("user@example.com", force=True)
+
+    def test_cpa_ip_ban_is_explicit_and_retryable(self):
+        metadata = self.namespace["_codex_exception_metadata"]
+        self.assertEqual(metadata(RuntimeError("[Codex][CPA] status=403: IP banned")), ("cpa_ip_banned", True))
 
     def test_no_balance_is_blocked_and_non_retryable(self):
         result = self._run_with_sms_error("sms_no_balance")

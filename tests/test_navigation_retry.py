@@ -12,12 +12,16 @@ class NavigationRetryTests(unittest.TestCase):
             "ERR_EMPTY_RESPONSE",
             "ERR_CONNECTION_RESET",
             "ERR_CONNECTION_CLOSED",
+            "ERR_SOCKET_NOT_CONNECTED",
+            "ERR_HTTP2_PROTOCOL_ERROR",
             "ERR_NETWORK_CHANGED",
             "ERR_TIMED_OUT",
         ):
             self.assertIn(marker, source)
         self.assertIn("except Exception as exc:", source)
         self.assertIn("transient and attempt < attempts", source)
+        self.assertIn("recovery_url", source)
+        self.assertIn("attempts=4", source)
         self.assertIn('driver.get("about:blank")', source)
 
 

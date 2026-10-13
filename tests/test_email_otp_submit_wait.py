@@ -68,6 +68,17 @@ class EmailOtpSubmitWaitTests(unittest.TestCase):
         )
         self.assertEqual(result, "accepted")
 
+    def test_timeout_without_error_marker_is_pending(self):
+        wait, Driver = _load_wait_helper()
+        result = wait(
+            Driver([
+                {"errors": [], "inputs": [{"name": "otp", "ariaInvalid": ""}]}
+                for _ in range(12)
+            ]),
+            timeout=5,
+        )
+        self.assertEqual(result, "pending")
+
     def test_stable_error_marker_is_invalid(self):
         wait, Driver = _load_wait_helper()
         result = wait(

@@ -17,6 +17,8 @@ def _load_profile_helpers():
         "time": __import__("time"),
         "_check_manual_stop": lambda: None,
         "_stop_aware_sleep": lambda _seconds: None,
+        "_is_navigation_error_url": lambda url: str(url or "").lower().startswith(("chrome-error://", "edge-error://", "about:neterror")),
+        "_safe_get": lambda *args, **kwargs: None,
         "_has_access_token": lambda _driver: False,
         "_page_snapshot": lambda driver: driver.snapshots.pop(0),
         "_log_prefix": lambda _driver: "[test]",

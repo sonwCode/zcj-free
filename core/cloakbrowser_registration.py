@@ -26,6 +26,7 @@ from core.humanize import delay as human_delay
 from core.roxy_registration import (  # noqa: F401
     _maybe_accept, _type_email_address, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
+    _recover_pending_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
     _is_signup_password_page, _password_page_state,
     _safe_get,
@@ -339,6 +340,9 @@ def _run_cloak_registration_impl(
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
             outcome = _wait_after_email_otp_submit(driver, timeout=30)
+            if outcome == "pending":
+                logger.warning("[Cloak注册][OTP] 提交后仍在验证码页，刷新确认是否已完成")
+                outcome = _recover_pending_email_otp_submit(driver, timeout=18)
             otp_final_outcome = str(outcome or "unknown")
             logger.info("[Cloak注册][OTP] 提交后状态：%s", outcome)
             if outcome == "accepted":
