@@ -250,6 +250,8 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.SMS_PREFLIGHT_RETRY_DELAY = 0
         http = _Http([
             _Response(json.dumps({"117": {"dr": {"cost": "0.04", "count": 20}}})),
+            _Response(json.dumps({"117": {"dr": {"cost": "0.04", "count": 20}}})),
+            _Response(json.dumps({"117": {"dr": {"cost": "0.04", "count": 20}}})),
             _Response(json.dumps({"6": {"dr": {"cost": "0.023", "count": 20}}})),
             _Response(json.dumps({
                 "activationId": "refreshed-budget-1",
@@ -265,10 +267,10 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
         self.assertEqual((activation_id, phone), ("refreshed-budget-1", "15550006666"))
         self.assertEqual([call["params"]["action"] for call in http.calls], [
-            "getPrices", "getPrices", "getNumberV2",
+            "getPrices", "getPrices", "getPrices", "getPrices", "getNumberV2",
         ])
-        self.assertEqual(http.calls[2]["params"]["country"], "6")
-        self.assertEqual(http.calls[2]["params"]["maxPrice"], "0.034722")
+        self.assertEqual(http.calls[4]["params"]["country"], "6")
+        self.assertEqual(http.calls[4]["params"]["maxPrice"], "0.034722")
 
     def test_preflight_never_queries_live_inventory(self):
         codex_config.SMS_PROVIDER_CHAIN = "smsbower"
