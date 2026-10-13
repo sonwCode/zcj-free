@@ -460,6 +460,24 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertTrue(all(call["params"]["maxPrice"] == "0.034722" for call in http.calls))
         self.assertEqual(sms_provider._activation_state(activation_id)["country"], "35")
 
+    def test_wrong_service_from_v2_falls_back_with_same_price_cap(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smsbower"
+        codex_config.SMS_MAX_PRICE = "0.25"
+        codex_config.SMSBOWER_USE_V2 = True
+        http = _Http([
+            _Response("WRONG_SERVICE"),
+            _Response("ACCESS_NUMBER:legacy-ok:15550005"),
+        ])
+
+        activation_id, phone = sms_provider.acquire_number(http=http)
+
+        self.assertEqual((activation_id, phone), ("legacy-ok", "15550005"))
+        self.assertEqual([call["params"]["action"] for call in http.calls], ["getNumberV2", "getNumber"])
+        self.assertTrue(all(call["params"]["service"] == "dr" for call in http.calls))
+        self.assertTrue(all(call["params"]["country"] == "0" for call in http.calls))
+        self.assertTrue(all(call["params"]["maxPrice"] == "0.034722" for call in http.calls))
+        self.assertTrue(sms_provider._activation_state(activation_id)["price_validated"])
+
     def test_random_country_legacy_api_retries_without_inventory_requests(self):
         codex_config.SMS_MAX_PRICE = "0.25"
         codex_config.SMSBOWER_USE_V2 = False

@@ -1432,8 +1432,18 @@ def _request_smsbower_number(http: CurlSession, params: dict) -> tuple[dict, str
                 continue
             raise
         except SmsProviderError as exc:
-            if candidate.get("action") == "getNumberV2" and "BAD_ACTION" in str(exc) and index + 1 < len(unique):
-                logger.warning("[SMSBower] getNumberV2 不被当前接口支持，回退兼容接口")
+            error_text = str(exc).upper()
+            v2_compatibility_error = any(
+                code in error_text for code in ("BAD_ACTION", "BAD_SERVICE", "WRONG_SERVICE")
+            )
+            if (
+                candidate.get("action") == "getNumberV2"
+                and v2_compatibility_error
+                and index + 1 < len(unique)
+            ):
+                logger.warning(
+                    "[SMSBower] getNumberV2 服务兼容错误，回退到 getNumber 接口"
+                )
                 continue
             raise
     raise SmsProviderError("SMSBower 没有可用的取号请求方案")
