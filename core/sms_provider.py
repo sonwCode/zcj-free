@@ -1032,29 +1032,50 @@ def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list
     min_price_usd, max_price_usd = _provider_price_bounds_usd(
         "smsbower", cny_to_usd_rate=cny_to_usd_rate
     )
-    rows = _smsbower_price_rows(http, service)
-    stocked = [row for row in rows if row.get("count", 0) > 0]
-    candidates = [
-        row for row in stocked
-        if (max_price_usd is None or row["cost"] <= max_price_usd)
-        and (min_price_usd is None or row["cost"] >= min_price_usd)
-    ]
+    try:
+        refresh_attempts = max(1, _setting_int("SMS_PREFLIGHT_RETRIES", 2, 1))
+    except Exception:
+        refresh_attempts = 2
+    try:
+        refresh_delay = max(0, _setting_int("SMS_PREFLIGHT_RETRY_DELAY", 2, 0))
+    except Exception:
+        refresh_delay = 2
 
-    cooled = [
-        row for row in candidates
-        if _country_is_recently_rejected({
-            "provider": "smsbower",
-            "service": service,
-            "country": row["country"],
-        })
-    ]
-    if cooled:
-        cooled_ids = sorted({row["country"] for row in cooled})
-        candidates = [row for row in candidates if row["country"] not in cooled_ids]
-        logger.info(
-            "[SMSBower] 过滤近期 VoIP 拒绝国家：countries=%s",
-            ",".join(cooled_ids),
+    candidates: list[dict] = []
+    stocked: list[dict] = []
+    for refresh_attempt in range(1, refresh_attempts + 1):
+        rows = _smsbower_price_rows(http, service)
+        stocked = [row for row in rows if row.get("count", 0) > 0]
+        candidates = [
+            row for row in stocked
+            if (max_price_usd is None or row["cost"] <= max_price_usd)
+            and (min_price_usd is None or row["cost"] >= min_price_usd)
+        ]
+
+        cooled = [
+            row for row in candidates
+            if _country_is_recently_rejected({
+                "provider": "smsbower",
+                "service": service,
+                "country": row["country"],
+            })
+        ]
+        if cooled:
+            cooled_ids = sorted({row["country"] for row in cooled})
+            candidates = [row for row in candidates if row["country"] not in cooled_ids]
+            logger.info(
+                "[SMSBower] 过滤近期 VoIP 拒绝国家：countries=%s",
+                ",".join(cooled_ids),
+            )
+        if candidates or refresh_attempt >= refresh_attempts:
+            break
+        logger.warning(
+            "[SMSBower] 当前价格快照没有符合人民币上限的国家，刷新库存：attempt=%s/%s delay=%ss",
+            refresh_attempt, refresh_attempts, refresh_delay,
         )
+        if refresh_delay:
+            _stop_sleep(refresh_delay)
+
     random.shuffle(candidates)
     logger.info(
         "[SMSBower] 随机国家候选：service=%s count=%s price_usd=%s..%s price_cny=%s..%s rate_usd_cny=%s fx_source=%s",
