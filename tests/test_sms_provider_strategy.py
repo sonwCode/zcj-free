@@ -248,29 +248,31 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.SMS_MAX_PRICE = "0.25"
         codex_config.SMS_PREFLIGHT_RETRIES = 2
         codex_config.SMS_PREFLIGHT_RETRY_DELAY = 0
-        http = _Http([
-            _Response(json.dumps({"117": {"dr": {"cost": "0.04", "count": 20}}})),
-            _Response(json.dumps({"117": {"dr": {"cost": "0.04", "count": 20}}})),
-            _Response(json.dumps({"117": {"dr": {"cost": "0.04", "count": 20}}})),
-            _Response(json.dumps({"6": {"dr": {"cost": "0.023", "count": 20}}})),
-            _Response(json.dumps({
-                "activationId": "refreshed-budget-1",
-                "phoneNumber": "15550006666",
-                "countryCode": "6",
-                "activationCost": "0.023",
-                "currency": "USD",
-            })),
-        ])
+        high_snapshot = json.dumps({"117": {"dr": {"cost": "0.04", "count": 20}}})
+        http = _Http(
+            [_Response(high_snapshot) for _ in range(11)]
+            + [
+                _Response(json.dumps({"6": {"dr": {"cost": "0.023", "count": 20}}})),
+                _Response(json.dumps({
+                    "activationId": "refreshed-budget-1",
+                    "phoneNumber": "15550006666",
+                    "countryCode": "6",
+                    "activationCost": "0.023",
+                    "currency": "USD",
+                })),
+            ]
+        )
 
         with patch.object(sms_provider.random, "shuffle", side_effect=lambda values: None):
             activation_id, phone = sms_provider.acquire_number(http=http)
 
         self.assertEqual((activation_id, phone), ("refreshed-budget-1", "15550006666"))
-        self.assertEqual([call["params"]["action"] for call in http.calls], [
-            "getPrices", "getPrices", "getPrices", "getPrices", "getNumberV2",
-        ])
-        self.assertEqual(http.calls[4]["params"]["country"], "6")
-        self.assertEqual(http.calls[4]["params"]["maxPrice"], "0.034722")
+        self.assertEqual(
+            [call["params"]["action"] for call in http.calls],
+            ["getPrices"] * 12 + ["getNumberV2"],
+        )
+        self.assertEqual(http.calls[12]["params"]["country"], "6")
+        self.assertEqual(http.calls[12]["params"]["maxPrice"], "0.034722")
 
     def test_preflight_never_queries_live_inventory(self):
         codex_config.SMS_PROVIDER_CHAIN = "smsbower"

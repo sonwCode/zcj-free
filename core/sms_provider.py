@@ -1033,10 +1033,10 @@ def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list
         "smsbower", cny_to_usd_rate=cny_to_usd_rate
     )
     try:
-        # SMSBower 价格快照会异步刷新；至少观察四个快照，避免短暂高价快照误报无号。
-        refresh_attempts = max(4, _setting_int("SMS_PREFLIGHT_RETRIES", 2, 1))
+        # SMSBower 价格快照会异步刷新；至少观察约24秒，避免短暂高价快照误报无号。
+        refresh_attempts = max(12, _setting_int("SMS_PREFLIGHT_RETRIES", 2, 1))
     except Exception:
-        refresh_attempts = 4
+        refresh_attempts = 12
     try:
         refresh_delay = max(0, _setting_int("SMS_PREFLIGHT_RETRY_DELAY", 2, 0))
     except Exception:
