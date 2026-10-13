@@ -6731,6 +6731,13 @@ function renderSmsProviderChainField(f) {
     + '<input type="hidden" data-key="' + attrEsc(f.key) + '" value="' + attrEsc(smsProviderChainStoredValue(f)) + '">'
     + '</div></div>';
 }
+function smsProviderChainCurrentValue(root) {
+  const hidden = root.querySelector('input[data-key="SMS_PROVIDER_CHAIN"]');
+  return smsProviderChainFieldValue({
+    key: 'SMS_PROVIDER_CHAIN',
+    value: hidden ? hidden.value : '',
+  });
+}
 function setSmsProviderChainValue(root, chain) {
   const normalized = parseSmsProviderChain(chain.join(','));
   const hidden = root.querySelector('input[data-key="SMS_PROVIDER_CHAIN"]');
@@ -6746,8 +6753,7 @@ function setSmsProviderChainValue(root, chain) {
 function updateSmsProviderChainFromCheckbox(input) {
   const root = input.closest('[data-config-provider-chain]');
   if (!root) return;
-  const hidden = root.querySelector('input[data-key="SMS_PROVIDER_CHAIN"]');
-  const current = parseSmsProviderChain(hidden ? hidden.value : '');
+  const current = smsProviderChainCurrentValue(root);
   const value = input.dataset.providerChainOption;
   const next = input.checked
     ? (current.includes(value) ? current : current.concat(value))
@@ -6760,8 +6766,7 @@ function updateSmsProviderChainFromCheckbox(input) {
   setSmsProviderChainValue(root, next);
 }
 function moveSmsProviderChain(value, direction, root) {
-  const hidden = root.querySelector('input[data-key="SMS_PROVIDER_CHAIN"]');
-  const chain = parseSmsProviderChain(hidden ? hidden.value : '');
+  const chain = smsProviderChainCurrentValue(root);
   const index = chain.indexOf(value);
   const target = direction === 'up' ? index - 1 : index + 1;
   if (index < 0 || target < 0 || target >= chain.length) return;
