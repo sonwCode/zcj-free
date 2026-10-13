@@ -79,6 +79,15 @@ class CloakOtpResendTests(unittest.TestCase):
             password_end,
         )
 
+    def test_registration_otp_wait_uses_existing_window_with_floor(self):
+        body = _function_source("_run_cloak_registration_impl")
+        otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
+        self.assertIn("OTP_MAX_WAIT", otp_loop)
+        self.assertIn("max_wait=register_otp_wait", otp_loop)
+        self.assertIn("max(180", otp_loop)
+        self.assertIn('human_delay("otp_input", minimum=0.2, maximum=0.6)', otp_loop)
+        self.assertIn("_click_continue(driver, timeout=3)", otp_loop)
+
     def test_failed_registration_skips_broken_pipe_cleanup(self):
         body = _function_source("_run_cloak_registration_impl")
         self.assertIn("hard_cleanup = True", body)

@@ -214,6 +214,60 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual([call["params"].get("action") for call in http.calls], ["getPrices"])
         self.assertFalse(http.closed)
 
+    def test_preflight_empty_country_randomizes_within_maximum_when_bounds_conflict(self):
+        codex_config.SMS_COUNTRY = ""
+        codex_config.SMSBOWER_RANDOM_COUNTRY = False
+        codex_config.SMSBOWER_MIN_PRICE = "0.86"
+        codex_config.SMS_MAX_PRICE = "0.28"
+        http = _Http([_Response(json.dumps({
+            "12": {"dr": {"cost": 0.004, "count": 711}},
+            "6": {"dr": {"cost": 0.023, "count": 266}},
+            "36": {"dr": {"cost": 0.031, "count": 332}},
+            "187": {"dr": {"cost": 0.188, "count": 230}},
+        }))])
+
+        with patch.object(sms_provider, "_cny_to_usd_rate", return_value=(Decimal("0.149125"), "test")):
+            result = sms_provider.preflight_sms_dependency(http=http)
+
+        self.assertTrue(result["available"])
+        self.assertIsNone(result["country"])
+        self.assertEqual(set(result["countries"]), {"12", "6", "36"})
+        self.assertNotIn("187", result["countries"])
+        self.assertEqual([call["params"].get("action") for call in http.calls], ["getPrices"])
+
+    def test_acquire_empty_country_randomizes_and_preserves_hard_maximum(self):
+        codex_config.SMS_COUNTRY = ""
+        codex_config.SMSBOWER_RANDOM_COUNTRY = False
+        codex_config.SMSBOWER_MIN_PRICE = "0.86"
+        codex_config.SMS_MAX_PRICE = "0.28"
+        codex_config.SMSBOWER_USE_V2 = True
+        prices = {
+            "12": {"dr": {"cost": 0.004, "count": 711}},
+            "6": {"dr": {"cost": 0.023, "count": 266}},
+            "36": {"dr": {"cost": 0.031, "count": 332}},
+            "187": {"dr": {"cost": 0.188, "count": 230}},
+        }
+        http = _Http([
+            _Response(json.dumps(prices)),
+            _Response(json.dumps({
+                "activationId": "random-budget-1",
+                "phoneNumber": "15550009999",
+                "activationCost": 0.02,
+                "currency": "USD",
+            })),
+        ])
+
+        with patch.object(sms_provider, "_cny_to_usd_rate", return_value=(Decimal("0.149125"), "test")):
+            with patch.object(sms_provider.random, "shuffle", side_effect=lambda rows: None) as shuffle:
+                activation_id, phone = sms_provider.acquire_number(http=http)
+
+        state = sms_provider.get_activation_info(activation_id)
+        self.assertEqual((activation_id, phone), ("random-budget-1", "15550009999"))
+        self.assertIn(state["country"], {"12", "6", "36"})
+        self.assertTrue(shuffle.called)
+        self.assertLessEqual(Decimal(http.calls[-1]["params"]["maxPrice"]), Decimal("0.041755"))
+        self.assertNotIn("minPrice", http.calls[-1]["params"])
+
     def test_preflight_smsbower_no_inventory_does_not_call_get_number(self):
         codex_config.SMS_PROVIDER_CHAIN = "smsbower"
         codex_config.SMSBOWER_RANDOM_COUNTRY = False
@@ -639,8 +693,9 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
         codex_config.SMSBOWER_USD_CNY_RATE = "7.2"
         codex_config.SMSBOWER_MIN_PRICE = "0.30"
-        with self.assertRaises(sms_provider.SmsProviderConfigurationError):
-            sms_provider._smsbower_price_bounds_usd()
+        minimum, maximum = sms_provider._smsbower_price_bounds_usd()
+        self.assertIsNone(minimum)
+        self.assertEqual(maximum, Decimal("0.25") / Decimal("7.2"))
 
     def test_wait_filters_history_and_retries_once_with_zero_interval(self):
         sms_provider._remember_activation(

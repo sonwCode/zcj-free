@@ -248,6 +248,12 @@ def _run_cloak_registration_impl(
             )))
         except (TypeError, ValueError):
             max_otp_attempts = 4
+        try:
+            register_otp_wait = max(180, min(300, int(
+                getattr(_email_cfg, "OTP_MAX_WAIT", 90) or 90
+            )))
+        except (TypeError, ValueError):
+            register_otp_wait = 180
         otp_submitted_attempts = 0
         otp_resend_count = 0
         otp_final_outcome = "not_submitted"
@@ -258,6 +264,7 @@ def _run_cloak_registration_impl(
                     current_otp = wait_for_otp(
                         email,
                         after_ts=otp_after_ts,
+                        max_wait=register_otp_wait,
                         exclude_codes=used_otps,
                     )
                 except Exception as exc:
@@ -304,10 +311,10 @@ def _run_cloak_registration_impl(
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
             _check_manual_stop()
-            human_delay("otp_input")
+            human_delay("otp_input", minimum=0.2, maximum=0.6)
             otp_submitted_attempts += 1
             try:
-                _click_continue(driver)
+                _click_continue(driver, timeout=3)
                 logger.info("[Cloak注册][OTP] 已提交邮箱验证码，等待资料页或登录态")
             except Exception as exc:
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])

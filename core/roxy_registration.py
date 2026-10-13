@@ -1693,7 +1693,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
     return 'accepted'
 
 
-def _click_continue(driver) -> None:
+def _click_continue(driver, timeout: int = 20) -> None:
     _click_any(driver, [
         "button[type='submit']",
         "//button[@data-dd-action-name='Continue']",
@@ -1705,7 +1705,7 @@ def _click_continue(driver) -> None:
         "//button[contains(., 'Sign up')]",
         "//button[contains(., 'Create')]",
         "//button[contains(., 'Next')]",
-    ], timeout=20)
+    ], timeout=timeout)
 
 
 def _maybe_accept(driver) -> None:
