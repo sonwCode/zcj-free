@@ -72,7 +72,6 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         acquire = TEXT.index("sms_provider.acquire_number(")
         release = TEXT.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)")
         self.assertLess(acquire, release)
-        self.assertIn("preferred_provider=preferred_provider", loop_block)
         self.assertIn("_prepare_and_submit_add_phone(", TEXT)
 
     def test_fraud_guard_uses_longer_configurable_backoff(self):
@@ -208,6 +207,7 @@ class ResubmitLoopWiringTests(unittest.TestCase):
         self.assertLess(next_attempt, preflight)
         self.assertLess(preflight, acquire)
         self.assertLess(acquire, release)
+        self.assertIn("preferred_provider=preferred_provider", loop_block)
         self.assertLess(loop_block.index("configured_country = str("), next_attempt)
 
     def test_all_codex_drivers_capture_country_before_retry_loop(self):
