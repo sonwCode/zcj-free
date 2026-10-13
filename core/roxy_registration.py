@@ -1766,9 +1766,12 @@ def _has_access_token(driver) -> bool:
 
 def _is_profile_like(snapshot: dict) -> bool:
     """资料页识别：兼容 about-you/profile；年龄/生日控件可能不是 input，而是 React Aria widget。"""
+    if not isinstance(snapshot, dict):
+        return False
     url = str(snapshot.get('url') or '').lower()
-    inputs = snapshot.get('inputs') or []
-    widgets = snapshot.get('widgets') or []
+    # 页面导航期间 execute_script 可能返回混合快照，忽略非对象项。
+    inputs = [item for item in (snapshot.get('inputs') or []) if isinstance(item, dict)]
+    widgets = [item for item in (snapshot.get('widgets') or []) if isinstance(item, dict)]
     attrs = ' '.join(
         ' '.join(str(i.get(k) or '') for k in ('name', 'id', 'placeholder', 'autocomplete', 'aria', 'type')).lower()
         for i in inputs

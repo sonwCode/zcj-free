@@ -11,7 +11,7 @@ TEXT = SOURCE.read_text(encoding="utf-8")
 
 def _load_profile_helpers():
     tree = ast.parse(TEXT, filename=str(SOURCE))
-    names = {"_is_email_verified_page", "_complete_profile_page"}
+    names = {"_is_email_verified_page", "_complete_profile_page", "_is_profile_like"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     ns = {
         "time": __import__("time"),
@@ -19,7 +19,6 @@ def _load_profile_helpers():
         "_stop_aware_sleep": lambda _seconds: None,
         "_has_access_token": lambda _driver: False,
         "_page_snapshot": lambda driver: driver.snapshots.pop(0),
-        "_is_profile_like": lambda snap: bool(snap.get("profile")),
         "_log_prefix": lambda _driver: "[test]",
         "logger": Mock(),
         "driver": None,
@@ -30,6 +29,22 @@ def _load_profile_helpers():
 
 
 class EmailVerifiedProfileNavigationTests(unittest.TestCase):
+    def test_profile_detector_ignores_malformed_snapshot_items(self):
+        ns = _load_profile_helpers()
+        detector = ns["_is_profile_like"]
+
+        self.assertTrue(detector({
+            "url": "https://auth.openai.com/about-you",
+            "inputs": ["stale-input", {"name": "name"}],
+            "widgets": ["stale-widget", {"role": "spinbutton"}],
+        }))
+        self.assertFalse(detector({
+            "url": "https://auth.openai.com/about-you",
+            "inputs": ["stale-input"],
+            "widgets": ["stale-widget"],
+        }))
+        self.assertFalse(detector(["not-a-snapshot"]))
+
     def test_recognizes_job_67_email_verified_snapshot(self):
         ns = _load_profile_helpers()
         self.assertTrue(ns["_is_email_verified_page"]({
