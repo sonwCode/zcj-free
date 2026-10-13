@@ -326,7 +326,7 @@ def _phone_location_metadata(phone: str) -> dict:
 
 
 def _price_limit_metadata(provider: str) -> dict:
-    """把人民币配置、实时换算后的 USD 边界和来源写入激活快照。"""
+    """把供应商实际使用的 USD 价格边界写入激活快照。"""
     provider = str(provider or "").strip().lower()
     result = {}
     try:
@@ -340,6 +340,12 @@ def _price_limit_metadata(provider: str) -> dict:
         if min_usd is None and max_usd is None:
             return result
         result["price_limit_currency"] = "USD"
+        if provider == "smsbower":
+            result["price_limit_source"] = "SMSBower maxPrice"
+            if max_usd is not None:
+                result["price_limit_configured_max"] = format(max_usd, "f")
+                result["price_limit_configured_currency"] = "USD"
+            return result
         result["price_limit_source"] = "SMS_MAX_PRICE CNY converted with " + _cny_to_usd_rate()[1]
         _, configured_max = _configured_price_bounds_cny(provider)
         if configured_max is not None:
@@ -823,6 +829,12 @@ def _provider_price_bounds_usd(
     *,
     cny_to_usd_rate: Decimal | None = None,
 ) -> tuple[Decimal | None, Decimal | None]:
+    provider = str(provider or "").strip().lower()
+    if provider == "smsbower":
+        return (
+            _smsbower_price_bound("SMSBOWER_MIN_PRICE"),
+            _smsbower_price_bound("SMS_MAX_PRICE"),
+        )
     min_cny, max_cny = _configured_price_bounds_cny(provider)
     if min_cny is None and max_cny is None:
         return None, None
@@ -835,7 +847,11 @@ def _provider_price_bounds_usd(
 
 
 def _smsbower_price_bounds_usd() -> tuple[Decimal | None, Decimal | None]:
-    return _provider_price_bounds_usd("smsbower")
+    # SMSBower 的 handler_api 价格字段本身就是 USD，直接透传配置值。
+    return (
+        _smsbower_price_bound("SMSBOWER_MIN_PRICE"),
+        _smsbower_price_bound("SMS_MAX_PRICE"),
+    )
 
 
 def _tiger_price_bounds_usd() -> tuple[Decimal | None, Decimal | None]:
@@ -853,6 +869,11 @@ def _sms_service_code(service: str | None = None) -> str:
     if not service_code:
         raise SmsProviderConfigurationError("SMS_SERVICE 不能为空")
     return service_code
+
+
+def _smsbower_country(country: str | None = None) -> str:
+    """SMSBower handler_api 需要具体国家；10 与参考项目保持一致。"""
+    return str(country or getattr(_cfg, "SMS_COUNTRY", "") or "10").strip() or "10"
 
 
 def _smsbower_price_rows(http: CurlSession, service: str) -> list[dict]:
@@ -1295,11 +1316,9 @@ def preflight_sms_dependency(
         raise SmsProviderConfigurationError("没有可用的短信平台配置")
     provider = providers[0]
     service_code = _sms_service_code(service)
-    configured_country = str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
-    random_country = provider == "smsbower" and (
-        bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) or not configured_country
-    )
-    requested_country = "" if random_country else configured_country
+    requested_country = _smsbower_country(country) if provider == "smsbower" else str(
+        country or getattr(_cfg, "SMS_COUNTRY", "") or ""
+    ).strip()
     logger.info(
         "[SMS] 库存与价格范围交由供应商取号接口处理：provider=%s country=%s",
         provider, requested_country or "provider-default",
@@ -1342,12 +1361,10 @@ def classify_sms_exception(reason: object) -> dict:
 
 def _smsbower_number_params(service: str | None, country: str | None) -> dict:
     service_code = _sms_service_code(service)
-    configured_country = str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
-    random_country = bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) or not configured_country
     params = {
         "action": "getNumberV2" if bool(getattr(_cfg, "SMSBOWER_USE_V2", True)) else "getNumber",
         "service": service_code,
-        "country": "" if random_country else configured_country,
+        "country": _smsbower_country(country),
     }
     min_price_usd, max_price_usd = _smsbower_price_bounds_usd()
     for key, value in (
@@ -1580,9 +1597,8 @@ def _acquire_number_for_provider(
 
     attempts = _setting_int("SMS_NUMBER_ACQUIRE_RETRIES", 3, 1)
     service_code = _sms_service_code(service)
-    configured_country = str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
-    random_country_mode = bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) or not configured_country
-    selected_country = "" if random_country_mode else configured_country
+    selected_country = _smsbower_country(country)
+    random_country_mode = False
     last_no_numbers: SmsNoNumbersError | None = None
     if random_country_mode:
         attempts = max(
