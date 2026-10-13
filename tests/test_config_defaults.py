@@ -109,6 +109,14 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         self.assertEqual(fields["BROWSER_JS_COVERAGE_LOG"]["type"], "bool")
         self.assertEqual(fields["BROWSER_JS_COVERAGE_MAX_ENTRIES"]["type"], "int")
 
+    def test_webui_groups_tiger_sms_fields(self):
+        fields = {field["key"]: field for field in config_editor.EDITABLE_FIELDS}
+        self.assertEqual(fields["TIGER_SMS_API_KEY"]["storage"], "env")
+        self.assertTrue(fields["TIGER_SMS_API_KEY"]["secret"])
+        self.assertEqual(fields["TIGER_SMS_RANDOM_COUNTRY"]["type"], "bool")
+        self.assertEqual(fields["TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS"]["type"], "int")
+        self.assertEqual(fields["TIGER_SMS_RANDOM_COUNTRY"]["group"], "接码平台")
+
     def test_browser_data_saver_defaults_block_google_gsi(self):
         with _browser_source_defaults():
             self.assertIn(

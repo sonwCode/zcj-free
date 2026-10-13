@@ -800,6 +800,14 @@ EDITABLE_FIELDS = [
         "label": "Tiger SMS 使用 V2 取号", "help": "优先读取带价格的 JSON 响应，失败时自动回退 getNumber",
     },
     {
+        "key": "TIGER_SMS_RANDOM_COUNTRY", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "Tiger 按价格随机选国家", "help": "未指定国家时，从 Tiger 当前价格和库存候选中随机取号；最高价跟随通用接码设置",
+    },
+    {
+        "key": "TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "Tiger 随机国家候选数", "help": "单次取号最多尝试的价格范围内 Tiger 国家数量",
+    },
+    {
         "key": "TIGER_SMS_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "Tiger SMS 供应商筛选", "help": "可选，供应商 ID 用逗号分隔；留空由平台自动选择",
     },
