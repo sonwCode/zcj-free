@@ -1921,6 +1921,39 @@
     .config-select-v2-field select {
       max-width: 100%;
     }
+    .config-provider-chain {
+      display: grid; gap: 10px; margin-top: 6px; padding: 12px;
+      border: 1px solid #ebeef5; border-radius: 8px; background: #fafbfc;
+    }
+    .config-provider-chain-options {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+    }
+    .config-provider-chain-option {
+      display: flex; align-items: center; gap: 8px; min-height: 36px;
+      padding: 8px 10px; border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; cursor: pointer; box-sizing: border-box;
+    }
+    .config-provider-chain-option:has(input:checked) {
+      border-color: #377DFF; background: #f0f6ff; color: #303133;
+    }
+    .config-provider-chain-option input { margin: 0; accent-color: #377DFF; }
+    .config-provider-chain-order {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+      min-height: 28px; color: #606266; font-size: 12px;
+    }
+    .config-provider-chain-chip {
+      display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px;
+      border: 1px solid #cfe0ff; border-radius: 999px; background: #fff; color: #377DFF;
+    }
+    .config-provider-chain-chip button {
+      width: 20px; height: 20px; padding: 0; border: 1px solid #cfe0ff; border-radius: 50%;
+      background: #fff; color: #377DFF; cursor: pointer; line-height: 1;
+    }
+    .config-provider-chain-chip button:hover { background: #ecf5ff; }
+    .config-provider-chain-empty { color: #909399; }
+    @media (max-width: 600px) {
+      .config-provider-chain-options { grid-template-columns: 1fr; }
+    }
     .config-section-v2-body label.fld {
       margin-bottom: 0;
       min-width: 0; max-width: 100%; overflow: visible;
@@ -6609,7 +6642,106 @@ function renderConfigRecommendedLinks(f) {
   if (!items) return '';
   return `<div class="config-recommendations" role="note"><span class="config-recommendations-title">推荐家宽</span>${items}</div>`;
 }
+const SMS_PROVIDER_CHAIN_OPTIONS = [
+  { value: 'smsbower', label: 'SMSBower' },
+  { value: 'tiger', label: 'Tiger SMS' },
+];
+function parseSmsProviderChain(value) {
+  const allowed = new Set(SMS_PROVIDER_CHAIN_OPTIONS.map(item => item.value));
+  const result = [];
+  String(value || '').split(',').forEach(item => {
+    const provider = item.trim().toLowerCase();
+    if (allowed.has(provider) && !result.includes(provider)) result.push(provider);
+  });
+  return result;
+}
+function smsProviderChainLabel(value) {
+  const item = SMS_PROVIDER_CHAIN_OPTIONS.find(option => option.value === value);
+  return item ? item.label : value;
+}
+function smsProviderChainFieldValue(f) {
+  const pending = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key)
+    ? CONFIG_PENDING_UPDATES[f.key]
+    : f.value;
+  const configured = parseSmsProviderChain(pending);
+  if (configured.length) return configured;
+  const primaryField = (CONFIG || []).find(item => item.key === 'SMS_PROVIDER');
+  const primaryValue = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, 'SMS_PROVIDER')
+    ? CONFIG_PENDING_UPDATES.SMS_PROVIDER
+    : (primaryField ? primaryField.value : 'smsbower');
+  const primary = parseSmsProviderChain(primaryValue)[0] || 'smsbower';
+  return [primary].concat(SMS_PROVIDER_CHAIN_OPTIONS.map(item => item.value).filter(value => value !== primary));
+}
+function renderSmsProviderChainOrder(chain) {
+  if (!chain.length) return '<span class="config-provider-chain-empty">至少选择一个短信平台</span>';
+  return chain.map((value, index) => {
+    let controls = '';
+    if (index > 0) {
+      controls += '<button type="button" data-provider-chain-move="up" data-provider-chain-value="' + attrEsc(value) + '" aria-label="上移 ' + attrEsc(smsProviderChainLabel(value)) + '" title="上移">&#8593;</button>';
+    }
+    if (index < chain.length - 1) {
+      controls += '<button type="button" data-provider-chain-move="down" data-provider-chain-value="' + attrEsc(value) + '" aria-label="下移 ' + attrEsc(smsProviderChainLabel(value)) + '" title="下移">&#8595;</button>';
+    }
+    return '<span class="config-provider-chain-chip"><span>' + (index + 1) + '. ' + esc(smsProviderChainLabel(value)) + '</span>' + controls + '</span>';
+  }).join('');
+}
+function renderSmsProviderChainField(f) {
+  const chain = smsProviderChainFieldValue(f);
+  const selected = new Set(chain);
+  const options = SMS_PROVIDER_CHAIN_OPTIONS.map(option => {
+    return '<label class="config-provider-chain-option">'
+      + '<input type="checkbox" data-provider-chain-option="' + attrEsc(option.value) + '"'
+      + (selected.has(option.value) ? ' checked' : '') + '>'
+      + '<span>' + esc(option.label) + '</span></label>';
+  }).join('');
+  return '<div class="fld config-provider-chain-field">'
+    + esc(f.label)
+    + '<span class="hint">' + esc(f.help || '') + '</span>'
+    + '<div class="config-provider-chain" data-config-provider-chain>'
+    + '<div class="config-provider-chain-options">' + options + '</div>'
+    + '<div class="config-provider-chain-order" data-provider-chain-order>' + renderSmsProviderChainOrder(chain) + '</div>'
+    + '<input type="hidden" data-key="' + attrEsc(f.key) + '" value="' + attrEsc(chain.join(',')) + '">'
+    + '</div></div>';
+}
+function setSmsProviderChainValue(root, chain) {
+  const normalized = parseSmsProviderChain(chain.join(','));
+  const hidden = root.querySelector('input[data-key="SMS_PROVIDER_CHAIN"]');
+  if (!hidden) return;
+  hidden.value = normalized.join(',');
+  CONFIG_PENDING_UPDATES.SMS_PROVIDER_CHAIN = hidden.value;
+  root.querySelectorAll('[data-provider-chain-option]').forEach(input => {
+    input.checked = normalized.includes(input.dataset.providerChainOption);
+  });
+  const order = root.querySelector('[data-provider-chain-order]');
+  if (order) order.innerHTML = renderSmsProviderChainOrder(normalized);
+}
+function updateSmsProviderChainFromCheckbox(input) {
+  const root = input.closest('[data-config-provider-chain]');
+  if (!root) return;
+  const hidden = root.querySelector('input[data-key="SMS_PROVIDER_CHAIN"]');
+  const current = parseSmsProviderChain(hidden ? hidden.value : '');
+  const value = input.dataset.providerChainOption;
+  const next = input.checked
+    ? (current.includes(value) ? current : current.concat(value))
+    : current.filter(item => item !== value);
+  if (!next.length) {
+    input.checked = true;
+    showToast('至少保留一个短信平台');
+    return;
+  }
+  setSmsProviderChainValue(root, next);
+}
+function moveSmsProviderChain(value, direction, root) {
+  const hidden = root.querySelector('input[data-key="SMS_PROVIDER_CHAIN"]');
+  const chain = parseSmsProviderChain(hidden ? hidden.value : '');
+  const index = chain.indexOf(value);
+  const target = direction === 'up' ? index - 1 : index + 1;
+  if (index < 0 || target < 0 || target >= chain.length) return;
+  [chain[index], chain[target]] = [chain[target], chain[index]];
+  setSmsProviderChainValue(root, chain);
+}
 function renderConfigPlainFieldV2(f) {
+  if (f.key === 'SMS_PROVIDER_CHAIN') return renderSmsProviderChainField(f);
   const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
   let control = '';
   if (Array.isArray(f.choices) && f.choices.length) {
@@ -7011,6 +7143,14 @@ function bindConfigLayoutV2() {
   if (layout && !layout.dataset.epBound) {
     layout.dataset.epBound = '1';
     layout.addEventListener('click', (e) => {
+      const chainMove = e.target.closest('[data-provider-chain-move]');
+      if (chainMove) {
+        e.preventDefault();
+        e.stopPropagation();
+        const root = chainMove.closest('[data-config-provider-chain]');
+        moveSmsProviderChain(chainMove.dataset.providerChainValue, chainMove.dataset.providerChainMove, root);
+        return;
+      }
       const codexTab = e.target.closest('[data-codex-section-v2]');
       if (codexTab) {
         e.preventDefault();
@@ -7051,6 +7191,10 @@ function bindConfigLayoutV2() {
         setCodexOauthDriverValue(oauthItem.dataset.codexOauthValue);
         return;
       }
+    });
+    layout.addEventListener('change', (e) => {
+      const input = e.target.closest('[data-provider-chain-option]');
+      if (input) updateSmsProviderChainFromCheckbox(input);
     });
   }
   if (!document.documentElement.dataset.configEpCloseBound) {

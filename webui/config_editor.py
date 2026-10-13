@@ -719,7 +719,7 @@ EDITABLE_FIELDS = [
 
     {
         "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "短信平台（兼容首选）", "help": "单平台模式下的首选；启用 SMS_PROVIDER_CHAIN 后由链配置决定顺序",
+        "label": "兼容首选平台（单平台时使用）", "help": "仅当短信平台有序链留空时使用；配置有序链后，以有序链的勾选和顺序为准",
         "choices": [
             {"value": "smsbower", "label": "SMSBower"},
             {"value": "tiger", "label": "Tiger SMS"},
@@ -727,7 +727,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "SMS_PROVIDER_CHAIN", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "短信平台有序链", "help": "逗号分隔，例如 smsbower,tiger；逐个平台尝试，不会为同一号码并发采购",
+        "label": "启用的短信平台与顺序", "help": "勾选要使用的平台并调整顺序；保存后按顺序逐个平台尝试，不会为同一号码并发采购。默认顺序跟随兼容首选",
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
