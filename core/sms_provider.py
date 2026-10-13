@@ -1299,7 +1299,7 @@ def preflight_sms_dependency(
     random_country = provider == "smsbower" and (
         bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) or not configured_country
     )
-    requested_country = "0" if random_country else configured_country
+    requested_country = "" if random_country else configured_country
     logger.info(
         "[SMS] 库存与价格范围交由供应商取号接口处理：provider=%s country=%s",
         provider, requested_country or "provider-default",
@@ -1347,7 +1347,7 @@ def _smsbower_number_params(service: str | None, country: str | None) -> dict:
     params = {
         "action": "getNumberV2" if bool(getattr(_cfg, "SMSBOWER_USE_V2", True)) else "getNumber",
         "service": service_code,
-        "country": "0" if random_country else configured_country,
+        "country": "" if random_country else configured_country,
     }
     min_price_usd, max_price_usd = _smsbower_price_bounds_usd()
     for key, value in (
@@ -1582,7 +1582,7 @@ def _acquire_number_for_provider(
     service_code = _sms_service_code(service)
     configured_country = str(country or getattr(_cfg, "SMS_COUNTRY", "") or "").strip()
     random_country_mode = bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)) or not configured_country
-    selected_country = "0" if random_country_mode else configured_country
+    selected_country = "" if random_country_mode else configured_country
     last_no_numbers: SmsNoNumbersError | None = None
     if random_country_mode:
         attempts = max(
@@ -1602,7 +1602,7 @@ def _acquire_number_for_provider(
             last_no_numbers = exc
             if random_country_mode and attempt < attempts:
                 logger.info(
-                    "[SMSBower] country=0 无号，交由供应商再次随机取号：attempt=%s/%s",
+                    "[SMSBower] country留空无号，交由供应商再次随机取号：attempt=%s/%s",
                     attempt, attempts,
                 )
                 continue
@@ -1643,7 +1643,7 @@ def _acquire_number_for_provider(
     if random_country_mode:
         detail = f"；最后一次取号结果：{last_no_numbers}" if last_no_numbers else ""
         raise SmsNoNumbersError(
-            f"供应商country=0随机取号重试 {attempts} 次后仍无可用号码{detail}"
+            f"供应商随机取号重试 {attempts} 次后仍无可用号码{detail}"
         ) from last_no_numbers
     raise SmsNumberRejectedError(f"连续 {attempts} 次取到的号码或供应商层级均被策略排除")
 

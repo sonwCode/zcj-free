@@ -211,7 +211,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(result["probe"], "deferred_to_get_number")
         self.assertIsNone(result["available"])
         self.assertTrue(result["deferred"])
-        self.assertEqual(result["country"], "0")
+        self.assertIsNone(result["country"])
         self.assertEqual(http.calls, [])
         self.assertFalse(http.closed)
 
@@ -224,7 +224,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         with patch.object(sms_provider, "_cny_to_usd_rate", return_value=(Decimal("0.149125"), "test")):
             params = sms_provider._smsbower_number_params("dr", None)
 
-        self.assertEqual(params["country"], "0")
+        self.assertEqual(params["country"], "")
         self.assertEqual(params["minPrice"], "0.128248")
         self.assertEqual(params["maxPrice"], "0.041755")
 
@@ -250,7 +250,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(state["country"], "36")
         self.assertEqual(len(http.calls), 1)
         self.assertEqual(http.calls[0]["params"]["action"], "getNumberV2")
-        self.assertEqual(http.calls[0]["params"]["country"], "0")
+        self.assertEqual(http.calls[0]["params"]["country"], "")
         self.assertEqual(http.calls[0]["params"]["maxPrice"], "0.041755")
         self.assertEqual(state["price_validated"], True)
 
@@ -433,7 +433,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual((config["status"], config["error_code"], config["retryable"]), ("blocked", "sms_provider_configuration", False))
         self.assertEqual((retryable["status"], retryable["error_code"], retryable["retryable"]), ("failed", "sms_no_numbers", True))
 
-    def test_random_country_retries_direct_country_zero_requests(self):
+    def test_random_country_retries_direct_blank_country_requests(self):
         codex_config.SMS_PROVIDER_CHAIN = "smsbower"
         codex_config.SMS_MAX_PRICE = "0.25"
         codex_config.SMSBOWER_RANDOM_COUNTRY_ATTEMPTS = 3
@@ -452,7 +452,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         activation_id, phone = sms_provider.acquire_number(http=http)
 
         self.assertEqual((activation_id, phone), ("a-random", "15550003"))
-        self.assertEqual([call["params"]["country"] for call in http.calls], ["0", "0", "0"])
+        self.assertEqual([call["params"]["country"] for call in http.calls], ["", "", ""])
         self.assertEqual(
             [call["params"]["action"] for call in http.calls],
             ["getNumberV2", "getNumber", "getNumberV2"],
@@ -474,7 +474,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual((activation_id, phone), ("legacy-ok", "15550005"))
         self.assertEqual([call["params"]["action"] for call in http.calls], ["getNumberV2", "getNumber"])
         self.assertTrue(all(call["params"]["service"] == "dr" for call in http.calls))
-        self.assertTrue(all(call["params"]["country"] == "0" for call in http.calls))
+        self.assertTrue(all(call["params"]["country"] == "" for call in http.calls))
         self.assertTrue(all(call["params"]["maxPrice"] == "0.034722" for call in http.calls))
         self.assertTrue(sms_provider._activation_state(activation_id)["price_validated"])
 
@@ -490,12 +490,12 @@ class SmsProviderStrategyTests(unittest.TestCase):
         activation_id, phone = sms_provider.acquire_number(http=http)
 
         self.assertEqual((activation_id, phone), ("a-refreshed", "15550004"))
-        self.assertEqual([call["params"]["country"] for call in http.calls], ["0", "0"])
+        self.assertEqual([call["params"]["country"] for call in http.calls], ["", ""])
         self.assertEqual([call["params"]["action"] for call in http.calls], ["getNumber", "getNumber"])
         self.assertTrue(all(call["params"]["maxPrice"] == "0.034722" for call in http.calls))
         self.assertEqual(sms_provider._activation_state(activation_id)["price_validated"], True)
 
-    def test_provider_random_selection_retries_same_country_zero_parameter(self):
+    def test_provider_random_selection_retries_with_blank_country(self):
         codex_config.SMS_PROVIDER_CHAIN = "smsbower"
         codex_config.SMS_MAX_PRICE = "0.25"
         codex_config.SMSBOWER_RANDOM_COUNTRY_ATTEMPTS = 3
@@ -504,7 +504,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         with self.assertRaises(sms_provider.SmsNoNumbersError):
             sms_provider.acquire_number(http=http)
 
-        self.assertEqual([call["params"]["country"] for call in http.calls], ["0"] * 6)
+        self.assertEqual([call["params"]["country"] for call in http.calls], [""] * 6)
         self.assertEqual(
             [call["params"]["action"] for call in http.calls],
             ["getNumberV2", "getNumber"] * 3,
@@ -526,7 +526,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(http.calls[0]["params"]["country"], "10")
         self.assertEqual(http.calls[0]["params"]["maxPrice"], "0.034722")
 
-    def test_random_mode_overrides_saved_country_and_uses_zero(self):
+    def test_random_mode_overrides_saved_country_and_leaves_country_blank(self):
         codex_config.SMS_MAX_PRICE = ""
         codex_config.SMS_COUNTRY = "99"
         codex_config.SMSBOWER_RANDOM_COUNTRY = True
@@ -540,7 +540,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
         self.assertEqual((activation_id, phone), ("a-random-no-cap", "84377221015"))
         self.assertEqual(len(http.calls), 1)
-        self.assertEqual(http.calls[0]["params"]["country"], "0")
+        self.assertEqual(http.calls[0]["params"]["country"], "")
 
     def test_get_number_v2_remembers_provider_tier_metadata(self):
         http = _Http([
