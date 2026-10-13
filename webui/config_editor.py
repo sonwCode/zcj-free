@@ -739,7 +739,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "SMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "SMSBower最高价格（USD）", "help": "按SMSBower handler_api的原生USD maxPrice透传；留空表示不限",
+        "label": "最高价格（人民币）", "help": "按人民币填写；程序实时换算成接码平台所需的 USD maxPrice，留空表示不限",
     },
     {
         "key": "SMS_MAX_RETRIES", "file": "codex.py", "type": "int", "group": "接码平台",

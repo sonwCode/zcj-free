@@ -137,10 +137,10 @@ TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS: int = 12
 # 服务代码：OpenAI (ChatGPT) = "dr"
 SMS_SERVICE: str = "dr"
 
-# SMSBower 需要具体国家代码；参考实现默认使用 10，WebUI/.env 可覆盖。
-SMS_COUNTRY: str = "10"
+# 国家代码；留空且开启随机模式时按价格和实时库存动态选择。
+SMS_COUNTRY: str = ""
 
-# SMSBower 原生价格上限，按供应商 API 的 USD 单位透传。
+# 接码价格上限，按人民币填写；程序换算成供应商要求的 USD maxPrice。
 SMS_MAX_PRICE: str = ""
 # 实时汇率源，按顺序级联尝试，任一成功即用。
 # 旧默认 api.frankfurter.app 已失效（返回 403/301），保留在末尾仅作兼容。
