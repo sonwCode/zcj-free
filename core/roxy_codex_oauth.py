@@ -2904,7 +2904,10 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 # 页面断连时先恢复 add-phone，再采购号码；否则会把新激活号
                 # 立刻取消，连续消耗短信库存和重试次数。
                 _ensure_add_phone_input(driver, reason=f"before-acquire-attempt-{attempt}")
-                activation_id, phone = sms_provider.acquire_number(http, country=configured_country)
+                preferred_provider = getattr(sms_provider, "provider_for_retry", lambda _attempt: None)(attempt)
+                activation_id, phone = sms_provider.acquire_number(
+                    http, country=configured_country, preferred_provider=preferred_provider
+                )
                 snapshot = {}
                 try:
                     snapshot = sms_provider.get_activation_info(activation_id) or {}
@@ -2915,7 +2918,8 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 ) or "unknown"
                 logger.info(
                     "[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=%s",
-                    attempt, max_retries, provider, sms_provider._mask_phone(phone),
+                    attempt, max_retries, snapshot.get("provider") or preferred_provider or provider,
+                    sms_provider._mask_phone(phone),
                 )
                 logger.info(
                     "[Codex][Browser] 号码采购快照：activation=%s region=%s provider_country=%s "

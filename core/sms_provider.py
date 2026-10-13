@@ -137,6 +137,18 @@ def _provider() -> str:
     return _provider_chain()[0]
 
 
+def provider_for_retry(attempt: int) -> str | None:
+    """按手机号重试轮次选择起始平台，并保留配置链的相对顺序。"""
+    providers = _attempt_provider_chain()
+    if not providers:
+        return None
+    try:
+        index = max(0, int(attempt) - 1) % len(providers)
+    except (TypeError, ValueError):
+        index = 0
+    return providers[index]
+
+
 def _provider_for_activation(activation_id: str) -> str:
     state = _activation_state(activation_id)
     provider = str(state.get("provider") or "").strip().lower()
@@ -1679,16 +1691,21 @@ def acquire_number(
     http: CurlSession | None = None,
     service: str | None = None,
     country: str | None = None,
+    preferred_provider: str | None = None,
 ) -> tuple[str, str]:
-    """按 provider 链顺序采购；每次只采购一个平台的一个激活，不并发跨平台取号。"""
+    """按 provider 链顺序采购；可从指定平台开始，单次只采购一个激活。"""
     own_http = http is None
     http = http or _http()
     errors: list[SmsProviderError] = []
     try:
         providers = _attempt_provider_chain()
+        preferred = str(preferred_provider or "").strip().lower()
+        if preferred in providers:
+            start = providers.index(preferred)
+            providers = providers[start:] + providers[:start]
         for index, provider in enumerate(providers):
             try:
-                logger.info("[SMS] 开始 provider 尝试：%s (%s/%s)", provider, index + 1, len(providers))
+                logger.info("[SMS] 开始 provider 尝试：%s (%s/%s, preferred=%s)", provider, index + 1, len(providers), preferred or "-")
                 return _acquire_number_for_provider(provider, http, service=service, country=country)
             except SmsProviderError as exc:
                 errors.append(exc)

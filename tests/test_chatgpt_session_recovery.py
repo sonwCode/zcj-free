@@ -25,6 +25,11 @@ class ChatGPTSessionRecoveryTests(unittest.TestCase):
             self.assertIn("email=email", source)
             self.assertIn("password=openai_password", source)
 
+    def test_recovery_starts_after_refresh_budget_is_exhausted(self):
+        source = ROXY.read_text(encoding="utf-8")
+        self.assertIn("session_refreshes >= 2 and warning_only_rounds >= 12", source)
+        self.assertIn('"auth.openai.com"', source)
+
     def test_recovery_is_not_unbounded(self):
         source = ROXY.read_text(encoding="utf-8")
         self.assertIn("login_recovery_attempted = False", source)

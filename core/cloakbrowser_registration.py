@@ -27,6 +27,7 @@ from core.roxy_registration import (  # noqa: F401
     _maybe_accept, _type_email_address, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
+    _is_signup_password_page, _password_page_state,
     _safe_get,
 )
 
@@ -239,6 +240,11 @@ def _run_cloak_registration_impl(
             # 密码校验后会重新发送注册 OTP；只接受该阶段之后到达的验证码。
             otp_after_ts = time.time()
             logger.info("[Cloak注册][OTP] 密码阶段完成，重置 OTP 起始时间")
+        if _is_signup_password_page(driver):
+            raise RuntimeError(
+                f"密码页处理结束后仍停留在注册密码页: "
+                f"url={getattr(driver, 'current_url', '')} state={_password_page_state(driver)}"
+            )
 
         current_otp = otp_code
         used_otps: set[str] = set()
@@ -306,6 +312,19 @@ def _run_cloak_registration_impl(
             current_otp = str(current_otp or "").strip()
             if not current_otp:
                 raise RuntimeError("邮箱验证码为空")
+            if _is_signup_password_page(driver):
+                late_password = _fill_password_page_if_present(driver, email, timeout=45)
+                if late_password:
+                    openai_password = late_password
+                    otp_after_ts = time.time()
+                    current_otp = None
+                    logger.info("[Cloak注册][OTP] 收码后页面才进入密码页，已补完密码并重新等待OTP")
+                    continue
+                if _is_signup_password_page(driver):
+                    raise RuntimeError(
+                        f"密码页延迟出现且恢复失败: url={getattr(driver, 'current_url', '')} "
+                        f"state={_password_page_state(driver)}"
+                    )
             used_otps.add(current_otp)
             logger.info("[Cloak注册][OTP] 收到验证码：%s", _mask_otp(current_otp))
             _clear_otp_inputs(driver)

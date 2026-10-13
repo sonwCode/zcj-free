@@ -69,9 +69,10 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn("sms_channel_select_failed", switch_block)
 
     def test_phone_failure_is_released_before_retry(self):
-        acquire = TEXT.index("activation_id, phone = sms_provider.acquire_number(http, country=configured_country)")
+        acquire = TEXT.index("sms_provider.acquire_number(")
         release = TEXT.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)")
         self.assertLess(acquire, release)
+        self.assertIn("preferred_provider=preferred_provider", loop_block)
         self.assertIn("_prepare_and_submit_add_phone(", TEXT)
 
     def test_fraud_guard_uses_longer_configurable_backoff(self):
@@ -199,7 +200,7 @@ class ResubmitLoopWiringTests(unittest.TestCase):
     def test_retry_acquires_a_new_activation_after_release(self):
         loop_start = TEXT.index("def _do_phone_verification_if_present")
         loop_block = TEXT[loop_start:]
-        acquire = loop_block.index("activation_id, phone = sms_provider.acquire_number(http, country=configured_country)")
+        acquire = loop_block.index("sms_provider.acquire_number(")
         self.assertIn("configured_country = str(getattr(sms_provider._cfg, \"SMS_COUNTRY\", \"\") or \"\").strip() or None", loop_block)
         preflight = loop_block.index("_ensure_add_phone_input(driver, reason=f\"before-acquire-attempt-{attempt}\")")
         release = loop_block.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)")
@@ -218,9 +219,10 @@ class ResubmitLoopWiringTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             capture = source.index("configured_country = str(")
             loop = source.index("for attempt in range(1, max_retries + 1):", capture)
-            acquire = source.index("acquire_number(http, country=configured_country)", loop)
+            acquire = source.index("acquire_number(", loop)
             self.assertLess(capture, loop, path.name)
             self.assertLess(loop, acquire, path.name)
+            self.assertIn("preferred_provider=preferred_provider", source, path.name)
 
     def test_no_bare_cfg_reference(self):
         """历史教训：_cfg 未定义会抛 NameError 并被宽泛 except 吞掉。"""

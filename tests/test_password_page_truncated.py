@@ -55,6 +55,14 @@ class PasswordStateTests(unittest.TestCase):
         self.assertFalse(has_form({"inputs": [{"type": "password", "visible": False}]}))
         self.assertFalse(has_form({"error": "navigation interrupted"}))
 
+    def test_create_password_route_is_not_email_otp_page(self):
+        is_email_page = _load_function("_is_email_verification_page")
+        for url in (
+            "https://auth.openai.com/create-account/password",
+            "https://auth.openai.com/create-account/password?__cf_chl_rt_tk=challenge",
+        ):
+            self.assertFalse(is_email_page(SimpleNamespace(current_url=url)), url)
+
     def test_password_page_contract_remains(self):
         self.assertIn("def _password_page_state", TEXT)
         self.assertIn("def _is_signup_password_page", TEXT)

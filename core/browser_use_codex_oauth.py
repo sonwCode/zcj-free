@@ -1446,7 +1446,10 @@ def _do_phone_verification_if_present(page) -> dict | None:
                 raise RuntimeError("无法回到手机号输入页，暂不取新号")
             _t_phone_ready.done()
             logger.info("[Codex][BrowserUse] 需要手机验证，开始取号（%s/%s）", attempt, max_retries)
-            activation_id, phone = sms_provider.acquire_number(http, country=configured_country)
+            preferred_provider = getattr(sms_provider, "provider_for_retry", lambda _attempt: None)(attempt)
+            activation_id, phone = sms_provider.acquire_number(
+                http, country=configured_country, preferred_provider=preferred_provider
+            )
             snapshot = {}
             try:
                 snapshot = sms_provider.get_activation_info(activation_id) or {}
@@ -1455,7 +1458,11 @@ def _do_phone_verification_if_present(page) -> dict | None:
             price = " ".join(
                 part for part in (str(snapshot.get("price_amount") or ""), str(snapshot.get("price_currency") or "")) if part
             ) or "unknown"
-            logger.info("[Codex][BrowserUse] 已取号：%s activation=%s", _mask_phone_for_log(phone), activation_id)
+            logger.info(
+                "[Codex][BrowserUse] 已取号：%s activation=%s provider=%s",
+                _mask_phone_for_log(phone), activation_id,
+                snapshot.get("provider") or preferred_provider or "-",
+            )
             logger.info(
                 "[Codex][BrowserUse] 号码采购快照：region=%s provider_country=%s price=%s "
                 "price_limit_max=%s price_validated=%s",

@@ -133,6 +133,26 @@ sms_provider, codex_config = _load_staged_provider()
 
 
 class SmsProviderStrategyTests(unittest.TestCase):
+    def test_provider_for_retry_rotates_configured_chain(self):
+        codex_config.SMS_PROVIDER_CHAIN = "tiger,smsbower"
+        self.assertEqual(sms_provider.provider_for_retry(1), "tiger")
+        self.assertEqual(sms_provider.provider_for_retry(2), "smsbower")
+        self.assertEqual(sms_provider.provider_for_retry(3), "tiger")
+
+    def test_acquire_number_can_start_from_preferred_provider(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smsbower,tiger"
+        calls = []
+
+        def acquire(provider, http, service=None, country=None):
+            calls.append(provider)
+            return "activation", "15550001111"
+
+        with patch.object(sms_provider, "_acquire_number_for_provider", side_effect=acquire):
+            result = sms_provider.acquire_number(http=_Http([]), preferred_provider="tiger")
+
+        self.assertEqual(result, ("activation", "15550001111"))
+        self.assertEqual(calls, ["tiger"])
+
     def setUp(self):
         sms_provider._reset_runtime_state_for_tests()
         codex_config.SMS_PROVIDER = "smsbower"

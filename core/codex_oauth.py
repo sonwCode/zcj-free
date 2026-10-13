@@ -1566,7 +1566,10 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
         for attempt in range(1, max_retries + 1):
             activation_id = None
             try:
-                activation_id, phone = sms_provider.acquire_number(http, country=configured_country)
+                preferred_provider = getattr(sms_provider, "provider_for_retry", lambda _attempt: None)(attempt)
+                activation_id, phone = sms_provider.acquire_number(
+                    http, country=configured_country, preferred_provider=preferred_provider
+                )
                 snapshot = {}
                 try:
                     snapshot = sms_provider.get_activation_info(activation_id) or {}
@@ -1577,7 +1580,8 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 ) or "unknown"
                 logger.info(
                     f"[Codex] 手机验证尝试 {attempt}/{max_retries}，"
-                    f"provider={provider}, activation_id={activation_id}, 号码={_mask_phone_for_log(phone)}"
+                    f"provider={snapshot.get('provider') or preferred_provider or provider}, "
+                    f"activation_id={activation_id}, 号码={_mask_phone_for_log(phone)}"
                 )
                 logger.info(
                     "[Codex] 号码采购快照：region=%s provider_country=%s price=%s "

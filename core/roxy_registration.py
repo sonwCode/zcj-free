@@ -1558,6 +1558,10 @@ def _is_email_verification_page(driver) -> bool:
         url = ''
     if '/log-in/password' in url:
         return False
+    # create-account/password 可能残留 code/otp 相关属性或挑战页输入框，
+    # 但它不是邮箱验证码页；否则密码提交失败会被误送进 OTP 输入逻辑。
+    if any(route in url for route in ('/create-account/password', '/u/signup/password', '/signup/password')):
+        return False
     if 'email-verification' in url:
         return True
     state = _email_otp_page_state(driver)
@@ -3123,7 +3127,13 @@ def _recover_chatgpt_login_session(driver, email: str, password: str | None) -> 
         return False
     try:
         logger.warning("%s session 仍无 accessToken，尝试一次有界登录恢复：email=%s", _log_prefix(driver), email)
-        _safe_get(driver, "https://chatgpt.com/auth/login", timeout=45, attempts=2, accept_hosts=("chatgpt.com",))
+        _safe_get(
+            driver,
+            "https://chatgpt.com/auth/login",
+            timeout=45,
+            attempts=2,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
         human_delay("navigate")
         _maybe_accept(driver)
         _type_email_address(driver, email, timeout=20)
@@ -3274,7 +3284,10 @@ def _fetch_chatgpt_session(
                         except Exception as refresh_exc:
                             last_data = f"session_refresh {type(refresh_exc).__name__}: {str(refresh_exc)[:180]}"
                     elif (
-                        warning_only_rounds >= 20
+                        (
+                            warning_only_rounds >= 20
+                            or (session_refreshes >= 2 and warning_only_rounds >= 12)
+                        )
                         and not login_recovery_attempted
                         and email
                         and password
@@ -3486,6 +3499,19 @@ def run_roxy_registration(
                     human_delay("api")
                     current_otp = None
                     continue
+            if _is_signup_password_page(driver):
+                late_password = _fill_password_page_if_present(driver, email, timeout=45)
+                if late_password:
+                    openai_password = late_password
+                    otp_after_ts = time.time()
+                    current_otp = None
+                    logger.info("[Roxy注册][OTP] 收码后页面才进入密码页，已补完密码并重新等待OTP")
+                    continue
+                if _is_signup_password_page(driver):
+                    raise RuntimeError(
+                        f"密码页延迟出现且恢复失败: url={getattr(driver, 'current_url', '')} "
+                        f"state={_password_page_state(driver)}"
+                    )
             used_otps.add(str(current_otp))
             logger.info("[Roxy注册][OTP] 收到验证码：%s", _mask_otp(current_otp))
             _clear_otp_inputs(driver)
