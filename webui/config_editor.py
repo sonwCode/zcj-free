@@ -727,7 +727,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "SMS_PROVIDER_CHAIN", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "启用的短信平台与顺序", "help": "勾选要使用的平台并调整顺序；保存后按顺序逐个平台尝试，不会为同一号码并发采购。默认顺序跟随兼容首选",
+        "label": "接码平台优先顺序", "help": "勾选要启用的平台；多个平台按列表顺序依次回退",
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",

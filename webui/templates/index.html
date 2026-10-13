@@ -1921,38 +1921,60 @@
     .config-select-v2-field select {
       max-width: 100%;
     }
-    .config-provider-chain {
-      display: grid; gap: 10px; margin-top: 6px; padding: 12px;
-      border: 1px solid #ebeef5; border-radius: 8px; background: #fafbfc;
+    .config-provider-chain-field {
+      grid-column: 1 / -1; display: grid;
+      grid-template-columns: minmax(180px, 240px) minmax(0, 760px);
+      align-items: start; gap: 12px 24px; padding: 12px 0 16px;
+      border-bottom: 1px solid #ebeef5;
     }
-    .config-provider-chain-options {
-      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+    .config-provider-chain-heading { min-width: 0; padding-top: 3px; }
+    .config-provider-chain-title { color: #303133; font-size: 14px; font-weight: 700; line-height: 1.4; }
+    .config-provider-chain-heading .hint {
+      display: block; margin-top: 5px; color: #909399; font-size: 12px;
+      font-weight: 400; line-height: 1.5; overflow-wrap: anywhere;
     }
-    .config-provider-chain-option {
-      display: flex; align-items: center; gap: 8px; min-height: 36px;
-      padding: 8px 10px; border: 1px solid #dcdfe6; border-radius: 6px;
-      background: #fff; color: #606266; cursor: pointer; box-sizing: border-box;
-    }
-    .config-provider-chain-option:has(input:checked) {
-      border-color: #377DFF; background: #f0f6ff; color: #303133;
-    }
-    .config-provider-chain-option input { margin: 0; accent-color: #377DFF; }
+    .config-provider-chain { min-width: 0; }
     .config-provider-chain-order {
-      display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
-      min-height: 28px; color: #606266; font-size: 12px;
+      max-width: 760px; border-top: 1px solid #ebeef5;
     }
-    .config-provider-chain-chip {
-      display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px;
-      border: 1px solid #cfe0ff; border-radius: 999px; background: #fff; color: #377DFF;
+    .config-provider-chain-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) 82px auto;
+      align-items: center; gap: 12px; min-height: 48px;
+      border-bottom: 1px solid #ebeef5;
     }
-    .config-provider-chain-chip button {
-      width: 20px; height: 20px; padding: 0; border: 1px solid #cfe0ff; border-radius: 50%;
-      background: #fff; color: #377DFF; cursor: pointer; line-height: 1;
+    .config-provider-chain-choice {
+      min-width: 0; display: flex; align-items: center; gap: 10px;
+      color: #303133; font-size: 13px; font-weight: 600; cursor: pointer;
     }
-    .config-provider-chain-chip button:hover { background: #ecf5ff; }
-    .config-provider-chain-empty { color: #909399; }
-    @media (max-width: 600px) {
-      .config-provider-chain-options { grid-template-columns: 1fr; }
+    .config-provider-chain-choice input {
+      flex: 0 0 16px; width: 16px !important; height: 16px !important;
+      min-height: 16px !important; margin: 0 !important; padding: 0 !important;
+      accent-color: #377DFF;
+    }
+    .config-provider-chain-row:not(.is-enabled) .config-provider-chain-choice {
+      color: #909399; font-weight: 500;
+    }
+    .config-provider-chain-priority {
+      color: #909399; font-size: 12px; font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .config-provider-chain-actions { display: flex; align-items: center; gap: 4px; }
+    .config-provider-chain-actions button {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; padding: 0; border: 1px solid #dcdfe6;
+      border-radius: 6px; background: #fff; color: #606266; cursor: pointer;
+      font-size: 15px; line-height: 1;
+    }
+    .config-provider-chain-actions button:hover:not(:disabled) {
+      border-color: #377DFF; color: #377DFF; background: #f5f8ff;
+    }
+    .config-provider-chain-actions button:disabled {
+      color: #c0c4cc; cursor: default; background: #f8f9fb;
+    }
+    .config-provider-chain-actions-empty { width: 60px; }
+    @media (max-width: 700px) {
+      .config-provider-chain-field { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+      .config-provider-chain-row { grid-template-columns: minmax(0, 1fr) 68px auto; gap: 8px; }
     }
     .config-section-v2-body label.fld {
       margin-bottom: 0;
@@ -6673,34 +6695,40 @@ function smsProviderChainFieldValue(f) {
   return [primary].concat(SMS_PROVIDER_CHAIN_OPTIONS.map(item => item.value).filter(value => value !== primary));
 }
 function renderSmsProviderChainOrder(chain) {
-  if (!chain.length) return '<span class="config-provider-chain-empty">至少选择一个短信平台</span>';
-  return chain.map((value, index) => {
-    let controls = '';
-    if (index > 0) {
-      controls += '<button type="button" data-provider-chain-move="up" data-provider-chain-value="' + attrEsc(value) + '" aria-label="上移 ' + attrEsc(smsProviderChainLabel(value)) + '" title="上移">&#8593;</button>';
-    }
-    if (index < chain.length - 1) {
-      controls += '<button type="button" data-provider-chain-move="down" data-provider-chain-value="' + attrEsc(value) + '" aria-label="下移 ' + attrEsc(smsProviderChainLabel(value)) + '" title="下移">&#8595;</button>';
-    }
-    return '<span class="config-provider-chain-chip"><span>' + (index + 1) + '. ' + esc(smsProviderChainLabel(value)) + '</span>' + controls + '</span>';
+  const enabled = new Set(chain);
+  const ordered = chain.concat(SMS_PROVIDER_CHAIN_OPTIONS.map(item => item.value).filter(value => !enabled.has(value)));
+  return ordered.map(value => {
+    const index = chain.indexOf(value);
+    const active = index >= 0;
+    const upDisabled = !active || index === 0;
+    const downDisabled = !active || index === chain.length - 1;
+    const up = '<button type="button" data-provider-chain-move="up" data-provider-chain-value="' + attrEsc(value) + '" aria-label="上移 ' + attrEsc(smsProviderChainLabel(value)) + '" title="上移"' + (upDisabled ? ' disabled' : '') + '>&#8593;</button>';
+    const down = '<button type="button" data-provider-chain-move="down" data-provider-chain-value="' + attrEsc(value) + '" aria-label="下移 ' + attrEsc(smsProviderChainLabel(value)) + '" title="下移"' + (downDisabled ? ' disabled' : '') + '>&#8595;</button>';
+    const priority = active ? '优先级 ' + String(index + 1).padStart(2, '0') : '未启用';
+    return '<div class="config-provider-chain-row' + (active ? ' is-enabled' : '') + '">'
+      + '<label class="config-provider-chain-choice">'
+      + '<input type="checkbox" data-provider-chain-option="' + attrEsc(value) + '"' + (active ? ' checked' : '') + '>'
+      + '<span>' + esc(smsProviderChainLabel(value)) + '</span></label>'
+      + '<span class="config-provider-chain-priority">' + esc(priority) + '</span>'
+      + '<span class="config-provider-chain-actions">' + up + down + '</span></div>';
   }).join('');
+}
+function smsProviderChainStoredValue(f) {
+  const value = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key)
+    ? CONFIG_PENDING_UPDATES[f.key]
+    : f.value;
+  return parseSmsProviderChain(value).join(',');
 }
 function renderSmsProviderChainField(f) {
   const chain = smsProviderChainFieldValue(f);
-  const selected = new Set(chain);
-  const options = SMS_PROVIDER_CHAIN_OPTIONS.map(option => {
-    return '<label class="config-provider-chain-option">'
-      + '<input type="checkbox" data-provider-chain-option="' + attrEsc(option.value) + '"'
-      + (selected.has(option.value) ? ' checked' : '') + '>'
-      + '<span>' + esc(option.label) + '</span></label>';
-  }).join('');
   return '<div class="fld config-provider-chain-field">'
-    + esc(f.label)
+    + '<div class="config-provider-chain-heading">'
+    + '<div class="config-provider-chain-title">' + esc(f.label) + '</div>'
     + '<span class="hint">' + esc(f.help || '') + '</span>'
+    + '</div>'
     + '<div class="config-provider-chain" data-config-provider-chain>'
-    + '<div class="config-provider-chain-options">' + options + '</div>'
     + '<div class="config-provider-chain-order" data-provider-chain-order>' + renderSmsProviderChainOrder(chain) + '</div>'
-    + '<input type="hidden" data-key="' + attrEsc(f.key) + '" value="' + attrEsc(chain.join(',')) + '">'
+    + '<input type="hidden" data-key="' + attrEsc(f.key) + '" value="' + attrEsc(smsProviderChainStoredValue(f)) + '">'
     + '</div></div>';
 }
 function setSmsProviderChainValue(root, chain) {
