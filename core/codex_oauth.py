@@ -20,7 +20,9 @@ import hashlib
 import json
 import logging
 import random
+import re
 import secrets
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -225,6 +227,8 @@ def _codex_exception_metadata(exc: Exception) -> tuple[str | None, bool | None]:
     lowered = text.lower()
     if any(marker in lowered for marker in ("ip banned", "ip_banned", "ip has been banned")):
         return "cpa_ip_banned", True
+    if "phone_fraud_guard" in lowered or "fraud_guard" in lowered or "suspicious behavior from phone" in lowered:
+        return "phone_fraud_guard", True
     if "codex_mfa_step_stalled" in lowered:
         return "codex_mfa_step_stalled", True
     if "callback" in lowered and "timeout" in lowered:
@@ -369,6 +373,36 @@ def _cpa_management_key() -> str:
     return key
 
 
+class CpaIpBannedError(RuntimeError):
+    """CPA 明确报告当前出口冷却时携带上游重试时间。"""
+
+    def __init__(self, message: str, retry_after_seconds: int = 1800):
+        self.retry_after_seconds = max(60, int(retry_after_seconds or 1800))
+        super().__init__(message)
+
+
+class PhoneFraudGuardError(RuntimeError):
+    """手机号提交触发上游 fraud guard，应停止当前账号的重复取号。"""
+
+
+_CPA_REQUEST_LOCK = threading.Lock()
+_CPA_LAST_REQUEST_AT = 0.0
+_CPA_COOLDOWN_UNTIL = 0.0
+_CPA_MIN_REQUEST_INTERVAL = 2.0
+
+
+def _cpa_retry_after_seconds(text: object) -> int:
+    value = str(text or "").lower()
+    matches = re.findall(r"(\d+)\s*(h|hr|hours?|m|min|minutes?|s|sec|seconds?)", value)
+    if not matches:
+        return 1800
+    seconds = 0
+    for amount, unit in matches:
+        scale = 3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1
+        seconds += int(amount) * scale
+    return min(21600, max(60, seconds))
+
+
 # CPA 管理接口偶发 TLS 层瞬时失败（BoringSSL SSL_connect: Connection closed
 # abruptly / SSL_ERROR_SYSCALL）。这类错误发生在握手阶段，重连一次通常即可
 # 恢复，但旧实现没有重试，一次抖动就让整轮 Codex 授权直接失败。
@@ -393,27 +427,43 @@ def _is_cpa_transient_error(exc: Exception) -> bool:
 
 
 def _cpa_request_json(method: str, path: str, body: dict | None = None) -> dict:
-    """调用 CPA 管理接口，兼容 FlowPilot 的 /v0/management/* 协议。
-
-    传输层瞬时错误（TLS 握手中断、连接重置、超时）按固定间隔重试，
-    避免一次网络抖动就终止整轮 Codex 授权。
-    """
-    attempts = max(1, int(getattr(_cfg, "CPA_REQUEST_RETRIES", 3) or 3))
-    delay = max(0.5, float(getattr(_cfg, "CPA_REQUEST_RETRY_DELAY", 3) or 3))
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return _cpa_request_json_once(method, path, body)
-        except Exception as exc:
-            last_exc = exc
-            if attempt >= attempts or not _is_cpa_transient_error(exc):
-                raise
-            logger.warning(
-                "[Codex][CPA] 管理接口瞬时失败，重试 %s/%s：%s: %s",
-                attempt + 1, attempts, type(exc).__name__, str(exc)[:200],
+    """串行调用 CPA，并在上游封禁窗口内阻断后续管理请求。"""
+    global _CPA_LAST_REQUEST_AT, _CPA_COOLDOWN_UNTIL
+    with _CPA_REQUEST_LOCK:
+        now = time.monotonic()
+        if _CPA_COOLDOWN_UNTIL > now:
+            remaining = max(1, int(_CPA_COOLDOWN_UNTIL - now + 0.999))
+            raise CpaIpBannedError(
+                f"[Codex][CPA] IP banned cooldown active; retry in {remaining}s", remaining
             )
-            time.sleep(delay * attempt)
-    raise last_exc or RuntimeError(f"[Codex][CPA] 管理接口失败 {method} {path}")
+        spacing = _CPA_MIN_REQUEST_INTERVAL - (now - _CPA_LAST_REQUEST_AT)
+        if spacing > 0:
+            time.sleep(spacing)
+        attempts = max(1, int(getattr(_cfg, "CPA_REQUEST_RETRIES", 3) or 3))
+        delay = max(0.5, float(getattr(_cfg, "CPA_REQUEST_RETRY_DELAY", 3) or 3))
+        last_exc: Exception | None = None
+        try:
+            for attempt in range(1, attempts + 1):
+                try:
+                    return _cpa_request_json_once(method, path, body)
+                except CpaIpBannedError as exc:
+                    _CPA_COOLDOWN_UNTIL = max(
+                        _CPA_COOLDOWN_UNTIL,
+                        time.monotonic() + exc.retry_after_seconds,
+                    )
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= attempts or not _is_cpa_transient_error(exc):
+                        raise
+                    logger.warning(
+                        "[Codex][CPA] 管理接口瞬时失败，重试 %s/%s：%s: %s",
+                        attempt + 1, attempts, type(exc).__name__, str(exc)[:200],
+                    )
+                    time.sleep(delay * attempt)
+            raise last_exc or RuntimeError(f"[Codex][CPA] 管理接口失败 {method} {path}")
+        finally:
+            _CPA_LAST_REQUEST_AT = time.monotonic()
 
 
 def _cpa_request_json_once(method: str, path: str, body: dict | None = None) -> dict:
@@ -444,9 +494,19 @@ def _cpa_request_json_once(method: str, path: str, body: dict | None = None) -> 
             msg = ""
             if isinstance(payload, dict):
                 msg = payload.get("error") or payload.get("message") or payload.get("detail") or payload.get("reason") or ""
+            response_text = f"{msg or (resp.text or '')[:300]}"
+            lowered = response_text.lower()
+            if resp.status_code == 403 and any(
+                marker in lowered for marker in ("ip banned", "ip_banned", "ip has been banned")
+            ):
+                retry_after = _cpa_retry_after_seconds(response_text)
+                raise CpaIpBannedError(
+                    f"[Codex][CPA] 管理接口失败 {method.upper()} {path} status=403: {response_text}",
+                    retry_after,
+                )
             raise RuntimeError(
                 f"[Codex][CPA] 管理接口失败 {method.upper()} {path} status={resp.status_code}: "
-                f"{msg or (resp.text or '')[:300]}"
+                f"{response_text}"
             )
         return payload if isinstance(payload, dict) else {}
     finally:
@@ -1620,6 +1680,11 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                         f"status={send_resp.status_code}: {send_text[:240]}，换号重试"
                     )
                     cancel_and_report_failure(activation_id, send_reason or send_text or "send_failed")
+                    activation_id = None
+                    if _is_codex_fraud_guard_error(send_text):
+                        raise PhoneFraudGuardError(
+                            f"phone_fraud_guard: {send_text[:220]}"
+                        )
                     _sleep_before_phone_retry(
                         attempt,
                         max_retries,
@@ -1661,6 +1726,11 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                         f"{val_text[:240]}，换号重试"
                     )
                     cancel_and_report_failure(activation_id, val_reason)
+                    activation_id = None
+                    if _is_codex_fraud_guard_error(val_text):
+                        raise PhoneFraudGuardError(
+                            f"phone_fraud_guard: {val_text[:220]}"
+                        )
                     _sleep_before_phone_retry(
                         attempt,
                         max_retries,
@@ -1694,6 +1764,8 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 last_err = exc
                 err_text = str(exc) or ""
                 logger.warning("[Codex] 手机验证流程异常（%s/%s）：%s", attempt, max_retries, err_text[:240])
+                if isinstance(exc, PhoneFraudGuardError):
+                    raise
                 cancel_and_report_failure(activation_id, exc)
                 if "invalid_auth_step" in err_text.lower():
                     raise
@@ -2093,7 +2165,6 @@ _CODEX_DRIVER_RESOURCE_ERROR_MARKERS = (
     "服务不可用", "service unavailable", "connection refused",
     "connection reset", "connection closed", "econnrefused",
     "temporarily unavailable", "circuit breaker",
-    "fraud_guard", "suspicious behavior from phone",
     "codex_mfa_step_stalled", "codex_browser_cleanup_timeout", "等待 codex callback 超时",
     "callback 超时", "timeout waiting for oauth callback",
 )
@@ -2192,6 +2263,11 @@ def _is_codex_driver_recoverable(exc: BaseException | str) -> bool:
     """
     text = str(exc or "").lower()
     if not text:
+        return False
+    if any(marker in text for marker in (
+        "ip banned", "ip_banned", "ip has been banned",
+        "phone_fraud_guard", "fraud_guard", "suspicious behavior from phone",
+    )):
         return False
     if any(marker in text for marker in _CODEX_DRIVER_RESOURCE_ERROR_MARKERS):
         return True

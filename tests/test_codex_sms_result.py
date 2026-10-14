@@ -104,6 +104,7 @@ class CodexSmsResultTests(unittest.TestCase):
     def test_cpa_ip_ban_is_explicit_and_retryable(self):
         metadata = self.namespace["_codex_exception_metadata"]
         self.assertEqual(metadata(RuntimeError("[Codex][CPA] status=403: IP banned")), ("cpa_ip_banned", True))
+        self.assertEqual(metadata(RuntimeError("phone_fraud_guard: suspicious behavior from phone")), ("phone_fraud_guard", True))
 
     def test_no_balance_is_blocked_and_non_retryable(self):
         result = self._run_with_sms_error("sms_no_balance")

@@ -2996,6 +2996,11 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                         sms_provider.cancel_and_report_failure(activation_id, http, exc)
                     except Exception as feedback_exc:
                         logger.warning("[Codex][Browser] 释放号码或记录短信失败反馈失败：%s", feedback_exc)
+                    activation_id = None
+                if _codex_proto._is_codex_fraud_guard_error(err_text):
+                    raise _codex_proto.PhoneFraudGuardError(
+                        f"phone_fraud_guard: {err_text[:220]}"
+                    ) from exc
                 # 余额不足 / 无可用号码：重试多少次都不会成功，立即失败止损，
                 # 避免白等 N 轮换号重试（每轮还要刷新页面 + 随机等待）。
                 if any(k in err_text for k in (
@@ -3304,9 +3309,12 @@ def _run_roxy_codex_oauth_once(
                 message=sms_outcome["message"][:240],
                 phone_activation=phone_activation,
             )
+        error_code, retryable = proto._codex_exception_metadata(exc)
         return proto._codex_result(
             status="failed",
             email=email,
+            error_code=error_code,
+            retryable=retryable,
             message=f"{type(exc).__name__}: {str(exc)[:220]}",
             phone_activation=phone_activation,
         )

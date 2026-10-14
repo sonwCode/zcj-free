@@ -652,7 +652,7 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
                 retryable=not deactivated,
                 account_status="success",
                 codex_status=result_status or "failed",
-                error_code=f"codex_{result_status or 'failed'}",
+                error_code=result.get("error_code") or f"codex_{result_status or 'failed'}",
                 email=email,
                 account_id=account_id,
                 error=str(result.get("message") or "Codex 补跑失败")[:500],

@@ -130,17 +130,18 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertTrue(fn(RuntimeError("codex_browser_cleanup_timeout: 清理超时")))
         self.assertTrue(fn(RuntimeError("等待 Codex callback 超时，最后 URL=...")))
 
-    def test_phone_fraud_guard_is_recoverable_for_proxy_rotation(self):
+    def test_phone_fraud_guard_stops_driver_fallback(self):
         ns = _extract(CODEX, {"_is_codex_driver_recoverable", "_is_codex_fraud_guard_error"})
-        self.assertTrue(ns["_is_codex_driver_recoverable"](RuntimeError("fraud_guard")))
+        self.assertFalse(ns["_is_codex_driver_recoverable"](RuntimeError("fraud_guard")))
+        self.assertFalse(ns["_is_codex_driver_recoverable"](RuntimeError("IP banned")))
         self.assertTrue(ns["_is_codex_fraud_guard_error"]("suspicious behavior from phone"))
         self.assertFalse(ns["_is_codex_fraud_guard_error"]("account_deactivated"))
 
-    def test_cloak_registration_rotates_proxy_for_phone_fraud(self):
+    def test_cloak_registration_does_not_fallback_after_phone_fraud(self):
         source = CLOAK.read_text(encoding="utf-8")
-        self.assertIn("_pick_next_codex_proxy", source)
-        self.assertIn("fraud_guard", source)
-        self.assertIn("proxy=fallback_proxy", source)
+        self.assertNotIn("_pick_next_codex_proxy", source)
+        self.assertNotIn("suspicious behavior from phone", source)
+        self.assertIn("proxy=account_proxy", source)
 
     def test_cloak_bootstrap_has_bounded_proxy_retry(self):
         source = CLOAK.read_text(encoding="utf-8")

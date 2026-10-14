@@ -458,7 +458,6 @@ def _run_cloak_registration_impl(
                             "codex_mfa_step_stalled", "codex_browser_cleanup_timeout",
                             "callback 超时", "timeout waiting for oauth callback",
                             "page.goto", "net::err_", "proxy connection",
-                            "fraud_guard", "suspicious behavior from phone",
                         ))
                     ):
                         logger.warning("[Cloak注册][Codex] 浏览器授权未完成，释放窗口后降级协议驱动")
@@ -471,18 +470,12 @@ def _run_cloak_registration_impl(
                                     driver.force_kill()
                                 except Exception:
                                     pass
-                        from core.codex_oauth import run_codex_oauth, _is_codex_fraud_guard_error, _pick_next_codex_proxy
-                        fallback_proxy = account_proxy
-                        if _is_codex_fraud_guard_error(failure_text):
-                            rotated_proxy = _pick_next_codex_proxy(account_proxy)
-                            if rotated_proxy and rotated_proxy != account_proxy:
-                                fallback_proxy = rotated_proxy
-                                logger.warning("[Cloak注册][Codex] fraud_guard 回退时切换协议代理出口")
+                        from core.codex_oauth import run_codex_oauth
                         codex_result = run_codex_oauth(
                             email,
                             force=True,
                             driver="protocol",
-                            proxy=fallback_proxy,
+                            proxy=account_proxy,
                         )
                 else:
                     logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")

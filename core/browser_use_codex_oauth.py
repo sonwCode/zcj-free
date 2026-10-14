@@ -1531,6 +1531,15 @@ def _do_phone_verification_if_present(page) -> dict | None:
                     sms_provider.cancel_and_report_failure(activation_id, http, exc)
                 except Exception as feedback_exc:
                     logger.warning("[Codex][BrowserUse] 释放号码或记录短信失败反馈失败：%s", feedback_exc)
+                activation_id = None
+            if _codex_proto._is_codex_fraud_guard_error(last_error):
+                try:
+                    http.close()
+                except Exception:
+                    pass
+                raise _codex_proto.PhoneFraudGuardError(
+                    f"phone_fraud_guard: {last_error[:220]}"
+                ) from exc
             if attempt >= max_retries:
                 break
             try:
@@ -1751,9 +1760,12 @@ def _run_browser_use_codex_oauth_once(
                 message=sms_outcome["message"][:240],
                 phone_activation=phone_activation,
             )
+        error_code, retryable = proto._codex_exception_metadata(exc)
         return proto._codex_result(
             status="failed",
             email=email,
+            error_code=error_code,
+            retryable=retryable,
             message=f"{type(exc).__name__}: {str(exc)[:300]}",
             phone_activation=phone_activation,
         )
