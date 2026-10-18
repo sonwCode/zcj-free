@@ -201,8 +201,32 @@ def _normalized_region(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", text)
 
 
-def _excluded_region(state: dict) -> str:
-    raw = str(getattr(_cfg, "SMS_EXCEPT_REGIONS", "") or "")
+_REGION_SETTING_BY_PROVIDER = {
+    "smsbower": "SMSBOWER_EXCEPT_REGIONS",
+    "tiger": "TIGER_SMS_EXCEPT_REGIONS",
+    "herosms": "HEROSMS_EXCEPT_REGIONS",
+    "smspool": "SMSPOOL_EXCEPT_REGIONS",
+    "vaksms": "VAKSMS_EXCEPT_REGIONS",
+}
+
+
+def _excluded_region(state: dict, provider: str | None = None) -> str:
+    """Return the matching excluded region for one provider's number.
+
+    Provider-specific settings take precedence.  The legacy shared setting is
+    used only while no provider-specific setting is configured at all, so an
+    operator can migrate one platform at a time without silently applying a
+    blank platform rule to every provider.
+    """
+    state = state or {}
+    provider_name = str(provider or state.get("provider") or "").strip().lower()
+    specific_names = tuple(_REGION_SETTING_BY_PROVIDER.values())
+    has_specific = any(str(getattr(_cfg, name, "") or "").strip() for name in specific_names)
+    specific_name = _REGION_SETTING_BY_PROVIDER.get(provider_name)
+    if has_specific and specific_name:
+        raw = str(getattr(_cfg, specific_name, "") or "")
+    else:
+        raw = str(getattr(_cfg, "SMS_EXCEPT_REGIONS", "") or "")
     excluded: set[str] = set()
     for entry in re.split(r"[,，;；\n]+", raw):
         for alias in re.split(r"[/|]", entry):
@@ -213,7 +237,7 @@ def _excluded_region(state: dict) -> str:
         return ""
 
     for key in ("phone_country_name", "phone_region", "region", "province", "state"):
-        value = str((state or {}).get(key) or "").strip()
+        value = str(state.get(key) or "").strip()
         if value and _normalized_region(value) in excluded:
             return value
     return ""
@@ -2650,7 +2674,7 @@ def _acquire_smsbower_number(
             except Exception as release_exc:
                 logger.warning("[SMSBower] 违规号码释放失败，继续换号：id=%s error=%s", activation_id, release_exc)
             continue
-        excluded_region = _excluded_region(state)
+        excluded_region = _excluded_region(state, provider)
         if excluded_region:
             _metric("candidate_skipped", state)
             logger.info(
@@ -2709,7 +2733,7 @@ def _acquire_number_for_provider(
                 provider, http, service=service, country=country
             )
         state = _activation_state(activation_id)
-        excluded_region = _excluded_region(state)
+        excluded_region = _excluded_region(state, provider)
         if not excluded_region:
             return activation_id, phone
         _metric("candidate_skipped", state)

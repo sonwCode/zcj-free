@@ -80,6 +80,7 @@ def _load_staged_provider():
             TIGER_SMS_USE_V2=True,
             TIGER_SMS_PROVIDER_IDS="",
             TIGER_SMS_EXCEPT_PROVIDER_IDS="",
+            TIGER_SMS_EXCEPT_REGIONS="",
             TIGER_SMS_RANDOM_COUNTRY=True,
             TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS=12,
             SMS_CODE_WAIT=2,
@@ -94,6 +95,7 @@ def _load_staged_provider():
             SMSBOWER_EXCEPT_PROVIDER_IDS="",
             SMSBOWER_PHONE_EXCEPTION="",
             SMS_EXCEPT_REGIONS="",
+            SMSBOWER_EXCEPT_REGIONS="",
             SMSBOWER_RANDOM_COUNTRY=True,
             SMSBOWER_RANDOM_COUNTRY_ATTEMPTS=12,
             HEROSMS_API_KEY="",
@@ -105,6 +107,7 @@ def _load_staged_provider():
             HEROSMS_PROVIDER_IDS="",
             HEROSMS_EXCEPT_PROVIDER_IDS="",
             HEROSMS_PHONE_EXCEPTION="",
+            HEROSMS_EXCEPT_REGIONS="",
             SMSPOOL_API_KEY="",
             SMSPOOL_API_BASE="http://pool.test",
             SMSPOOL_SERVICE="",
@@ -113,6 +116,8 @@ def _load_staged_provider():
             SMSPOOL_MIN_PRICE="",
             SMSPOOL_PRICING_OPTION="0",
             SMSPOOL_POOL="",
+            SMSPOOL_EXCEPT_REGIONS="",
+            VAKSMS_EXCEPT_REGIONS="",
             SMS_NUMBER_ACQUIRE_RETRIES=3,
             SMS_NUMBER_REJECT_TTL=1800,
             SMS_COUNTRY_REJECT_TTL=900,
@@ -208,6 +213,11 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.SMS_PREFLIGHT_RETRY_DELAY = 0
         codex_config.SMSBOWER_EXCEPT_PROVIDER_IDS = ""
         codex_config.SMS_EXCEPT_REGIONS = ""
+        codex_config.SMSBOWER_EXCEPT_REGIONS = ""
+        codex_config.TIGER_SMS_EXCEPT_REGIONS = ""
+        codex_config.HEROSMS_EXCEPT_REGIONS = ""
+        codex_config.SMSPOOL_EXCEPT_REGIONS = ""
+        codex_config.VAKSMS_EXCEPT_REGIONS = ""
         codex_config.SMS_TIER_FAILURE_THRESHOLD = 2
         codex_config.SMS_TIER_COOLDOWN_SECONDS = 2700
         codex_config.SMS_COUNTRY_REJECT_TTL = 900
@@ -256,9 +266,40 @@ class SmsProviderStrategyTests(unittest.TestCase):
             "",
         )
 
+    def test_provider_region_exclusions_are_independent(self):
+        codex_config.SMS_EXCEPT_REGIONS = "Quebec,Alberta"
+        codex_config.SMSBOWER_EXCEPT_REGIONS = "Quebec,Alberta"
+        codex_config.TIGER_SMS_EXCEPT_REGIONS = "Québec"
+
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Ontario"}, "smsbower"),
+            "",
+        )
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Alberta"}, "smsbower"),
+            "Alberta",
+        )
+        codex_config.SMSBOWER_EXCEPT_REGIONS = "Ontario"
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Ontario"}, "smsbower"),
+            "Ontario",
+        )
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Alberta"}, "smsbower"),
+            "",
+        )
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Québec"}, "tiger"),
+            "Québec",
+        )
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Alberta"}, "tiger"),
+            "",
+        )
+
     def test_smsbower_excluded_region_is_released_then_retried(self):
         codex_config.SMSBOWER_RANDOM_COUNTRY = False
-        codex_config.SMS_EXCEPT_REGIONS = "36/Quebec"
+        codex_config.SMSBOWER_EXCEPT_REGIONS = "36/Quebec"
         codex_config.SMS_NUMBER_ACQUIRE_RETRIES = 2
         http = _Http([
             _Response(json.dumps({"activationId": "blocked-region", "phoneNumber": "15550001111", "countryCode": "36"})),
@@ -764,6 +805,8 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertIn("'SMS_MAX_PRICE': 'str'", source)
         self.assertIn("'SMSBOWER_USD_CNY_RATE': 'str'", source)
         self.assertIn("'SMS_EXCEPT_REGIONS': 'str'", source)
+        self.assertIn("'SMSBOWER_EXCEPT_REGIONS': 'str'", source)
+        self.assertIn("'TIGER_SMS_EXCEPT_REGIONS': 'str'", source)
 
     def test_fx_refresh_log_uses_usd_cny_direction_and_source(self):
         codex_config.SMS_FX_RATE_URL = "https://fx.test/latest?from=CNY&to=USD"

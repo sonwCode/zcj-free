@@ -6760,13 +6760,12 @@ function smsConfigSectionForKey(key) {
   if (['SMS_PROVIDER','SMS_PROVIDER_CHAIN','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_PRICE','SMS_REJECT_VOIP_NUMBERS','SMS_MAX_RETRIES','SMS_CODE_WAIT','SMS_POLL_INTERVAL','SMS_REQUEST_TIMEOUT','SMS_RELEASE_RETRIES','SMS_RELEASE_RETRY_DELAY','SMS_API_KEY'].includes(key)) {
     return ['通用接码', '所有短信平台共用的通道顺序、国家/服务代码、人民币价格上限、等待、轮询、释放和重试参数'];
   }
-  if (key === 'SMS_EXCEPT_REGIONS') return ['SMSBower', 'SMSBower API、V2取号、随机选国、供应商、价格筛选和地区排除配置'];
   if (key.startsWith('SMS_POOL_')) return ['低价号码池', '号码池采购、账号测活与并发补跑参数'];
-  if (key.startsWith('SMSBOWER_')) return ['SMSBower', 'SMSBower API、V2取号、随机选国、供应商和价格筛选配置'];
-  if (key.startsWith('TIGER_SMS_')) return ['Tiger SMS', 'Tiger SMS API、V2取号、随机选国和供应商筛选配置'];
-  if (key.startsWith('HEROSMS_')) return ['HeroSMS', 'HeroSMS API、V2取号、服务/国家覆盖和供应商筛选配置'];
-  if (key.startsWith('SMSPOOL_')) return ['SMSPool', 'SMSPool API、服务/国家覆盖、价格和号池配置'];
-  if (key.startsWith('VAKSMS_')) return ['Vak SMS', 'Vak SMS API、V0/V2取号、服务/国家、价格和运营商配置'];
+  if (key.startsWith('SMSBOWER_')) return ['SMSBower', 'SMSBower API、V2取号、随机选国、价格、供应商和地区排除配置'];
+  if (key.startsWith('TIGER_SMS_')) return ['Tiger SMS', 'Tiger SMS API、V2取号、随机选国、供应商和地区排除配置'];
+  if (key.startsWith('HEROSMS_')) return ['HeroSMS', 'HeroSMS API、V2取号、服务/国家覆盖、供应商和地区排除配置'];
+  if (key.startsWith('SMSPOOL_')) return ['SMSPool', 'SMSPool API、服务/国家覆盖、价格、号池和地区排除配置'];
+  if (key.startsWith('VAKSMS_')) return ['Vak SMS', 'Vak SMS API、V0/V2取号、服务/国家、价格、运营商和地区排除配置'];
   return ['通用接码', '其他接码平台兼容字段；未归属平台的参数集中放在这里'];
 }
 
@@ -7292,12 +7291,7 @@ function renderSectionedConfigSectionV2(name, fields, sectionForKey, preferred, 
     activeRef.set(active);
   }
   const current = bySection[active] || { help: '', fields: [] };
-  // Keep the shared region filter in the SMSBower panel's final grid cell so
-  // the setting is visible beside the provider-specific price filters.
-  const sectionFields = name === '接码平台' && active === 'SMSBower'
-    ? current.fields.filter(f => f.key !== 'SMS_EXCEPT_REGIONS')
-        .concat(current.fields.filter(f => f.key === 'SMS_EXCEPT_REGIONS'))
-    : current.fields;
+  const sectionFields = current.fields;
   const switches = sectionFields.filter(f => f.type === 'bool');
   const inputs = sectionFields.filter(f => f.type !== 'bool');
   const promo = name === '邮箱 / OTP' && active === 'Remail'

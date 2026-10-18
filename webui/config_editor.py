@@ -745,10 +745,6 @@ EDITABLE_FIELDS = [
         "label": "最高价格（人民币）", "help": "所有短信平台共用的硬上限；按人民币填写，程序按实时汇率换算成各平台 USD maxPrice；各平台页的额外上限只能更低，留空表示不限",
     },
     {
-        "key": "SMS_EXCEPT_REGIONS", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "排除号码地区（所有平台共用）", "help": "按号码归属地过滤，多个地区用逗号分隔，例如 Quebec,Ontario；SMSBower 页也可直接设置，命中后会释放号码并换号",
-    },
-    {
         "key": "SMS_REJECT_VOIP_NUMBERS", "file": "codex.py", "type": "bool", "group": "接码平台",
         "label": "拒绝虚拟号码（VoIP）", "help": "开启后只按具体号码的哈希记录和排除近期被上游判定为 VoIP 的号码，不会排除整个国家；若上游明确返回 voip_phone_disallowed，当前号码始终会释放并记录。各平台没有统一的购号前线路类型字段，因此不是购号前的绝对保证",
     },
@@ -835,6 +831,10 @@ EDITABLE_FIELDS = [
         "label": "Tiger SMS 排除供应商", "help": "可选，排除的供应商 ID 用逗号分隔",
     },
     {
+        "key": "TIGER_SMS_EXCEPT_REGIONS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Tiger SMS 排除号码地区", "help": "仅过滤 Tiger SMS 号码；多个地区用逗号分隔，例如 Quebec,Ontario",
+    },
+    {
         "key": "HEROSMS_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "HeroSMS API 地址", "help": "默认 https://hero-sms.com/stubs/handler_api.php",
     },
@@ -872,6 +872,10 @@ EDITABLE_FIELDS = [
         "label": "HeroSMS 排除号码前缀", "help": "可选，号码前缀用逗号分隔",
     },
     {
+        "key": "HEROSMS_EXCEPT_REGIONS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS 排除号码地区", "help": "仅过滤 HeroSMS 号码；多个地区用逗号分隔，例如 Quebec,Ontario",
+    },
+    {
         "key": "SMSPOOL_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSPool API 地址", "help": "默认 https://api.smspool.net",
     },
@@ -903,6 +907,10 @@ EDITABLE_FIELDS = [
     {
         "key": "SMSPOOL_POOL", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSPool 号池", "help": "可选；留空由平台选择",
+    },
+    {
+        "key": "SMSPOOL_EXCEPT_REGIONS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool 排除号码地区", "help": "仅过滤 SMSPool 号码；多个地区用逗号分隔，例如 Quebec,Ontario",
     },
     {
         "key": "VAKSMS_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -946,6 +954,10 @@ EDITABLE_FIELDS = [
         "label": "Vak SMS 固定价格", "help": "按 Vak API 请求固定价格号码；仍受第一页人民币最高价限制",
     },
     {
+        "key": "VAKSMS_EXCEPT_REGIONS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS 排除号码地区", "help": "仅过滤 Vak SMS 号码；多个地区用逗号分隔，例如 Quebec,Ontario",
+    },
+    {
         "key": "SMSBOWER_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSBower 供应商筛选", "help": "可选，供应商 ID 用逗号分隔；留空由平台自动选择",
     },
@@ -960,6 +972,10 @@ EDITABLE_FIELDS = [
     {
         "key": "SMSBOWER_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSBower 最低价格（元）", "help": "可选，按人民币填写；本地价格表筛选并换算为美元 minPrice",
+    },
+    {
+        "key": "SMSBOWER_EXCEPT_REGIONS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 排除号码地区", "help": "仅过滤 SMSBower 号码；多个地区用逗号分隔，例如 Quebec,Ontario 或 36/Quebec",
     },
     # ---- 低价号码池（默认跟随接码链，可选平台覆盖）----
     {

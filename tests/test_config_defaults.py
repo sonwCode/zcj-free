@@ -117,6 +117,20 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         self.assertEqual(fields["TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS"]["type"], "int")
         self.assertEqual(fields["TIGER_SMS_RANDOM_COUNTRY"]["group"], "接码平台")
 
+    def test_webui_exposes_region_exclusions_per_sms_provider(self):
+        fields = {field["key"]: field for field in config_editor.EDITABLE_FIELDS}
+        for key in (
+            "SMSBOWER_EXCEPT_REGIONS",
+            "TIGER_SMS_EXCEPT_REGIONS",
+            "HEROSMS_EXCEPT_REGIONS",
+            "SMSPOOL_EXCEPT_REGIONS",
+            "VAKSMS_EXCEPT_REGIONS",
+        ):
+            self.assertEqual(fields[key]["type"], "str")
+            self.assertEqual(fields[key]["group"], "接码平台")
+            self.assertIn("仅过滤", fields[key]["help"])
+        self.assertNotIn("SMS_EXCEPT_REGIONS", fields)
+
     def test_browser_data_saver_defaults_block_google_gsi(self):
         with _browser_source_defaults():
             self.assertIn(
