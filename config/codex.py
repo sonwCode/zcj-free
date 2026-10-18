@@ -105,7 +105,7 @@ CPA_CALLBACK_SUBMIT_RETRY_DELAY: int = 6
 CPA_SAVE_CALLBACK_RECEIPT: bool = True
 
 # ============================================================
-# 接码平台（SMSBower + Tiger SMS）
+# 接码平台（SMSBower + Tiger SMS + HeroSMS + SMSPool + Vak SMS）
 # ============================================================
 
 # 兼容旧配置：SMS_PROVIDER 仍表示单平台模式下的首选平台。
@@ -121,8 +121,9 @@ SMSBOWER_USE_V2: bool = False
 SMSBOWER_PROVIDER_IDS: str = ""
 SMSBOWER_EXCEPT_PROVIDER_IDS: str = ""
 SMSBOWER_PHONE_EXCEPTION: str = ""
-# 兼容旧配置：实时汇率不可用时，按 1 USD = 7.2 CNY 回退。
-SMSBOWER_USD_CNY_RATE: str = "7.2"
+SMS_EXCEPT_REGIONS: str = ""
+# 旧配置名，仅为兼容旧 .env 保留；不再作为固定汇率回退。
+SMSBOWER_USD_CNY_RATE: str = ""
 SMSBOWER_MIN_PRICE: str = ""
 
 # Tiger SMS handler_api 配置（价格接口和 maxPrice 均使用 USD）
@@ -134,14 +135,57 @@ TIGER_SMS_EXCEPT_PROVIDER_IDS: str = ""
 TIGER_SMS_RANDOM_COUNTRY: bool = True
 TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS: int = 12
 
+# HeroSMS：SMS-Activate 兼容 handler_api；未填写 key 时自动跳过。
+HEROSMS_API_BASE: str = "https://hero-sms.com/stubs/handler_api.php"
+HEROSMS_API_KEY: str = env_str("HEROSMS_API_KEY", "")
+HEROSMS_USE_V2: bool = False
+HEROSMS_SERVICE: str = ""
+HEROSMS_COUNTRY: str = ""
+# 可选的 USD 额外上限；与通用 SMS_MAX_PRICE 取更低值。
+HEROSMS_MAX_PRICE: str = ""
+HEROSMS_PROVIDER_IDS: str = ""
+HEROSMS_EXCEPT_PROVIDER_IDS: str = ""
+HEROSMS_PHONE_EXCEPTION: str = ""
+
+# SMSPool 原生 API；国家/服务代码必须按 SMSPool 控制台配置填写。
+SMSPOOL_API_BASE: str = "https://api.smspool.net"
+SMSPOOL_API_KEY: str = env_str("SMSPOOL_API_KEY", "")
+SMSPOOL_SERVICE: str = ""
+SMSPOOL_COUNTRY: str = ""
+# 可选的 USD 额外上限；与通用 SMS_MAX_PRICE 取更低值。
+SMSPOOL_MAX_PRICE: str = ""
+SMSPOOL_MIN_PRICE: str = ""
+SMSPOOL_PRICING_OPTION: str = "0"
+SMSPOOL_POOL: str = ""
+
+# Vak SMS：SMS-Activate 兼容 handler_api；国家/服务代码按 Vak 文档填写。
+VAKSMS_API_BASE: str = "https://vak-sms.com/stubs/handler_api.php"
+VAKSMS_API_KEY: str = env_str("VAKSMS_API_KEY", "")
+VAKSMS_USE_V2: bool = False
+VAKSMS_SERVICE: str = ""
+VAKSMS_COUNTRY: str = ""
+# 可选的 USD 额外上下限；与通用 SMS_MAX_PRICE 取更严格范围。
+VAKSMS_MAX_PRICE: str = ""
+VAKSMS_MIN_PRICE: str = ""
+VAKSMS_OPERATOR: str = ""
+VAKSMS_REF: str = ""
+VAKSMS_FIXED_PRICE: bool = False
+
 # 服务代码：OpenAI (ChatGPT) = "dr"
 SMS_SERVICE: str = "dr"
 
 # 国家代码；留空且开启随机模式时按价格和实时库存动态选择。
 SMS_COUNTRY: str = ""
 
-# 接码价格上限，按人民币填写；程序换算成供应商要求的 USD maxPrice。
+# 所有接码平台共用的价格硬上限，按人民币填写；程序按实时汇率换算成各平台
+# 所需的 USD maxPrice。平台页的 provider-specific 价格只能进一步收紧，不能放宽此上限。
 SMS_MAX_PRICE: str = ""
+
+# 启用后，取号时会优先跳过质量账本中同一号码近期被上游判定为 VoIP 的记录，
+# 不会因为一个号码而排除整个国家；上游明确返回 voip_phone_disallowed 时仍会释放当前号码。
+# 各平台没有统一的购号前线路类型字段，因此这不是购号前的绝对保证。
+SMS_REJECT_VOIP_NUMBERS: bool = False
+
 # 实时汇率源，按顺序级联尝试，任一成功即用。
 # 旧默认 api.frankfurter.app 已失效（返回 403/301），保留在末尾仅作兼容。
 SMS_FX_RATE_URLS: str = (
@@ -150,30 +194,41 @@ SMS_FX_RATE_URLS: str = (
 )
 # 单源兼容项：非空时优先于 SMS_FX_RATE_URLS（便于临时指定单一来源）。
 SMS_FX_RATE_URL: str = ""
-SMS_FX_RATE_TTL: int = 900
+SMS_FX_RATE_TTL: int = 600
 # 最近一次成功获取的实时汇率（USD/CNY，即 1 USD = N CNY）。用于网络不可用时的
-# 回退，使价格边界仍贴近市价，而不是钉死在一个陈旧常数上。
-SMS_LAST_KNOWN_USD_CNY_RATE: str = "7.2"
+# 回退，使价格边界仍贴近市价；运行时也会写入 SMS_FX_CACHE_FILE。
+SMS_LAST_KNOWN_USD_CNY_RATE: str = ""
+# 进程重启后读取最近一次成功汇率；相对项目根目录解析。
+SMS_FX_CACHE_FILE: str = "runtime/sms_fx_rate.json"
 
 # SMSBower 随机国家与号码质量策略
 SMSBOWER_RANDOM_COUNTRY: bool = True
 SMSBOWER_RANDOM_COUNTRY_ATTEMPTS: int = 12
+# 价格/库存快照为空时连续刷新的总时长（秒）。旧实现固定约 24 秒，库存恢复稍慢
+# 就会在仍有号可买的情况下误报“没有可用国家”。
+SMSBOWER_STOCK_WAIT_SECONDS: int = 90
 SMS_NUMBER_ACQUIRE_RETRIES: int = 3
 # 供应商价格/库存接口偶尔返回瞬时空快照；预检空快照时有限重查，不申请号码。
 SMS_PREFLIGHT_RETRIES: int = 2
 SMS_PREFLIGHT_RETRY_DELAY: int = 2
 SMS_NUMBER_REJECT_TTL: int = 1800
-# 仅明确 voip_phone_disallowed 的 provider-country 使用该冷却时间。
+# 兼容旧配置字段；VoIP 不按国家冷却，具体号码使用 SMS_NUMBER_REJECT_TTL。
 SMS_COUNTRY_REJECT_TTL: int = 900
 SMS_TIER_FAILURE_THRESHOLD: int = 2
 SMS_TIER_COOLDOWN_SECONDS: int = 2700
+
+# 短信质量账本只保存号码哈希和 provider/country 聚合统计，不保存原始号码。
+SMS_QUALITY_FILE: str = "runtime/sms_quality.json"
+SMS_QUALITY_MAX_AGE_DAYS: int = 30
+SMS_QUALITY_MIN_SAMPLES: int = 3
+SMS_QUALITY_MAX_ENTRIES: int = 5000
 
 # 一个号收不到短信/被拒时，换号重试的最大次数
 SMS_MAX_RETRIES: int = 10
 # OpenAI fraud_guard 会要求“稍后再试”；连续换号过快会继续触发同一风控窗口。
 # 仅 fraud_guard 使用这组退避，普通号码错误仍使用 3-8 秒的短等待。
-SMS_FRAUD_GUARD_RETRY_MIN: int = 20
-SMS_FRAUD_GUARD_RETRY_MAX: int = 45
+SMS_FRAUD_GUARD_RETRY_MIN: int = 60
+SMS_FRAUD_GUARD_RETRY_MAX: int = 120
 
 # 单个号等待短信的最长秒数（超时则取消该号换下一个）
 SMS_CODE_WAIT: int = 120
@@ -183,6 +238,9 @@ CODEX_EMAIL_OTP_WAIT: int = 120
 CODEX_EMAIL_OTP_MAX_ATTEMPTS: int = 4
 # Codex 在邮箱提交前遇到代理403/连接重置时，最多更换出口重试次数。
 CODEX_PROXY_RETRY_ATTEMPTS: int = 2
+# 批量 Codex 补跑仍使用线程池；每个 worker 在启动浏览器前错峰，避免同一秒
+# 让多个授权页同时命中同一个出口/代理。设为 0 可恢复同时启动。
+CODEX_RETRY_STAGGER_SECONDS: int = 8
 
 # 轮询接码平台查短信的间隔（秒）
 SMS_POLL_INTERVAL: int = 5
@@ -194,4 +252,5 @@ SMS_RELEASE_RETRIES: int = 3
 SMS_RELEASE_RETRY_DELAY: int = 1
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_REQUIRED_ON_REGISTRATION': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_OAUTH_DRIVER_FALLBACK': 'bool', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_REQUEST_RETRIES': 'int', 'CPA_REQUEST_RETRY_DELAY': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_PROVIDER_CHAIN': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_URLS': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_LAST_KNOWN_USD_CNY_RATE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_FRAUD_GUARD_RETRY_MIN': 'int', 'SMS_FRAUD_GUARD_RETRY_MAX': 'int', 'SMS_CODE_WAIT': 'int', 'CODEX_EMAIL_OTP_WAIT': 'int', 'CODEX_EMAIL_OTP_MAX_ATTEMPTS': 'int', 'CODEX_PROXY_RETRY_ATTEMPTS': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_RELEASE_RETRIES': 'int', 'SMS_RELEASE_RETRY_DELAY': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_PREFLIGHT_RETRIES': 'int', 'SMS_PREFLIGHT_RETRY_DELAY': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_COUNTRY_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_REQUIRED_ON_REGISTRATION': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_OAUTH_DRIVER_FALLBACK': 'bool', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_REQUEST_RETRIES': 'int', 'CPA_REQUEST_RETRY_DELAY': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_PROVIDER_CHAIN': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_REJECT_VOIP_NUMBERS': 'bool', 'SMS_FX_RATE_URL': 'str', 'SMS_FX_RATE_URLS': 'str', 'SMS_FX_RATE_TTL': 'int', 'SMS_LAST_KNOWN_USD_CNY_RATE': 'str', 'SMS_FX_CACHE_FILE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_FRAUD_GUARD_RETRY_MIN': 'int', 'SMS_FRAUD_GUARD_RETRY_MAX': 'int', 'SMS_CODE_WAIT': 'int', 'CODEX_EMAIL_OTP_WAIT': 'int', 'CODEX_EMAIL_OTP_MAX_ATTEMPTS': 'int', 'CODEX_PROXY_RETRY_ATTEMPTS': 'int', 'CODEX_RETRY_STAGGER_SECONDS': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_RELEASE_RETRIES': 'int', 'SMS_RELEASE_RETRY_DELAY': 'int', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_USD_CNY_RATE': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'SMSBOWER_RANDOM_COUNTRY': 'bool', 'SMSBOWER_RANDOM_COUNTRY_ATTEMPTS': 'int', 'SMSBOWER_STOCK_WAIT_SECONDS': 'int', 'TIGER_SMS_API_BASE': 'str', 'TIGER_SMS_API_KEY': 'str', 'TIGER_SMS_USE_V2': 'bool', 'TIGER_SMS_PROVIDER_IDS': 'str', 'TIGER_SMS_EXCEPT_PROVIDER_IDS': 'str', 'TIGER_SMS_RANDOM_COUNTRY': 'bool', 'TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS': 'int', 'HEROSMS_API_BASE': 'str', 'HEROSMS_API_KEY': 'str', 'HEROSMS_USE_V2': 'bool', 'HEROSMS_SERVICE': 'str', 'HEROSMS_COUNTRY': 'str', 'HEROSMS_MAX_PRICE': 'str', 'HEROSMS_PROVIDER_IDS': 'str', 'HEROSMS_EXCEPT_PROVIDER_IDS': 'str', 'HEROSMS_PHONE_EXCEPTION': 'str', 'SMSPOOL_API_BASE': 'str', 'SMSPOOL_API_KEY': 'str', 'SMSPOOL_SERVICE': 'str', 'SMSPOOL_COUNTRY': 'str', 'SMSPOOL_MAX_PRICE': 'str', 'SMSPOOL_MIN_PRICE': 'str', 'SMSPOOL_PRICING_OPTION': 'str', 'SMSPOOL_POOL': 'str', 'VAKSMS_API_BASE': 'str', 'VAKSMS_API_KEY': 'str', 'VAKSMS_USE_V2': 'bool', 'VAKSMS_SERVICE': 'str', 'VAKSMS_COUNTRY': 'str', 'VAKSMS_MAX_PRICE': 'str', 'VAKSMS_MIN_PRICE': 'str', 'VAKSMS_OPERATOR': 'str', 'VAKSMS_REF': 'str', 'VAKSMS_FIXED_PRICE': 'bool', 'SMS_NUMBER_ACQUIRE_RETRIES': 'int', 'SMS_PREFLIGHT_RETRIES': 'int', 'SMS_PREFLIGHT_RETRY_DELAY': 'int', 'SMS_NUMBER_REJECT_TTL': 'int', 'SMS_COUNTRY_REJECT_TTL': 'int', 'SMS_TIER_FAILURE_THRESHOLD': 'int', 'SMS_TIER_COOLDOWN_SECONDS': 'int', 'SMS_QUALITY_FILE': 'str', 'SMS_QUALITY_MAX_AGE_DAYS': 'int', 'SMS_QUALITY_MIN_SAMPLES': 'int', 'SMS_QUALITY_MAX_ENTRIES': 'int'})
+apply_env_overrides(globals(), {'SMS_EXCEPT_REGIONS': 'str'})

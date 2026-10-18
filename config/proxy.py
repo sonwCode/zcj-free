@@ -11,6 +11,7 @@
 """
 import random
 import threading
+import time
 from urllib.parse import quote, urlparse
 
 from config.env_loader import apply_env_overrides
@@ -46,6 +47,10 @@ PLAN_CHECK_TIMEOUT = 15.0
 PLAN_CHECK_MAX_ATTEMPTS = 3
 PLAN_CHECK_RETRY_DELAY = 2.0
 
+# 出口故障冷却（秒）。代理池里某个出口出现代理/隧道错误后，在这段时间内
+# 不再优先选中它，避免同一坏出口被连续任务反复踩到；全部出口都在冷却时仍会回退使用。
+PROXY_FAILURE_COOLDOWN_SECONDS = 300
+
 # 新注册账号的权益可能存在短暂同步延迟。首次查询失败，或返回 free 且暂未发现
 # Plus 试用资格时，等待该秒数后再复查一次；设为 0 可关闭复查。
 PLAN_CHECK_REGISTRATION_RECHECK_DELAY = 2.0
@@ -60,6 +65,45 @@ PLAN_CHECK_JITTER = 0.8
 
 _PROXY_LEASE_LOCK = threading.RLock()
 _PROXY_LEASES: dict[str, int] = {}
+# 出口 -> 冷却到期时间（time.monotonic 基准）。仅用于排序偏好，不阻止使用。
+_PROXY_COOLDOWNS: dict[str, float] = {}
+
+
+def _proxy_cooldown_seconds() -> float:
+    try:
+        return max(0.0, float(globals().get("PROXY_FAILURE_COOLDOWN_SECONDS", 300) or 0))
+    except (TypeError, ValueError):
+        return 300.0
+
+
+def note_proxy_failure(proxy: str | None, cooldown_seconds: float | None = None) -> None:
+    """记录一次出口故障，让该出口在冷却期内不再被优先选中。"""
+    target = str(proxy or "").strip()
+    if not target:
+        return
+    seconds = _proxy_cooldown_seconds() if cooldown_seconds is None else max(0.0, float(cooldown_seconds))
+    if seconds <= 0:
+        return
+    with _PROXY_LEASE_LOCK:
+        _PROXY_COOLDOWNS[target] = time.monotonic() + seconds
+
+
+def note_proxy_success(proxy: str | None) -> None:
+    """出口恢复正常时清除其冷却标记。"""
+    target = str(proxy or "").strip()
+    if not target:
+        return
+    with _PROXY_LEASE_LOCK:
+        _PROXY_COOLDOWNS.pop(target, None)
+
+
+def _cooling_proxies() -> set[str]:
+    now = time.monotonic()
+    with _PROXY_LEASE_LOCK:
+        expired = [key for key, deadline in _PROXY_COOLDOWNS.items() if deadline <= now]
+        for key in expired:
+            _PROXY_COOLDOWNS.pop(key, None)
+        return set(_PROXY_COOLDOWNS)
 
 
 def _valid_port(value: str) -> bool:
@@ -107,10 +151,12 @@ def pick_proxy() -> str:
 
 
 def pick_proxy_excluding(excluded=None) -> str:
-    """随机选择代理；有可用候选时排除指定目标。"""
+    """随机选择代理；有可用候选时排除指定目标与冷却中的出口。"""
     excluded_set = {str(item or "").strip() for item in (excluded or ()) if str(item or "").strip()}
     candidates = [proxy for proxy in PROXY_POOL if proxy not in excluded_set]
-    return random.choice(candidates or PROXY_POOL) if PROXY_POOL else ""
+    cooling = _cooling_proxies()
+    healthy = [proxy for proxy in candidates if proxy not in cooling]
+    return random.choice(healthy or candidates or PROXY_POOL) if PROXY_POOL else ""
 
 
 def acquire_proxy_lease(excluded=None) -> str:
@@ -122,6 +168,11 @@ def acquire_proxy_lease(excluded=None) -> str:
         candidates = [proxy for proxy in PROXY_POOL if proxy not in excluded_set]
         if not candidates:
             candidates = list(PROXY_POOL)
+        # 冷却中的出口降级为备选：只有健康出口都被排除/占用时才回退使用。
+        cooling = _cooling_proxies()
+        healthy = [proxy for proxy in candidates if proxy not in cooling]
+        if healthy:
+            candidates = healthy
         minimum = min(_PROXY_LEASES.get(proxy, 0) for proxy in candidates)
         candidates = [proxy for proxy in candidates if _PROXY_LEASES.get(proxy, 0) == minimum]
         selected = random.choice(candidates)
@@ -145,6 +196,7 @@ def release_proxy_lease(proxy: str | None) -> None:
 def _reset_proxy_leases_for_tests() -> None:
     with _PROXY_LEASE_LOCK:
         _PROXY_LEASES.clear()
+        _PROXY_COOLDOWNS.clear()
 
 
 # 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理
@@ -154,6 +206,7 @@ PROXY = pick_proxy()
 apply_env_overrides(globals(), {
     'PROXY_POOL': 'list_str_multiline',
     'PROXY_POOL_UPSTREAM_PROXY': 'str',
+    'PROXY_FAILURE_COOLDOWN_SECONDS': 'float',
     'PLAN_CHECK_PROXY_MODE': 'str',
     'PLAN_CHECK_PROXY': 'list_str_multiline',
     'PLAN_CHECK_UPSTREAM_PROXY': 'str',

@@ -493,7 +493,7 @@ class RegistrationStopTests(unittest.TestCase):
 
         fake_codex = types.ModuleType("core.codex_oauth")
 
-        def fail(_email, force=False):
+        def fail(_email, force=False, **kwargs):
             raise RuntimeError("fixture oauth failure")
 
         fake_codex.run_codex_oauth = fail
@@ -512,6 +512,23 @@ class RegistrationStopTests(unittest.TestCase):
         self.assertFalse(codex_retry_service.is_retrying(email))
         update_status.assert_called_once()
         self.assertEqual(update_status.call_args.args[1], "failed")
+
+    def test_codex_retry_job_preserves_explicit_non_retryable_result(self):
+        job_id = self._next_job_id()
+        email = "retry-terminal@example.test"
+        updates = []
+        with patch.object(registration_service.db, "get_job", return_value={"id": job_id, "status": "pending"}), \
+                patch.object(registration_service.db, "update_job", side_effect=lambda _id, **kwargs: updates.append(kwargs)), \
+                patch.object(codex_retry_service, "run_worker", return_value={
+                    "status": "failed", "ok": False, "error_code": "browser_session_circuit_open",
+                    "retryable": False, "message": "browser_session_circuit_open",
+                }), \
+                patch.object(codex_retry_service, "release"):
+            registration_service._run_codex_retry_job(job_id, "retry.log", email, 42)
+
+        terminal = [item for item in updates if item.get("status") == "failed"][-1]
+        self.assertEqual(terminal["error_code"], "browser_session_circuit_open")
+        self.assertFalse(terminal["retryable"])
 
     def test_codex_retry_job_persists_account_and_codex_terminal_states(self):
         job_id = self._next_job_id()

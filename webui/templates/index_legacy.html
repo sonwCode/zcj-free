@@ -467,7 +467,6 @@
       <h1>GPT 注册控制台</h1>
       <p class="meta">本地 Web 控制台 · 数据更新于 <span id="updatedAt">-</span></p>
       <div class="header-links">
-        <a href="https://t.me/+gu_cvEKq_vcyZWRl" target="_blank" rel="noopener noreferrer">TG 交流群</a>
         <a href="/?ui=modern" title="切换到新版侧边栏 UI">切换新 UI</a>
         <form method="post" action="/logout"><button type="submit">退出</button></form>
       </div>
@@ -3550,11 +3549,14 @@ function emailConfigSectionForKey(key) {
 
 
 function smsConfigSectionForKey(key) {
-  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_PRICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
+  if (['SMS_PROVIDER','SMS_PROVIDER_CHAIN','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_PRICE','SMS_MAX_RETRIES','SMS_CODE_WAIT','SMS_POLL_INTERVAL','SMS_REQUEST_TIMEOUT','SMS_RELEASE_RETRIES','SMS_RELEASE_RETRY_DELAY','SMS_API_KEY'].includes(key)) {
     return ['通用接码', '接码通道选择、国家/服务代码、价格、等待和重试参数；SMSBower 的 OpenAI 服务代码为 dr，openai/chatgpt 会自动转换'];
   }
-  if (key === 'SMS_API_KEY') return ['GrizzlySMS', 'GrizzlySMS 平台 API Key 配置'];
   if (key.startsWith('SMSBOWER_')) return ['SMSBower', 'SMSBower handler_api、V2取号和供应商/价格筛选配置'];
+  if (key.startsWith('TIGER_SMS_')) return ['Tiger SMS', 'Tiger SMS API、V2取号、随机选国和供应商筛选配置'];
+  if (key.startsWith('HEROSMS_')) return ['HeroSMS', 'HeroSMS API、V2取号、服务/国家覆盖和供应商筛选配置'];
+  if (key.startsWith('SMSPOOL_')) return ['SMSPool', 'SMSPool API、服务/国家覆盖、价格和号池配置'];
+  if (key.startsWith('VAKSMS_')) return ['Vak SMS', 'Vak SMS API、V0/V2取号、服务/国家、价格和运营商配置'];
   if (key.startsWith('H_')) return ['H 接码', 'H_API.md 本地 H 取号服务配置；项目ID/国家留空时复用通用字段'];
   if (key.startsWith('L_')) return ['L 接码', 'L_API.md 本地 L 取号服务配置'];
   return ['其他接码配置', ''];
@@ -3624,7 +3626,7 @@ function renderConfigFields(fields) {
       CONFIG_SMS_ACTIVE_SECTION,
       v => { CONFIG_SMS_ACTIVE_SECTION = v; },
       smsConfigSectionForKey,
-      ['通用接码', 'GrizzlySMS', 'SMSBower', 'H 接码', 'L 接码', '其他接码配置'],
+      ['通用接码', 'SMSBower', 'Tiger SMS', 'HeroSMS', 'SMSPool', 'Vak SMS', 'H 接码', 'L 接码', '其他接码配置'],
       'sms-config-section'
     );
   }

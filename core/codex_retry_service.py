@@ -4,6 +4,7 @@ import ctypes
 import logging
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from core import db
@@ -170,8 +171,14 @@ def run_worker(
     clear_log: bool = True,
     target_log_path: str | Path | None = None,
     driver: str | None = None,
+    start_delay: float = 0,
+    pool_activation: dict | None = None,
 ) -> dict:
-    """执行一次 Codex 补跑。调用前必须先 reserve，结束时会自动 release。"""
+    """执行一次 Codex 补跑。调用前必须先 reserve，结束时会自动 release。
+
+    pool_activation 非空时表示号码由低价号码池提前锁定，流程不得再向供应商取号，
+    也不得自行释放该激活；号码生命周期由号码池负责。
+    """
     fh: logging.FileHandler | None = None
     root_logger = logging.getLogger()
     result: dict = {"status": "failed", "ok": False, "message": "Codex 补跑未返回结果"}
@@ -217,13 +224,39 @@ def run_worker(
 
         if batch_label:
             logger.info("[Codex 补跑] 批量任务：%s", batch_label)
+        delay = max(0.0, float(start_delay or 0))
+        if delay:
+            logger.info("[Codex 补跑] 批量错峰等待 %.1fs", delay)
+            deadline = time.monotonic() + delay
+            while time.monotonic() < deadline:
+                check_stop_requested(email)
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         logger.info("[Codex 补跑] 开始：%s", email)
+        run_id = uuid.uuid4().hex[:12]
+        profile_name = f"codex-{run_id}"
+        logger.info("[Codex 补跑] 隔离运行：run_id=%s profile=%s", run_id, profile_name)
         logger.info("[Codex 补跑] 阶段说明：获取授权地址 → 登录邮箱 → 邮箱 OTP → 手机验证 → 捕获 callback → 提交/保存凭证")
         check_stop_requested(email)
-        if driver is None:
-            result = run_codex_oauth(email, force=True)
-        else:
-            result = run_codex_oauth(email, force=True, driver=driver)
+        oauth_kwargs = {"force": True, "profile_name": profile_name, "job_id": run_id}
+        if driver is not None:
+            oauth_kwargs["driver"] = driver
+        if pool_activation:
+            oauth_kwargs["pool_activation"] = dict(pool_activation)
+        try:
+            result = run_codex_oauth(email, **oauth_kwargs)
+        except TypeError as exc:
+            # 允许旧版外部调用桩/插件继续工作；只有明确是不认识新隔离参数时
+            # 才回退，避免吞掉 OAuth 流程内部真正的 TypeError。
+            error_text = str(exc or "")
+            if "unexpected keyword argument" not in error_text or not any(
+                f"'{key}'" in error_text
+                for key in ("profile_name", "job_id", "pool_activation")
+            ):
+                raise
+            legacy_kwargs = {"force": True}
+            if driver is not None:
+                legacy_kwargs["driver"] = driver
+            result = run_codex_oauth(email, **legacy_kwargs)
         check_stop_requested(email)
         logger.info(
             "[Codex 补跑] 结果：status=%s ok=%s file=%s callback=%s",

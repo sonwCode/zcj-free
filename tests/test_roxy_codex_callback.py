@@ -22,6 +22,17 @@ class _Logger:
         return None
 
 
+class CloakSeleniumDriver:
+    """Minimal stand-in for the Playwright-backed Cloak driver."""
+
+    def __init__(self, on_kill=None):
+        self._on_kill = on_kill
+
+    def force_kill(self):
+        if self._on_kill is not None:
+            self._on_kill()
+
+
 class _Driver:
     def __init__(self, entries):
         self.entries = entries
@@ -58,9 +69,18 @@ def _entry(method, params):
     }
 
 
+def _load_cleanup_helper_pair():
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
+    wanted = {"_bounded_codex_browser_call", "_is_playwright_backed_driver"}
+    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    namespace = {"threading": threading, "logger": _Logger()}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
+    return namespace["_bounded_codex_browser_call"], namespace["_is_playwright_backed_driver"]
+
+
 def _load_cleanup_helper():
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
-    wanted = {"_bounded_codex_browser_call"}
+    wanted = {"_bounded_codex_browser_call", "_is_playwright_backed_driver"}
     body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
     namespace = {"threading": threading, "logger": _Logger()}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
@@ -81,6 +101,35 @@ class RoxyCodexCallbackTests(unittest.TestCase):
         elapsed = time.monotonic() - begin
         self.assertTrue(started.is_set())
         self.assertLess(elapsed, 1.5)
+
+    def test_playwright_cleanup_runs_in_calling_thread(self):
+        bounded, is_pw = _load_cleanup_helper_pair()
+        self.assertTrue(is_pw(CloakSeleniumDriver()))
+        self.assertFalse(is_pw(_Driver([])))
+        self.assertFalse(is_pw(None))
+
+        driver = CloakSeleniumDriver()
+        caller = threading.get_ident()
+        seen = {}
+
+        def callback():
+            seen["thread"] = threading.get_ident()
+
+        self.assertTrue(bounded("fixture", callback, timeout_seconds=1.0, driver=driver))
+        self.assertEqual(seen["thread"], caller)
+
+    def test_playwright_cleanup_timeout_forces_kill(self):
+        bounded, _ = _load_cleanup_helper_pair()
+        killed = []
+
+        def stuck_call():
+            time.sleep(2)
+
+        driver = CloakSeleniumDriver(on_kill=lambda: killed.append(True))
+        # 回调在调用线程内阻塞，无法被抢占；看门狗只能强制回收，
+        # 因此这里断言“超时即强制回收并按失败处理”，而不是墙上时钟上限。
+        self.assertFalse(bounded("fixture", stuck_call, timeout_seconds=0.05, driver=driver))
+        self.assertTrue(killed)
 
     @classmethod
     def setUpClass(cls):

@@ -95,6 +95,17 @@ class CodexDriverSelectionTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(len(calls), 1)
 
+    def test_navigation_timeout_and_email_submit_stall_are_recoverable(self):
+        recoverable = self.ns["_is_codex_driver_recoverable"]
+        self.assertTrue(recoverable("Page.goto: Timeout 90000ms exceeded"))
+        self.assertTrue(recoverable("codex_email_submit_stalled"))
+        self.assertFalse(recoverable("SmsCodeTimeout: waiting for SMS code timed out"))
+
+    def test_fraud_guard_and_cloudflare_are_not_recoverable(self):
+        recoverable = self.ns["_is_codex_driver_recoverable"]
+        self.assertFalse(recoverable('add_phone_response={"code":"fraud_guard"}'))
+        self.assertFalse(recoverable("Cloudflare challenge-platform"))
+
 
 class CodexDriverUiContractTests(unittest.TestCase):
     def test_both_templates_keep_reference_global_driver_behavior(self):

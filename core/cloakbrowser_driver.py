@@ -8,7 +8,9 @@ import re
 import signal
 import threading
 import time
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from config import cloakbrowser as _cfg
@@ -676,6 +678,8 @@ def build_cloak_driver(
     proxy: str | None = None,
     *,
     excluded_proxies=None,
+    profile_name: str | None = None,
+    job_id: str | None = None,
 ) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
     """启动 CloakBrowser；返回前的任何失败都会回滚已取得资源。"""
     proxy_relay = None
@@ -725,9 +729,16 @@ def build_cloak_driver(
         if license_key:
             opts["license_key"] = license_key
 
+        run_profile = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(profile_name or "").strip())
+        run_profile = run_profile.strip(".-_")[:64] or f"cloak-{uuid.uuid4().hex[:12]}"
         user_data_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+        if user_data_dir:
+            profile_dir = Path(user_data_dir).expanduser() / run_profile
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            user_data_dir = str(profile_dir)
         logger.info(
-            "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
+            "[Cloak] 启动 CloakBrowser：job_id=%s profile=%s headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
+            job_id or "-", run_profile,
             opts.get("headless"), opts.get("humanize"), opts.get("geoip"),
             proxy_url or "无", opts.get("locale") or "自动/默认", opts.get("timezone") or "自动/默认",
             locale_opts.get("accept_language") or "自动/默认", bool(user_data_dir),
@@ -760,8 +771,10 @@ def build_cloak_driver(
         proxy_lease_acquired = False
         driver._registration_log_prefix = "[Cloak注册]"
         driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
-        return driver, CloakOpenResult(raw={
+        return driver, CloakOpenResult(profile_id=run_profile, raw={
             "driver": "cloakbrowser",
+            "job_id": str(job_id or ""),
+            "profile_name": run_profile,
             "proxy": proxy_url,
             "proxy_pool_target": proxy_pool_target or proxy_url,
             "locale": locale_opts,

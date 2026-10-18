@@ -810,11 +810,17 @@ def _fill_email_and_otp(
     auth_url: str,
     registration_password: str | None = None,
 ) -> None:
+    # OTP 取码基准：应取“本次触发验证码的邮箱提交时刻”。密码页/MFA 会额外耗时
+    # 十几秒，若把基准前移到“页面已到达验证码页”的时刻，authorize 提交邮箱时刚发出
+    # 的那封验证码会被 after_ts 容差当成旧码丢掉，表现为轮询整轮拿不到码。
     otp_after_ts = time.time()
+    # 最近一次“提交邮箱”的时刻。authorize 提交邮箱时服务端就会发出验证码，
+    # 这个时刻才是取码基准；后续密码页/MFA 消耗的时间不能算进 after_ts。
+    email_submit_ts: float | None = None
 
     def _recover_email_submit_stall_once() -> str:
         """重开一次 CPA authorize，恢复卡在 Welcome back 的邮箱提交。"""
-        nonlocal otp_after_ts
+        nonlocal otp_after_ts, email_submit_ts
         logger.warning(
             "[Codex][Browser] 邮箱提交停在登录页，重开 authorize 并完整重提一次：url=%s",
             _safe_url_for_log(auth_url),
@@ -824,6 +830,8 @@ def _fill_email_and_otp(
         _maybe_accept(driver)
         _type_email_address(driver, email, timeout=12)
         human_delay("form")
+        email_submit_ts = time.time()
+        otp_after_ts = email_submit_ts
         _submit_email_step(driver)
         logger.info("[Codex][Browser] authorize 恢复已重新提交邮箱")
 
@@ -831,19 +839,14 @@ def _fill_email_and_otp(
             driver, email, timeout=18, registration_password=registration_password
         )
         if recovered_password_state in ("next_step", "email_otp"):
-            if recovered_password_state == "email_otp":
-                otp_after_ts = time.time()
             return recovered_password_state
         if _is_mfa_challenge_page(driver):
             _require_mfa_completion(driver, email, timeout=90)
             return "mfa"
         if _is_email_verification_page(driver):
-            otp_after_ts = time.time()
             return "email_otp"
         _maybe_click_passwordless_after_email(driver, email, timeout=18)
         entry_state = _wait_for_codex_auth_entry_state(driver, timeout=24)
-        if entry_state == "email_otp":
-            otp_after_ts = time.time()
         return entry_state
 
     logger.info("[Codex][Browser] 打开授权地址")
@@ -859,6 +862,8 @@ def _fill_email_and_otp(
         _type_email_address(driver, email, timeout=12)
         logger.info("[Codex][Browser] 已填写邮箱：%s", email)
         human_delay("form")
+        email_submit_ts = time.time()
+        otp_after_ts = email_submit_ts
         _submit_email_step(driver)
         logger.info("[Codex][Browser] 已提交邮箱，等待邮箱 OTP 页面")
         pw_result = _fill_login_password_if_present(
@@ -956,9 +961,14 @@ def _fill_email_and_otp(
             return
 
     if pw_result == "email_otp":
-        # 密码登录可能刚刚触发一封新的 OTP；不要拿 authorize 初始时间
-        # 去筛掉这封邮件。
-        otp_after_ts = time.time()
+        # 密码页/MFA 之后才到验证码页，此时“最新一封验证码”其实是提交邮箱那一刻
+        # 发出的。基准取该时刻并留出容差，避免把刚发出的码当旧码过滤掉。
+        if email_submit_ts:
+            otp_after_ts = email_submit_ts
+        logger.info(
+            "[Codex][Browser] 邮箱 OTP 取码基准=%s（提交邮箱时刻，不是到达验证码页的时刻）",
+            time.strftime("%H:%M:%S", time.localtime(otp_after_ts)),
+        )
     if pw_result == "next_step":
         if _is_mfa_challenge_page(driver):
             _require_mfa_completion(driver, email, timeout=90)
@@ -981,9 +991,13 @@ def _fill_email_and_otp(
         max_otp_attempts = 3
         otp_wait_seconds = 90
 
-    def _restart_email_otp_flow(reason: str) -> None:
-        """Codex Auth 上直接点 resend 可能触发服务端 500；这里改为重新打开授权地址并提交邮箱。"""
-        nonlocal otp_after_ts
+    def _restart_email_otp_flow(reason: str) -> str:
+        """Codex Auth 上直接点 resend 可能触发服务端 500；这里改为重新打开授权地址并提交邮箱。
+
+        返回值必须被外层消费：重开授权后若已用密码(+MFA)完成登录，页面已经不在
+        验证码页，此时继续轮询邮箱 OTP 只会白等到超时。返回 "logged_in" 让外层直接结束。
+        """
+        nonlocal otp_after_ts, email_submit_ts
         logger.info("[Codex][Browser] 重新触发邮箱 OTP：%s", reason)
         otp_after_ts = time.time()
         driver.get(auth_url)
@@ -992,6 +1006,8 @@ def _fill_email_and_otp(
         try:
             _type_email_address(driver, email, timeout=12)
             human_delay("form")
+            email_submit_ts = time.time()
+            otp_after_ts = email_submit_ts
             _submit_email_step(driver)
             logger.info("[Codex][Browser] 已重新提交邮箱触发 OTP")
             pw_result = _fill_login_password_if_present(
@@ -1001,9 +1017,20 @@ def _fill_email_and_otp(
                 if _is_mfa_challenge_page(driver):
                     _require_mfa_completion(driver, email, timeout=90)
                 logger.info("[Codex][Browser] 重新提交邮箱后已用密码完成登录，进入后续步骤")
-                return
+                return "logged_in"
             if pw_result != "email_otp":
                 _maybe_click_passwordless_after_email(driver, email, timeout=12)
+                if _is_mfa_challenge_page(driver):
+                    _require_mfa_completion(driver, email, timeout=90)
+                    logger.info("[Codex][Browser] 重开授权后命中 MFA 并已提交 TOTP，进入后续步骤")
+                    return "logged_in"
+                if not _is_email_verification_page(driver):
+                    # 页面既不是验证码页也不是密码页，说明已经越过邮箱验证这一步。
+                    logger.info(
+                        "[Codex][Browser] 重开授权后页面已离开邮箱验证阶段，停止继续取码：url=%s",
+                        _safe_url_for_log(str(getattr(driver, "current_url", "") or "")),
+                    )
+                    return "logged_in"
         except Exception as exc:
             if "codex_password_step_stalled" in str(exc):
                 raise
@@ -1013,6 +1040,7 @@ def _fill_email_and_otp(
             else:
                 logger.info("[Codex][Browser] 重开授权后已在邮箱 OTP 页面")
         human_delay("api")
+        return "email_otp"
 
     for otp_attempt in range(1, max_otp_attempts + 1):
         logger.info("[Codex][Browser] 等待邮箱 OTP：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
@@ -1034,7 +1062,9 @@ def _fill_email_and_otp(
                 type(exc).__name__,
                 str(exc)[:180],
             )
-            _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500")
+            if _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500") == "logged_in":
+                # 重开授权时已用密码(+MFA)完成登录，邮箱验证步骤已经过去，直接返回。
+                return
             continue
         used_codes.add(str(code))
         logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", _mask_otp(code))
@@ -2622,6 +2652,27 @@ def _finish_add_phone_response_watch(watch) -> str | None:
     return last_diagnostic
 
 
+def _extract_add_phone_error_code(diagnostic: object) -> str:
+    """从 add-phone/send 响应诊断里取服务端明确错误码。
+
+    服务端拒绝码（fraud_guard / voip_phone_disallowed 等）是失败主因；
+    页面态标记只是拒绝之后页面重新渲染的副作用，不能覆盖主因。
+    """
+    text = str(diagnostic or "")
+    if not text:
+        return ""
+    for pattern in (
+        r"['\"]code['\"]\s*:\s*['\"]([a-z0-9_]+)['\"]",
+        r"code\s*=\s*([a-z0-9_]+)",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            code = str(match.group(1) or "").strip().lower()
+            if code and code not in {"null", "none", "unknown"}:
+                return code
+    return ""
+
+
 def _phone_state_digest(state: dict) -> str:
     """把 add-phone 页的关键状态压成一行，便于在日志里完整看出卡点。
 
@@ -2872,11 +2923,22 @@ def _sleep_before_phone_retry(
     _stop_sleep(seconds)
 
 
-def _do_phone_verification_if_present(driver) -> dict | None:
-    """如果页面要求手机号验证，则用当前 sms_provider 自动完成。"""
+def _do_phone_verification_if_present(driver, activation: dict | None = None) -> dict | None:
+    """如果页面要求手机号验证，则用当前 sms_provider 自动完成。
+
+    activation 非空时表示号码由号码池提前锁定：这里不再向供应商取号，
+    失败时也不释放该激活，号码生命周期由号码池负责。
+    """
+    pooled = dict(activation) if isinstance(activation, dict) else {}
+    pooled_activation_id = str(pooled.get("activation_id") or "").strip()
+    pooled_phone = str(pooled.get("phone_number") or "").strip()
+    owns_activation = not pooled_activation_id
     provider = sms_provider._provider()
     http = sms_provider._http()
     max_retries = max(1, int(getattr(sms_provider._cfg, "SMS_MAX_RETRIES", 10) or 10)) if hasattr(sms_provider, "_cfg") else 10
+    if pooled_activation_id:
+        # 预先锁定的号码是一次性资源，不做换号重试。
+        max_retries = 1
     # 预检阶段可能直接抛出短信依赖错误；异常清理路径也会读取该变量。
     activation_id = None
     try:
@@ -2904,10 +2966,17 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 # 页面断连时先恢复 add-phone，再采购号码；否则会把新激活号
                 # 立刻取消，连续消耗短信库存和重试次数。
                 _ensure_add_phone_input(driver, reason=f"before-acquire-attempt-{attempt}")
-                preferred_provider = getattr(sms_provider, "provider_for_retry", lambda _attempt: None)(attempt)
-                activation_id, phone = sms_provider.acquire_number(
-                    http, country=configured_country, preferred_provider=preferred_provider
-                )
+                if pooled_activation_id:
+                    activation_id, phone = pooled_activation_id, pooled_phone
+                    logger.info(
+                        "[Codex][Browser] 使用号码池已锁定号码：activation=%s 号码=%s",
+                        activation_id, sms_provider._mask_phone(phone),
+                    )
+                else:
+                    preferred_provider = getattr(sms_provider, "provider_for_retry", lambda _attempt: None)(attempt)
+                    activation_id, phone = sms_provider.acquire_number(
+                        http, country=configured_country, preferred_provider=preferred_provider
+                    )
                 snapshot = {}
                 try:
                     snapshot = sms_provider.get_activation_info(activation_id) or {}
@@ -2977,7 +3046,7 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                 sms_provider.SmsNoNumbersError,
             ) as exc:
                 last_err = exc
-                if activation_id:
+                if activation_id and owns_activation:
                     try:
                         sms_provider.cancel_and_report_failure(activation_id, http, exc)
                     except Exception as feedback_exc:
@@ -2986,21 +3055,54 @@ def _do_phone_verification_if_present(driver) -> dict | None:
             except Exception as exc:
                 last_err = exc
                 err_text = str(exc) or ""
+                api_code = _extract_add_phone_error_code(response_diagnostic)
                 if response_diagnostic and response_diagnostic not in err_text:
-                    err_text = f"{err_text}; add_phone_response={response_diagnostic}"
+                    if api_code:
+                        # 服务端明确拒绝码优先：页面态（如 whatsapp_channel_reverted）
+                        # 只是拒绝后页面重渲染的副作用，放在前面会掩盖真实原因。
+                        err_text = (
+                            f"add_phone_rejected: code={api_code}; "
+                            f"page_state={err_text}; add_phone_response={response_diagnostic}"
+                        )
+                    else:
+                        err_text = f"{err_text}; add_phone_response={response_diagnostic}"
                     exc = RuntimeError(err_text)
                     last_err = exc
                 logger.warning("[Codex][Browser] 手机验证尝试失败：%s", err_text[:420])
-                if activation_id:
+                is_session_circuit = (
+                    _codex_proto._is_codex_circuit_open_error(err_text)
+                    or "status=403" in err_text.lower()
+                    or "http 403" in err_text.lower()
+                )
+                is_cloudflare_challenge = _codex_proto._is_codex_cloudflare_challenge(err_text)
+                failure_category = (
+                    "session_circuit_open" if is_session_circuit
+                    else "cloudflare_challenge" if is_cloudflare_challenge
+                    else None
+                )
+                if activation_id and owns_activation:
                     try:
-                        sms_provider.cancel_and_report_failure(activation_id, http, exc)
+                        sms_provider.cancel_and_report_failure(
+                            activation_id, http, exc, category=failure_category
+                        )
                     except Exception as feedback_exc:
                         logger.warning("[Codex][Browser] 释放号码或记录短信失败反馈失败：%s", feedback_exc)
                     activation_id = None
+                elif activation_id:
+                    logger.info(
+                        "[Codex][Browser] 号码池号码由号码池负责释放，本次不取消：activation=%s",
+                        activation_id,
+                    )
                 if _codex_proto._is_codex_fraud_guard_error(err_text):
                     raise _codex_proto.PhoneFraudGuardError(
                         f"phone_fraud_guard: {err_text[:220]}"
                     ) from exc
+                if is_session_circuit:
+                    raise _codex_proto.BrowserSessionCircuitOpenError(
+                        f"browser_session_circuit_open: {err_text[:220]}"
+                    ) from exc
+                if is_cloudflare_challenge:
+                    raise RuntimeError(f"cloudflare_challenge: {err_text[:220]}") from exc
                 # 余额不足 / 无可用号码：重试多少次都不会成功，立即失败止损，
                 # 避免白等 N 轮换号重试（每轮还要刷新页面 + 随机等待）。
                 if any(k in err_text for k in (
@@ -3015,7 +3117,7 @@ def _do_phone_verification_if_present(driver) -> dict | None:
                         "手机号流程进入 invalid_auth_step，说明授权状态还未从 email-verification 正常跳转或已失效；"
                         "已停止继续换号，避免继续消耗号码"
                     ) from exc
-                if any(k in err_text for k in (
+                if not api_code and any(k in err_text for k in (
                     "phone_react_state_sync_failed", "phone_otp_input_sync_failed",
                     "whatsapp_channel_reverted",
                 )):
@@ -3077,8 +3179,63 @@ def _finish_consent_workspace(driver) -> str:
 
 
 
-def _bounded_codex_browser_call(label: str, callback, timeout_seconds: float = 5.0) -> bool:
-    """Bound a CDP/navigation cleanup call so Codex cannot leave registration running forever."""
+def _is_playwright_backed_driver(driver) -> bool:
+    """判断驱动是否由同步 Playwright 支撑。
+
+    同步 Playwright 对象带 greenlet 线程亲和性，只能在创建它的线程里调用；
+    换线程执行会抛 "cannot switch to a different thread"。
+    """
+    if driver is None:
+        return False
+    try:
+        if driver.__class__.__name__ == "CloakSeleniumDriver":
+            return True
+    except Exception:
+        pass
+    try:
+        page = getattr(driver, "page", None)
+        return (type(page).__module__ or "").startswith("playwright")
+    except Exception:
+        return False
+
+
+def _bounded_codex_browser_call(
+    label: str, callback, timeout_seconds: float = 5.0, driver=None
+) -> bool:
+    """Bound a CDP/navigation cleanup call so Codex cannot leave registration running forever.
+
+    Playwright 支撑的驱动（Cloak）在 owner 线程执行，超时由看门狗强制回收浏览器，
+    让阻塞中的调用抛异常返回；Selenium 驱动保持独立线程执行。
+    """
+    timeout = max(0.5, float(timeout_seconds or 5.0))
+    if _is_playwright_backed_driver(driver):
+        completed = threading.Event()
+        timed_out = threading.Event()
+
+        def _watchdog() -> None:
+            if completed.wait(timeout):
+                return
+            timed_out.set()
+            logger.warning("[Codex][Browser] 清理 %s 超时 %.1fs，强制回收浏览器并回退其它授权驱动", label, timeout)
+            try:
+                driver.force_kill()
+            except BaseException as exc:  # noqa: BLE001 - cleanup must not mask task state
+                logger.debug("[Codex][Browser] 清理 %s 超时兜底失败：%s", label, str(exc)[:180])
+
+        watchdog = threading.Thread(target=_watchdog, name=f"codex-cleanup-watchdog-{label}", daemon=True)
+        watchdog.start()
+        try:
+            callback()
+            # 看门狗已判定超时并强制回收：此时浏览器状态不可信，必须按失败处理。
+            return not timed_out.is_set()
+        except BaseException as exc:  # noqa: BLE001 - cleanup must not mask task state
+            if not timed_out.is_set():
+                logger.info("[Codex][Browser] 清理 %s 失败，回退其它授权驱动：%s", label, str(exc)[:180])
+            return False
+        finally:
+            completed.set()
+            watchdog.join(0.05)
+
     result: list[object] = []
     errors: list[BaseException] = []
 
@@ -3090,9 +3247,9 @@ def _bounded_codex_browser_call(label: str, callback, timeout_seconds: float = 5
 
     worker = threading.Thread(target=_run, name=f"codex-cleanup-{label}", daemon=True)
     worker.start()
-    worker.join(max(0.5, float(timeout_seconds or 5.0)))
+    worker.join(timeout)
     if worker.is_alive():
-        logger.warning("[Codex][Browser] 清理 %s 超时 %.1fs，回退其它授权驱动", label, timeout_seconds)
+        logger.warning("[Codex][Browser] 清理 %s 超时 %.1fs，回退其它授权驱动", label, timeout)
         return False
     if errors:
         logger.info("[Codex][Browser] 清理 %s 失败，回退其它授权驱动：%s", label, str(errors[0])[:180])
@@ -3109,12 +3266,12 @@ def clear_roxy_browser_auth_state(driver) -> bool:
         "https://platform.openai.com",
     ]
     logger.info("[Codex][Browser] 复用注册窗口：开始清理 Cookie / localStorage / sessionStorage / cache")
-    if not _bounded_codex_browser_call("Network.enable", lambda: driver.execute_cdp_cmd("Network.enable", {})):
+    if not _bounded_codex_browser_call("Network.enable", lambda: driver.execute_cdp_cmd("Network.enable", {}), driver=driver):
         return False
-    if not _bounded_codex_browser_call("Network.clearBrowserCookies", lambda: driver.execute_cdp_cmd("Network.clearBrowserCookies", {})):
+    if not _bounded_codex_browser_call("Network.clearBrowserCookies", lambda: driver.execute_cdp_cmd("Network.clearBrowserCookies", {}), driver=driver):
         return False
     logger.info("[Codex][Browser] 已清理浏览器 Cookie")
-    if not _bounded_codex_browser_call("Network.clearBrowserCache", lambda: driver.execute_cdp_cmd("Network.clearBrowserCache", {})):
+    if not _bounded_codex_browser_call("Network.clearBrowserCache", lambda: driver.execute_cdp_cmd("Network.clearBrowserCache", {}), driver=driver):
         return False
     logger.info("[Codex][Browser] 已清理浏览器 Cache")
     for origin in origins:
@@ -3124,10 +3281,12 @@ def clear_roxy_browser_auth_state(driver) -> bool:
                 "origin": origin,
                 "storageTypes": "all",
             }),
+            driver=driver,
         ):
             return False
         logger.info("[Codex][Browser] 已清理站点数据：%s", origin)
-    if not _bounded_codex_browser_call("about:blank", lambda: driver.get("about:blank")):
+    # 导航可能比 CDP 调用慢，给更宽的超时，避免把正常加载当成卡死强制回收。
+    if not _bounded_codex_browser_call("about:blank", lambda: driver.get("about:blank"), timeout_seconds=20.0, driver=driver):
         return False
     _stop_sleep(1.0)
     logger.info("[Codex][Browser] 注册窗口登录态清理完成，准备开始 Codex 授权")
@@ -3144,14 +3303,25 @@ def _run_roxy_codex_oauth_once(
     clear_existing_state: bool = True,
     registration_password: str | None = None,
     _phone_activation: dict | None = None,
+    pool_activation: dict | None = None,
+    profile_name: str | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """指纹浏览器 Codex OAuth 入口。
 
     existing_driver/existing_opened 用于“注册成功后立刻跑 Codex”：
     复用注册时的 Roxy 窗口，不新建环境，只清理浏览器状态后开始授权。
+
+    profile_name/job_id 只作为隔离标识写入日志，便于把补跑与创建它的任务对上；
+    Roxy 分支此前拿不到这两个参数，导致隔离记录只出现在 cloak 分支。
     """
     from core import codex_oauth as proto
 
+    if profile_name or job_id:
+        logger.info(
+            "[Codex][Browser] 隔离标识：profile=%s job=%s pool_activation=%s",
+            profile_name or "-", job_id or "-", "yes" if pool_activation else "no",
+        )
     if not force and not proto._cfg.ENABLE_CODEX_AUTO:
         return proto._codex_result(status="skipped", message="ENABLE_CODEX_AUTO=False")
     if not email:
@@ -3208,7 +3378,9 @@ def _run_roxy_codex_oauth_once(
         )
         human_delay("api")
         logger.info("[Codex][Browser] 检查是否需要手机号验证")
-        current_phone_activation = _do_phone_verification_if_present(driver) or {}
+        current_phone_activation = _do_phone_verification_if_present(
+            driver, pool_activation
+        ) or {}
         phone_activation = proto._merge_phone_activation(
             phone_activation, current_phone_activation
         )
@@ -3347,8 +3519,13 @@ def run_roxy_codex_oauth(
     reuse_existing_profile: bool = False,
     clear_existing_state: bool = True,
     registration_password: str | None = None,
+    pool_activation: dict | None = None,
+    profile_name: str | None = None,
+    job_id: str | None = None,
 ) -> dict:
     """指纹浏览器 Codex OAuth 入口；CPA callback 409 timeout 时重新开启一轮授权。
+
+    pool_activation 非空时使用号码池预先锁定的号码，不再向供应商取号。
 
     registration_password 用于注册后立刻跑 Codex 的场景：账号此时尚未落库，
     Codex 登录密码页拿不到密码就会降级成一次性验证码登录并被服务端拒绝。
@@ -3358,7 +3535,9 @@ def run_roxy_codex_oauth(
     if registration_password:
         remember_registration_password(email, registration_password)
 
-    max_rounds = 2
+    # 号码池号码是一次性资源：已经用它提交过一次验证后，重新授权再提交同一个
+    # 号码会被上游判为重复/可疑，因此池场景只允许一轮，不做 CPA 重授权。
+    max_rounds = 1 if pool_activation else 2
     last_result = None
     phone_activation: dict = {}
     for round_no in range(1, max_rounds + 1):
@@ -3378,6 +3557,9 @@ def run_roxy_codex_oauth(
             clear_existing_state=clear_existing_state,
             registration_password=registration_password,
             _phone_activation=phone_activation,
+            pool_activation=pool_activation,
+            profile_name=profile_name,
+            job_id=job_id,
         )
         phone_activation = proto._merge_phone_activation(
             phone_activation, result.get("phone_activation")

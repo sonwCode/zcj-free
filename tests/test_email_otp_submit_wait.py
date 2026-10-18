@@ -11,10 +11,17 @@ SOURCE = ROOT / "core" / "roxy_registration.py"
 def _load_wait_helper():
     text = SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(text, filename=str(SOURCE))
-    node = next(
+    nodes = [
         item for item in tree.body
-        if isinstance(item, ast.FunctionDef) and item.name == "_wait_after_email_otp_submit"
-    )
+        if (
+            isinstance(item, ast.FunctionDef)
+            and item.name in {
+                "_wait_after_email_otp_submit",
+                "_is_cloudflare_challenge_state",
+                "_raise_if_cloudflare_challenge",
+            }
+        ) or (isinstance(item, ast.ClassDef) and item.name == "CloudflareChallengeError")
+    ]
 
     class Clock:
         def __init__(self):
@@ -51,7 +58,7 @@ def _load_wait_helper():
         "_email_otp_page_state": email_otp_page_state,
         "_log_prefix": lambda driver: "[test]",
     }
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), "exec"), namespace)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace["_wait_after_email_otp_submit"], Driver
 
 
@@ -78,6 +85,18 @@ class EmailOtpSubmitWaitTests(unittest.TestCase):
             timeout=5,
         )
         self.assertEqual(result, "pending")
+
+    def test_cloudflare_challenge_raises_before_otp_retry(self):
+        wait, Driver = _load_wait_helper()
+        with self.assertRaisesRegex(RuntimeError, "Cloudflare challenge"):
+            wait(
+                Driver([{
+                    "url": "https://auth.openai.com/email-verification",
+                    "title": "Just a moment...",
+                    "text": "Performing security verification",
+                }]),
+                timeout=5,
+            )
 
     def test_stable_error_marker_is_invalid(self):
         wait, Driver = _load_wait_helper()

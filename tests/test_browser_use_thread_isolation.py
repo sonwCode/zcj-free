@@ -1,5 +1,6 @@
 import asyncio
 import ast
+import contextvars
 import threading
 import unittest
 from pathlib import Path
@@ -30,6 +31,7 @@ def _load_functions():
 
     namespace = {
         "threading": threading,
+        "copy_context": contextvars.copy_context,
         "logger": _Logger(),
         "_current_job_id": current_job_id,
         "_bind_job_id": bind_job_id,
@@ -84,8 +86,18 @@ class BrowserUseThreadIsolationTests(unittest.TestCase):
         self.assertEqual(observed["job_id"], 842)
         self.assertTrue(binding["cleared"])
 
-    def test_public_entry_routes_to_isolated_thread_when_loop_is_running(self):
-        self.namespace["_has_running_asyncio_loop"] = lambda: True
+    def test_isolated_thread_propagates_contextvars(self):
+        source = contextvars.ContextVar("test_email_source", default=None)
+        token = source.set("remail")
+        observed = {}
+        try:
+            self.namespace["_run_in_isolated_thread"](lambda: observed.setdefault("source", source.get()))
+        finally:
+            source.reset(token)
+        self.assertEqual(observed["source"], "remail")
+
+    def test_public_entry_routes_to_isolated_thread_without_detectable_loop(self):
+        self.namespace["_has_running_asyncio_loop"] = lambda: False
         caller_thread = threading.get_ident()
 
         def implementation(**kwargs):

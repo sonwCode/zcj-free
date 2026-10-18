@@ -190,6 +190,45 @@ class BrowserCodexSmsResultTests(unittest.TestCase):
                 self.assertEqual(result["retryable"], expected_retryable)
                 self.assertFalse(result["ok"])
 
+    def test_browser_use_detects_cloudflare_challenge_page(self):
+        helper, namespace = _load_function(ROOT / "browser_use_codex_oauth.py", "_is_cloudflare_challenge_page")
+        namespace.update({
+            "_page_url": lambda page: page.url,
+            "_body_snippet": lambda page, limit: page.body[:limit],
+            "_codex_proto": types.SimpleNamespace(
+                _is_codex_cloudflare_challenge=lambda value: any(
+                    marker in value.lower() for marker in ("just a moment", "challenge-platform")
+                )
+            ),
+        })
+
+        class Page:
+            def __init__(self, url, title, body):
+                self.url = url
+                self._title = title
+                self.body = body
+
+            def title(self):
+                return self._title
+
+        self.assertTrue(helper(Page(
+            "https://auth.openai.com/cdn-cgi/challenge-platform",
+            "Just a moment...", "Performing security verification",
+        )))
+        self.assertFalse(helper(Page(
+            "https://auth.openai.com/u/add-phone", "Add phone", "Enter a phone number",
+        )))
+
+    def test_browser_use_phone_loop_stops_on_terminal_challenge(self):
+        source = (ROOT / "browser_use_codex_oauth.py").read_text(encoding="utf-8")
+        start = source.index("def _do_phone_verification_if_present")
+        end = source.index("def _finish_consent_workspace", start)
+        phone_flow = source[start:end]
+        self.assertIn("_is_codex_circuit_open_error", phone_flow)
+        self.assertIn("BrowserSessionCircuitOpenError", phone_flow)
+        self.assertIn("category=failure_category", phone_flow)
+        self.assertLess(phone_flow.index("if is_session_circuit"), phone_flow.index("if attempt >= max_retries"))
+
     def test_browser_use_accepts_only_confirmed_otp_states(self):
         helper, _ = _load_function(ROOT / "browser_use_codex_oauth.py", "_otp_outcome_accepted")
         for outcome in ("accepted", "callback"):

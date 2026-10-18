@@ -38,6 +38,10 @@ class _SmsCodeTimeout(_SmsProviderError):
     pass
 
 
+class _BrowserSessionCircuitOpenError(RuntimeError):
+    pass
+
+
 class _Http:
     def __init__(self):
         self.closed = False
@@ -81,9 +85,11 @@ class _SmsProvider:
     def report_failure(self, activation_id, reason):
         self.events.append(("failure", activation_id, str(reason)))
 
-    def cancel_and_report_failure(self, activation_id, http, reason):
+    def cancel_and_report_failure(self, activation_id, http, reason, category=None):
         self.cancel(activation_id, http)
         self.report_failure(activation_id, reason)
+        if category:
+            self.events.append(("failure_category", activation_id, category))
 
     def report_success(self, activation_id):
         self.events.append(("success", activation_id))
@@ -122,6 +128,10 @@ def _load_phone_function(provider, responses, max_retries=1):
         "_response_text": lambda response: response.text,
         "_phone_failure_reason": lambda text, status: "send_failed" if status != 200 else "",
         "_resp_json": lambda response: {"continue_url": "https://callback.test/ok"},
+        "PhoneFraudGuardError": type("PhoneFraudGuardError", (RuntimeError,), {}),
+        "BrowserSessionCircuitOpenError": _BrowserSessionCircuitOpenError,
+        "_is_codex_circuit_open_error": lambda value: "browser_session_circuit_open" in str(value).lower() or "熔断冷却" in str(value),
+        "_is_codex_fraud_guard_error": lambda value: "fraud_guard" in str(value).lower() or "suspicious behavior from phone" in str(value).lower(),
         "logger": _Logger(),
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SOURCE), "exec"), namespace)
@@ -203,6 +213,19 @@ class CodexPhoneFeedbackTests(unittest.TestCase):
             [event for event in provider.events if event[0] == "failure"],
             [("failure", "activation-1", "post failure")] * 3,
         )
+
+    def test_session_circuit_open_releases_one_activation_and_stops_retries(self):
+        provider = _SmsProvider("success")
+        function = _load_phone_function(
+            provider, [_Response(403, "Cloudflare challenge")], max_retries=5
+        )
+
+        with self.assertRaises(_BrowserSessionCircuitOpenError):
+            function(object())
+
+        self.assertEqual(len([event for event in provider.events if event[0] == "acquire"]), 1)
+        self.assertEqual([event for event in provider.events if event[0] == "cancel"], [("cancel", "activation-1")])
+        self.assertIn(("failure_category", "activation-1", "session_circuit_open"), provider.events)
 
     def test_preflight_provider_error_preserves_original_exception(self):
         provider = _SmsProvider("preflight_error")

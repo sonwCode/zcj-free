@@ -617,8 +617,12 @@ def run_registration(
         return {"success": True, "task_status": task_status,
                 "account_status": "success", "codex_status": codex_status,
                 "phase": "completed" if codex_ok else "codex",
-                "error_code": None if codex_ok else f"codex_{codex_status}",
-                "retryable": not codex_ok and codex_status != "deactivated",
+                "error_code": None if codex_ok else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
+                "retryable": (
+                    bool(codex_result.get("retryable"))
+                    if codex_result.get("retryable") is not None
+                    else not codex_ok and codex_status != "deactivated"
+                ),
                 "email": email, "account_id": account_id,
                 "access_token": access_token, "totp_secret": totp_secret,
                 "flow": flow_result, "codex": codex_result,

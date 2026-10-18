@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 CODEX = ROOT / "core" / "codex_oauth.py"
 CLOAK = ROOT / "core" / "cloakbrowser_registration.py"
+ROXY_CODEX = ROOT / "core" / "roxy_codex_oauth.py"
 CLOAK_CFG = ROOT / "config" / "cloakbrowser.py"
 CFG = ROOT / "config" / "codex.py"
 
@@ -130,12 +131,31 @@ class DriverErrorClassificationTests(unittest.TestCase):
         self.assertTrue(fn(RuntimeError("codex_browser_cleanup_timeout: 清理超时")))
         self.assertTrue(fn(RuntimeError("等待 Codex callback 超时，最后 URL=...")))
 
-    def test_phone_fraud_guard_stops_driver_fallback(self):
-        ns = _extract(CODEX, {"_is_codex_driver_recoverable", "_is_codex_fraud_guard_error"})
-        self.assertFalse(ns["_is_codex_driver_recoverable"](RuntimeError("fraud_guard")))
-        self.assertFalse(ns["_is_codex_driver_recoverable"](RuntimeError("IP banned")))
+    def test_phone_fraud_guard_and_cloudflare_stop_driver_fallback(self):
+        ns = _extract(CODEX, {
+            "_is_codex_driver_recoverable", "_is_codex_fraud_guard_error",
+            "_is_codex_circuit_open_error", "_is_codex_cloudflare_challenge",
+        })
+        recoverable = ns["_is_codex_driver_recoverable"]
+        self.assertFalse(recoverable(RuntimeError("fraud_guard")))
+        self.assertFalse(recoverable(RuntimeError("IP banned")))
+        self.assertFalse(recoverable(RuntimeError("browser_session_circuit_open")))
+        self.assertFalse(recoverable(RuntimeError("Cloudflare challenge: Just a moment...")))
         self.assertTrue(ns["_is_codex_fraud_guard_error"]("suspicious behavior from phone"))
+        self.assertTrue(ns["_is_codex_circuit_open_error"]("当前 BrowserSession 已熔断冷却"))
+        self.assertTrue(ns["_is_codex_cloudflare_challenge"]("Just a moment..."))
+        self.assertTrue(ns["_is_codex_cloudflare_challenge"]("cloudflare_challenge"))
         self.assertFalse(ns["_is_codex_fraud_guard_error"]("account_deactivated"))
+
+    def test_roxy_phone_loop_stops_on_session_circuit_before_retry(self):
+        source = ROXY_CODEX.read_text(encoding="utf-8")
+        start = source.index("def _do_phone_verification_if_present")
+        end = source.index("def _finish_consent_workspace", start)
+        phone_flow = source[start:end]
+        self.assertIn("_is_codex_circuit_open_error", phone_flow)
+        self.assertIn("BrowserSessionCircuitOpenError", phone_flow)
+        self.assertIn("category=failure_category", phone_flow)
+        self.assertLess(phone_flow.index("if is_session_circuit"), phone_flow.index("if attempt < max_retries"))
 
     def test_cloak_registration_does_not_fallback_after_phone_fraud(self):
         source = CLOAK.read_text(encoding="utf-8")

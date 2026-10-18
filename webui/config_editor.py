@@ -48,7 +48,7 @@ EDITABLE_FIELDS = [
     # ---- 功能开关 ----
     {
         "key": "ENABLE_CODEX_AUTO", "file": "codex.py", "type": "bool", "group": "功能开关",
-        "label": "注册后必须完成 Codex", "help": "注册流程先完成2FA，再自动执行Codex；关闭后注册结果会保留为部分成功并允许补跑，不会显示为完整成功",
+        "label": "注册后自动执行 Codex", "help": "开启后注册完成 2FA 后自动执行 Codex（可能进入手机号接码）；关闭后只完成注册/2FA，不调用 Codex 或短信接码，账号可在账号页补跑",
     },
     {
         "key": "REGISTRATION_DRIVER", "file": "roxybrowser.py", "type": "str", "group": "注册方式",
@@ -723,6 +723,9 @@ EDITABLE_FIELDS = [
         "choices": [
             {"value": "smsbower", "label": "SMSBower"},
             {"value": "tiger", "label": "Tiger SMS"},
+            {"value": "herosms", "label": "HeroSMS"},
+            {"value": "smspool", "label": "SMSPool"},
+            {"value": "vaksms", "label": "Vak SMS"},
         ],
     },
     {
@@ -739,7 +742,19 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "SMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "最高价格（人民币）", "help": "按人民币填写；程序实时换算成接码平台所需的 USD maxPrice，留空表示不限",
+        "label": "最高价格（人民币）", "help": "所有短信平台共用的硬上限；按人民币填写，程序按实时汇率换算成各平台 USD maxPrice；各平台页的额外上限只能更低，留空表示不限",
+    },
+    {
+        "key": "SMS_EXCEPT_REGIONS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "排除号码地区（所有平台共用）", "help": "按号码归属地过滤，多个地区用逗号分隔，例如 Quebec,Ontario；SMSBower 页也可直接设置，命中后会释放号码并换号",
+    },
+    {
+        "key": "SMS_REJECT_VOIP_NUMBERS", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "拒绝虚拟号码（VoIP）", "help": "开启后只按具体号码的哈希记录和排除近期被上游判定为 VoIP 的号码，不会排除整个国家；若上游明确返回 voip_phone_disallowed，当前号码始终会释放并记录。各平台没有统一的购号前线路类型字段，因此不是购号前的绝对保证",
+    },
+    {
+        "key": "SMS_FX_RATE_TTL", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "汇率刷新间隔(秒)", "help": "价格换算使用实时汇率；缓存超过该时间后重新探测，默认 600 秒；网络失败时使用最近一次成功汇率",
     },
     {
         "key": "SMS_MAX_RETRIES", "file": "codex.py", "type": "int", "group": "接码平台",
@@ -772,6 +787,10 @@ EDITABLE_FIELDS = [
     {
         "key": "SMSBOWER_RANDOM_COUNTRY_ATTEMPTS", "file": "codex.py", "type": "int", "group": "接码平台",
         "label": "随机国家候选数", "help": "单次取号最多尝试的价格范围内国家数量",
+    },
+    {
+        "key": "SMSBOWER_STOCK_WAIT_SECONDS", "file": "codex.py", "type": "int", "group": "接码平台",
+        "label": "库存刷新等待(秒)", "help": "价格/库存快照为空时持续刷新取号库存的总时长；调大更耐库存短暂为空",
     },
     {
         "key": "SMSBOWER_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -816,6 +835,117 @@ EDITABLE_FIELDS = [
         "label": "Tiger SMS 排除供应商", "help": "可选，排除的供应商 ID 用逗号分隔",
     },
     {
+        "key": "HEROSMS_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS API 地址", "help": "默认 https://hero-sms.com/stubs/handler_api.php",
+    },
+    {
+        "key": "HEROSMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS API 密钥", "help": "HeroSMS API Key，保存在 .env，不写回 config/*.py",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "HEROSMS_USE_V2", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "HeroSMS 使用 V2 取号", "help": "优先使用 getNumberV2，遇到 BAD_ACTION 时回退 getNumber",
+    },
+    {
+        "key": "HEROSMS_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS 服务代码", "help": "留空继承通用 SMS_SERVICE；OpenAI/ChatGPT 通常为 dr",
+    },
+    {
+        "key": "HEROSMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS 国家代码", "help": "留空继承 SMS_COUNTRY；HeroSMS 的国家编号以其接口为准",
+    },
+    {
+        "key": "HEROSMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS 最高价格(USD)", "help": "可选的 HeroSMS 额外上限；与第一页人民币上限取更低值，HeroSMS 请求使用 USD",
+    },
+    {
+        "key": "HEROSMS_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS 供应商筛选", "help": "可选，供应商 ID 用逗号分隔",
+    },
+    {
+        "key": "HEROSMS_EXCEPT_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS 排除供应商", "help": "可选，排除的供应商 ID 用逗号分隔",
+    },
+    {
+        "key": "HEROSMS_PHONE_EXCEPTION", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS 排除号码前缀", "help": "可选，号码前缀用逗号分隔",
+    },
+    {
+        "key": "SMSPOOL_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool API 地址", "help": "默认 https://api.smspool.net",
+    },
+    {
+        "key": "SMSPOOL_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool API 密钥", "help": "SMSPool API Key，保存在 .env，不写回 config/*.py",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMSPOOL_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool 服务代码", "help": "按 SMSPool 控制台填写；留空继承通用 SMS_SERVICE",
+    },
+    {
+        "key": "SMSPOOL_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool 国家代码", "help": "按 SMSPool 控制台填写；留空继承 SMS_COUNTRY",
+    },
+    {
+        "key": "SMSPOOL_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool 最高价格(USD)", "help": "可选的 SMSPool 额外上限；与第一页人民币上限取更低值，purchase/sms 使用 USD",
+    },
+    {
+        "key": "SMSPOOL_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool 最低价格(USD)", "help": "可选；仅用于本地价格记录和校验",
+    },
+    {
+        "key": "SMSPOOL_PRICING_OPTION", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool 定价选项", "help": "按 SMSPool API 文档填写，默认 0",
+    },
+    {
+        "key": "SMSPOOL_POOL", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSPool 号池", "help": "可选；留空由平台选择",
+    },
+    {
+        "key": "VAKSMS_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS API 地址", "help": "默认 https://vak-sms.com/stubs/handler_api.php",
+    },
+    {
+        "key": "VAKSMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS API 密钥", "help": "Vak SMS API Key，保存在 .env，不写回 config/*.py",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "VAKSMS_USE_V2", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "Vak SMS 使用 V2 取号", "help": "优先使用 getNumberV2，遇到 BAD_ACTION 时自动回退 getNumber",
+    },
+    {
+        "key": "VAKSMS_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS 服务代码", "help": "留空继承通用 SMS_SERVICE；OpenAI/ChatGPT 通常为 dr",
+    },
+    {
+        "key": "VAKSMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS 国家代码", "help": "按 Vak 文档的数字国家 ID 填写；留空继承 SMS_COUNTRY",
+    },
+    {
+        "key": "VAKSMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS 最高价格(USD)", "help": "可选的 Vak SMS 额外上限；与第一页人民币上限取更低值",
+    },
+    {
+        "key": "VAKSMS_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS 最低价格(USD)", "help": "可选；仅用于本地价格记录和校验",
+    },
+    {
+        "key": "VAKSMS_OPERATOR", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS 运营商", "help": "可选；按 Vak API 支持的 operator 参数填写",
+    },
+    {
+        "key": "VAKSMS_REF", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "Vak SMS 推荐码", "help": "可选；按 Vak API 的 ref 参数填写",
+    },
+    {
+        "key": "VAKSMS_FIXED_PRICE", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "Vak SMS 固定价格", "help": "按 Vak API 请求固定价格号码；仍受第一页人民币最高价限制",
+    },
+    {
         "key": "SMSBOWER_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSBower 供应商筛选", "help": "可选，供应商 ID 用逗号分隔；留空由平台自动选择",
     },
@@ -831,7 +961,73 @@ EDITABLE_FIELDS = [
         "key": "SMSBOWER_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSBower 最低价格（元）", "help": "可选，按人民币填写；本地价格表筛选并换算为美元 minPrice",
     },
+    # ---- 低价号码池（默认跟随接码链，可选平台覆盖）----
+    {
+        "key": "SMS_POOL_ENABLED", "file": "sms_pool.py", "type": "bool", "group": "接码平台",
+        "label": "启用低价号码池", "help": "关闭时不轮询、不采购；开启后由独立 worker 进程按账号需求取号",
+    },
+    {
+        "key": "SMS_POOL_PAUSED", "file": "sms_pool.py", "type": "bool", "group": "接码平台",
+        "label": "暂停新采购", "help": "只停止抢号，不影响已经在等待短信的激活",
+    },
+    {
+        "key": "SMS_POOL_PROVIDERS", "file": "sms_pool.py", "type": "str", "group": "接码平台",
+        "label": "号码池平台覆盖（可选）", "help": "留空时跟随通用接码已启用的平台；填写后只使用这里列出的平台，未配置 API Key 的平台自动跳过",
+    },
+    {
+        "key": "SMS_POOL_MAX_PRICE_CNY", "file": "sms_pool.py", "type": "str", "group": "接码平台",
+        "label": "单号人民币上限", "help": "留空表示禁止采购；按实时汇率换算成各平台 USD maxPrice",
+    },
+    {
+        "key": "SMS_POOL_REJECT_VOIP_NUMBERS", "file": "sms_pool.py", "type": "bool", "group": "接码平台",
+        "label": "低价抢号拒绝虚拟号码（VoIP）", "help": "开启后只按具体号码的哈希记录和排除近期被上游判定为 VoIP 的号码，不会排除整个国家；号码池补跑遇到 voip_phone_disallowed 会释放当前激活并记录。各平台没有统一的购号前线路类型字段，因此不是购号前的绝对保证",
+    },
+    {
+        "key": "SMS_POOL_POLL_INTERVAL", "file": "sms_pool.py", "type": "int", "group": "接码平台",
+        "label": "轮询间隔(秒)", "help": "低于 30 秒会被强制抬高，避免打爆供应商接口",
+    },
+    {
+        "key": "SMS_POOL_PREWARM_SIZE", "file": "sms_pool.py", "type": "int", "group": "接码平台",
+        "label": "预热池容量", "help": "未分配号码最多保留多少个；实际还会被未接码账号数限制",
+    },
+    {
+        "key": "SMS_POOL_WORKERS", "file": "sms_pool.py", "type": "int", "group": "接码平台",
+        "label": "并发任务数", "help": "同时运行的手机验证任务上限",
+    },
+    {
+        "key": "SMS_POOL_MAX_ACQUIRE_PER_TICK", "file": "sms_pool.py", "type": "int", "group": "接码平台",
+        "label": "单轮最多采购", "help": "一次轮询最多买几个号码",
+    },
+    {
+        "key": "SMS_POOL_ACTIVATION_TTL_SECONDS", "file": "sms_pool.py", "type": "int", "group": "接码平台",
+        "label": "号码有效期(秒)", "help": "到期仍未分配会自动释放，避免服务重启后一直占号",
+    },
+    {
+        "key": "SMS_POOL_LEASE_SECONDS", "file": "sms_pool.py", "type": "int", "group": "接码平台",
+        "label": "本地租约(秒)", "help": "已领取号码多久没更新就允许对账回收",
+    },
+    {
+        "key": "SMS_POOL_SERVICE", "file": "sms_pool.py", "type": "str", "group": "接码平台",
+        "label": "服务代码", "help": "留空时沿用 SMS_SERVICE；OpenAI 通常为 dr",
+    },
+    {
+        "key": "SMS_POOL_COUNTRY", "file": "sms_pool.py", "type": "str", "group": "接码平台",
+        "label": "国家代码", "help": "留空时由平台按价格和库存随机选择",
+    },
+    {
+        "key": "SMS_POOL_LIVE_CHECK_ENABLED", "file": "sms_pool.py", "type": "bool", "group": "接码平台",
+        "label": "号码池定时测活", "help": "开启后由号码池 worker 定时复查 free 未接码候选账号；失效账号只从候选中排除，不删除账号记录",
+    },
+    {
+        "key": "SMS_POOL_LIVE_CHECK_INTERVAL", "file": "sms_pool.py", "type": "int", "group": "接码平台",
+        "label": "定时测活间隔(秒)", "help": "候选账号复查周期，默认 21600 秒（6 小时）",
+    },
+    {
+        "key": "SMS_POOL_LIVE_CHECK_BATCH", "file": "sms_pool.py", "type": "int", "group": "接码平台",
+        "label": "每轮测活数量", "help": "号码池 worker 每轮最多提交的查活任务数，避免瞬间塞满后台队列",
+    },
 ]
+
 
 _FIELD_BY_KEY = {f["key"]: f for f in EDITABLE_FIELDS}
 

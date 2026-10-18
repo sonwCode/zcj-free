@@ -1,0 +1,20 @@
+[Unit]
+Description=Turb GPT Low-cost SMS Pool Worker
+Documentation=file:/opt/turb-gpt-register/SESSION_HANDOFF.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/turb-gpt-register
+Environment=SMS_POOL_WORKER_PROCESS=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=/opt/turb-gpt-register/.venv/bin/python -m core.sms_pool_worker
+Restart=always
+RestartSec=15
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

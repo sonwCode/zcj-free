@@ -463,6 +463,134 @@ def create_app(auth_code: str | None = None) -> Flask:
         return resp
 
     # ----------------------------------------------------------
+    # 低价号码池
+    # ----------------------------------------------------------
+    @app.get("/api/sms-pool/status")
+    def api_sms_pool_status():
+        from core import sms_pool_service as pool_service
+        try:
+            status = pool_service.pool_status()
+        except Exception as exc:
+            logger.exception("读取号码池状态失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "status": status})
+
+    @app.get("/api/sms-pool/reservations")
+    def api_sms_pool_reservations():
+        from core import sms_pool_store as pool_store
+        raw = str(request.args.get("status") or "").strip().lower()
+        statuses = [raw] if raw else None
+        try:
+            limit = _sms_pool_page_arg("limit", 500, 1, 500)
+            offset = _sms_pool_page_arg("offset", 0, 0, 1_000_000)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        try:
+            items = pool_store.list_reservations(statuses=statuses, limit=limit, offset=offset)
+            total = pool_store.count_reservations(statuses=statuses)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "items": items, "total": total, "limit": limit, "offset": offset})
+
+    def _sms_pool_page_arg(name: str, default: int, minimum: int, maximum: int) -> int:
+        raw = request.args.get(name)
+        if raw is None or not str(raw).strip():
+            return default
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} 必须是整数") from exc
+        if value < minimum or value > maximum:
+            raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
+        return value
+
+    @app.get("/api/sms-pool/events")
+    def api_sms_pool_events():
+        from core import sms_pool_store as pool_store
+        try:
+            limit = _sms_pool_page_arg("limit", 20, 1, 100)
+            offset = _sms_pool_page_arg("offset", 0, 0, 1_000_000)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        try:
+            items = pool_store.recent_reservation_event_summaries(limit=limit, offset=offset)
+            total = pool_store.count_reservation_event_summaries()
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "items": items, "total": total, "limit": limit, "offset": offset})
+
+    @app.get("/api/sms-pool/reservations/<int:reservation_id>/events")
+    def api_sms_pool_reservation_events(reservation_id: int):
+        from core import sms_pool_store as pool_store
+        try:
+            return jsonify({"ok": True, "items": pool_store.reservation_events(reservation_id)})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.get("/api/sms-pool/eligible")
+    def api_sms_pool_eligible():
+        from core import sms_pool_service as pool_service
+        try:
+            scan = pool_service.scan_eligible_accounts()
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, **scan})
+
+    @app.post("/api/sms-pool/live-check")
+    def api_sms_pool_live_check():
+        """手动触发候选账号查活；仅入既有后台队列，不在请求线程执行网络请求。"""
+        from core import sms_pool_service as pool_service
+        data = request.get_json(silent=True) or {}
+        try:
+            limit = max(1, min(100, int(data.get("limit") or 100)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "limit 必须是 1 到 100 的整数"}), 400
+        result = pool_service.enqueue_live_checks(
+            force=True,
+            limit=limit,
+            trigger="sms_pool_manual",
+        )
+        if result.get("error"):
+            return jsonify({"ok": False, **result}), 503
+        return jsonify({"ok": True, **result}), 202 if result.get("queued") else 200
+
+    @app.post("/api/sms-pool/retry")
+    def api_sms_pool_retry():
+        """只写请求队列；真正执行在独立号码池 worker 进程里。"""
+        from core import sms_pool_service as pool_service
+        from core import sms_pool_store as pool_store
+        data = request.get_json(silent=True) or {}
+        raw_ids = data.get("account_ids")
+        if not isinstance(raw_ids, list):
+            single = data.get("account_id")
+            raw_ids = [single] if single is not None else []
+        try:
+            scan = pool_service.scan_eligible_accounts()
+            eligible = {int(item["id"]): item for item in scan.get("eligible") or []}
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        queued: list[int] = []
+        skipped: list[int] = []
+        for raw in raw_ids:
+            try:
+                account_id = int(raw)
+            except (TypeError, ValueError):
+                continue
+            account = eligible.get(account_id)
+            if account is None:
+                skipped.append(account_id)
+                continue
+            row = pool_store.enqueue_request(account_id, str(account.get("email") or ""))
+            if row is not None:
+                queued.append(account_id)
+        return jsonify({
+            "ok": True,
+            "queued": queued,
+            "skipped": skipped,
+            "note": "请求已写入队列，由独立号码池 worker 进程按顺序执行",
+        })
+
+    # ----------------------------------------------------------
     # 统计概览
     # ----------------------------------------------------------
     @app.get("/api/summary")
@@ -2394,9 +2522,9 @@ def create_app(auth_code: str | None = None) -> Flask:
         value = aliases.get(value, value)
         return value if value in _CODEX_RETRY_DRIVERS else None
 
-    def _run_codex_retry_worker(email: str, *, batch_label: str | None = None, clear_log: bool = True, driver: str | None = None) -> None:
+    def _run_codex_retry_worker(email: str, *, batch_label: str | None = None, clear_log: bool = True, driver: str | None = None, start_delay: float = 0) -> None:
         """执行一个账号的 Codex 补跑。调用前必须已经 reserve。"""
-        codex_retry_service.run_worker(email, batch_label=batch_label, clear_log=clear_log, driver=driver)
+        codex_retry_service.run_worker(email, batch_label=batch_label, clear_log=clear_log, driver=driver, start_delay=start_delay)
 
 
     @app.post("/api/codex/stop")
@@ -2587,8 +2715,13 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         def _bulk_runner(items: list[dict], max_workers: int, batch: str, selected_driver: str | None):
             logger.info(f"[Codex 批量补跑] 启动 batch={batch} count={len(items)} workers={max_workers} driver={selected_driver or 'global'}")
+            try:
+                from config import codex as codex_cfg
+                stagger = max(0.0, float(getattr(codex_cfg, "CODEX_RETRY_STAGGER_SECONDS", 8) or 0))
+            except Exception:
+                stagger = 8.0
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"codex-bulk-{batch}") as ex:
-                futures = [ex.submit(_run_codex_retry_worker, it["email"], batch_label=f"{batch} #{idx}/{len(items)}", clear_log=False, driver=selected_driver) for idx, it in enumerate(items, 1)]
+                futures = [ex.submit(_run_codex_retry_worker, it["email"], batch_label=f"{batch} #{idx}/{len(items)}", clear_log=False, driver=selected_driver, start_delay=(idx - 1) * stagger) for idx, it in enumerate(items, 1)]
                 for fut in as_completed(futures):
                     try:
                         fut.result()

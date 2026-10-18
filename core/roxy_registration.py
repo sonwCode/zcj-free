@@ -624,6 +624,7 @@ class _EmailFlowAdvanced(RuntimeError):
 
 def _current_email_submit_next_state(driver) -> str | None:
     """无等待地识别邮箱提交后的有效状态，避免把慢跳转误判成邮箱页丢失。"""
+    _check_chrome_error_page(driver)
     if _has_access_token(driver):
         return "logged_in"
     if _is_login_password_page(driver):
@@ -1386,8 +1387,10 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
     cleared_recover_done = False
     expected_email = str(email or "").strip().lower()
     _check_manual_stop()
+    _check_chrome_error_page(driver)
     while time.time() < end:
         _check_manual_stop()
+        _check_chrome_error_page(driver)
         advanced = _current_email_submit_next_state(driver)
         _check_manual_stop()
         if advanced:
@@ -1519,6 +1522,64 @@ def _submit_email_and_wait_next(
     raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
 
 
+def _otp_input_value(driver, el) -> str:
+    """读取 OTP 输入框的真实值，用于提交前回读校验。"""
+    try:
+        value = driver.execute_script("return String(arguments[0].value ?? '');", el)
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
+    for getter in ("get_attribute", "get_property"):
+        fn = getattr(el, getter, None)
+        if callable(fn):
+            try:
+                value = fn("value")
+            except Exception:
+                continue
+            if value is not None:
+                return str(value)
+    return ""
+
+
+def _sync_otp_inputs(driver, elements: list, code: str) -> bool:
+    """确保 OTP 输入框的实际值与验证码一致；不一致时用原生 setter 重写。
+
+    验证码可能带前导零（例如 012878），也可能被拆进多个分格输入框。只调用
+    send_keys 而不回读，会把“输入未生效或被浏览器规范化”导致的失败当成
+    “验证码错误”，于是白白重发换码、直到重试预算耗尽。返回最终是否已一致。
+    """
+    code = str(code or "")
+    elements = [el for el in (elements or []) if el is not None]
+    if not code or not elements:
+        return False
+    actual = "".join(_otp_input_value(driver, el) for el in elements)
+    if actual == code:
+        return True
+    logger.warning(
+        "%s[OTP] 验证码输入框实际值与验证码不一致（expected_len=%s actual_len=%s），改用原生 setter 重写",
+        _log_prefix(driver), len(code), len(actual),
+    )
+    if len(elements) == 1 or len(elements) < len(code):
+        targets = [(elements[0], code)]
+    else:
+        targets = list(zip(elements, code))
+    for el, value in targets:
+        try:
+            _set_element_value(driver, el, value)
+        except Exception as exc:
+            logger.debug("%s[OTP] 原生 setter 重写失败：%s", _log_prefix(driver), str(exc)[:160])
+    actual = "".join(_otp_input_value(driver, el) for el in elements)
+    if actual == code:
+        logger.info("%s[OTP] 原生 setter 重写后验证码输入框已与验证码一致", _log_prefix(driver))
+        return True
+    logger.warning(
+        "%s[OTP] 验证码输入框仍不一致（expected_len=%s actual_len=%s），继续提交并观察服务端结果",
+        _log_prefix(driver), len(code), len(actual),
+    )
+    return False
+
+
 def _type_otp(driver, code: str) -> None:
     from selenium.webdriver.common.by import By
 
@@ -1533,6 +1594,7 @@ def _type_otp(driver, code: str) -> None:
             els = [e for e in driver.find_elements(By.CSS_SELECTOR, selector) if _visible(e)]
             if len(els) == 1:
                 _human_type_text(driver, els[0], code, clear=True)
+                _sync_otp_inputs(driver, [els[0]], code)
                 return
 
         # 6 个分格输入框
@@ -1550,6 +1612,7 @@ def _type_otp(driver, code: str) -> None:
                 e.send_keys(ch)
                 if _browser_actions_enabled():
                     human_delay("keystroke")
+            _sync_otp_inputs(driver, numeric_boxes[: len(code)], code)
             return
 
         if not _refresh_after_missing_page_element(
@@ -1588,6 +1651,46 @@ def _email_otp_page_state(driver) -> dict:
         return _normalize_page_state(raw, driver, list_keys=("inputs", "buttons", "errors"))
     except Exception as exc:
         return _normalize_page_state({"url": getattr(driver, 'current_url', ''), "error": f"{type(exc).__name__}: {exc}"}, driver, list_keys=("inputs", "buttons", "errors"))
+
+
+def _is_cloudflare_challenge_state(state: dict) -> bool:
+    """识别Cloudflare挑战页，避免把挑战页当作验证码页继续重发。"""
+    if not isinstance(state, dict):
+        return False
+    parts = [
+        str(state.get("url") or ""),
+        str(state.get("title") or ""),
+        str(state.get("text") or ""),
+        " ".join(str(item or "") for item in (state.get("errors") or [])),
+    ]
+    text = " ".join(parts).lower()
+    return any(marker in text for marker in (
+        "just a moment",
+        "performing security verification",
+        "checking your browser",
+        "verify you are human",
+        "attention required | cloudflare",
+        "challenge-platform",
+        "cf-chl-",
+        "cf_chl_",
+    ))
+
+
+class CloudflareChallengeError(RuntimeError):
+    """当前认证页面被Cloudflare挑战拦截，停止OTP重发并交给上层换会话。"""
+
+    error_code = "cloudflare_challenge"
+    retryable = True
+
+
+def _raise_if_cloudflare_challenge(driver) -> dict:
+    state = _email_otp_page_state(driver)
+    if _is_cloudflare_challenge_state(state):
+        raise CloudflareChallengeError(
+            f"Cloudflare challenge on OTP page: url={state.get('url') or '-'} "
+            f"title={state.get('title') or '-'}"
+        )
+    return state
 
 
 def _is_email_verification_page(driver) -> bool:
@@ -1634,6 +1737,19 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
     last = None
     while time.time() < end:
         _check_manual_stop()
+        # OTP 提交后可能已经完成验证，但页面停在 Email verified 中间页。
+        # 这不是“没找到重发按钮”，不能继续重发或把已验证邮箱判失败。
+        try:
+            snapshot = _email_otp_page_state(driver)
+            if _is_email_verified_page(snapshot):
+                logger.info(
+                    "%s[OTP] 页面已显示 Email verified，不再查找重发按钮：url=%s",
+                    _log_prefix(driver), snapshot.get("url") or "-",
+                )
+                return {"ok": True, "verified": True, "text": "Email verified"}
+        except Exception:
+            pass
+        _raise_if_cloudflare_challenge(driver)
         try:
             btn = driver.execute_script(r"""
             const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
@@ -1683,7 +1799,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 30) -> str:
         _check_manual_stop()
         if not _is_email_verification_page(driver):
             return 'accepted'
-        last = _email_otp_page_state(driver)
+        last = _raise_if_cloudflare_challenge(driver)
         _check_manual_stop()
         invalid_fields = tuple(
             str(i.get('name') or i.get('id') or i.get('autocomplete') or index)
@@ -1763,7 +1879,7 @@ def _recover_pending_email_otp_submit(driver, timeout: int = 18) -> str:
         _check_manual_stop()
         if not _is_email_verification_page(driver):
             return "accepted"
-        state = _email_otp_page_state(driver)
+        state = _raise_if_cloudflare_challenge(driver)
         errors = state.get("errors") if isinstance(state, dict) else []
         invalid_fields = tuple(
             str(item.get("name") or item.get("id") or item.get("autocomplete") or index)
@@ -2965,39 +3081,10 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
         if snapshot_url.lower().startswith(("http://", "https://")) and not _is_navigation_error_url(snapshot_url):
             last_good_url = snapshot_url
         if _is_navigation_error_url(snapshot_url):
-            if navigation_error_recoveries < 3:
-                navigation_error_recoveries += 1
-                recovery_url = (
-                    last_good_url
-                    if "/about-you" in last_good_url.lower()
-                    else "https://auth.openai.com/about-you"
-                )
-                logger.warning(
-                    "%s 资料页跳转落入浏览器网络错误页，恢复 about-you（第 %s/3 次）：url=%s",
-                    _log_prefix(driver), navigation_error_recoveries, snapshot_url[:180],
-                )
-                try:
-                    _safe_get(
-                        driver,
-                        recovery_url,
-                        timeout=20,
-                        attempts=3,
-                        accept_hosts=("auth.openai.com", "chatgpt.com"),
-                    )
-                    _stop_aware_sleep(2)
-                except Exception as exc:
-                    logger.warning(
-                        "%s 资料页网络错误恢复失败，保留后续重试：%s: %s",
-                        _log_prefix(driver), type(exc).__name__, str(exc)[:160],
-                    )
-                    _stop_aware_sleep(1.5)
-                end = max(end, time.time() + 8)
-                continue
-            logger.warning(
-                "%s 资料页连续落入浏览器网络错误页，等待窗口内继续观察：url=%s",
-                _log_prefix(driver), snapshot_url[:180],
-            )
-            continue
+            # 网络错误页说明当前出口不可用，交给 Cloak 外层换代理重建；
+            # 在同一个坏页面里反复打开 about-you 只会把网络故障包装成资料页超时。
+            _check_chrome_error_page(driver)
+            raise RuntimeError(f"资料页落入浏览器网络错误页：url={snapshot_url}")
         snapshot_text = " ".join(
             str(snap.get(key) or "") for key in ("title", "text")
         ).lower()
@@ -3444,6 +3531,54 @@ def _check_manual_stop() -> None:
     _check_stop_requested()
 
 
+def _check_chrome_error_page(driver) -> None:
+    """检测 Chrome 网络错误页并抛出专用异常，让外层可以换代理重试。"""
+    try:
+        url = str(driver.current_url or '').lower()
+    except Exception:
+        # 无法读取 URL 时认为浏览器状态异常，但不归类为网络错误
+        return
+
+    # 尝试获取附加的代理信息（在 cloakbrowser_registration._run_cloak_registration_impl 中设置）
+    failed_proxy = None
+    try:
+        # CloakSeleniumDriver._driver 是 Playwright page，代理信息存储在 page._proxy_info
+        if hasattr(driver, "_driver") and hasattr(driver._driver, "_proxy_info"):
+            failed_proxy = driver._driver._proxy_info
+        elif hasattr(driver, "_proxy_info"):
+            failed_proxy = driver._proxy_info
+    except Exception:
+        pass
+
+    # Chrome 网络错误页特征
+    if 'chrome-error://' in url or 'chromewebdata' in url:
+        # 导入时会循环依赖，所以在函数内部延迟导入
+        from core.cloakbrowser_registration import _CloakNetworkError
+        raise _CloakNetworkError(
+            f"检测到 Chrome 网络错误页，疑似代理失败: {url}",
+            failed_proxy=failed_proxy,
+            error_url=url
+        )
+
+    # 检测错误码（通过页面文本内容，因为 chrome-error:// 有时会被重写成 data: URI）
+    try:
+        body_text = driver.execute_script("return document.body ? document.body.innerText : ''") or ""
+        if any(code in body_text for code in ['ERR_TIMED_OUT', 'ERR_CONNECTION_RESET', 'ERR_TUNNEL_CONNECTION_FAILED', 'ERR_PROXY_CONNECTION_FAILED']):
+            from core.cloakbrowser_registration import _CloakNetworkError
+            raise _CloakNetworkError(
+                f"检测到 Chrome 网络错误提示，疑似代理失败: {body_text[:200]}",
+                failed_proxy=failed_proxy,
+                error_url=url
+            )
+    except Exception as exc:
+        # 不要吞掉上面主动抛出的专用网络异常；否则外层无法换代理，
+        # 最终会被错误包装成普通 RuntimeError/验证码失败。
+        if getattr(exc, "error_code", "") == "chrome_network_error":
+            raise
+        # 如果脚本执行失败（比如页面还没完全加载），不阻断流程
+        return
+
+
 def run_roxy_registration(
     email: str | None,
     name: str,
@@ -3741,17 +3876,23 @@ def run_roxy_registration(
             logger.info("[Roxy注册][2FA] 注册后 Codex 前设置完成")
         twofa_blocked = bool(_twofa_cfg.ENABLE_2FA) and not bool(pre_twofa_result.get("ok"))
         try:
+            from config import codex as _codex_cfg
+            codex_auto_enabled = bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False))
+        except Exception:
+            # 配置读取异常时按关闭处理，避免意外进入手机号接码。
+            codex_auto_enabled = False
+        try:
             from config import codex as _codex_required_cfg
             codex_required = bool(getattr(_codex_required_cfg, "CODEX_REQUIRED_ON_REGISTRATION", True))
         except Exception:
             codex_required = True
         codex_result = {
-            "status": "failed" if codex_required else "skipped",
+            "status": "failed" if codex_auto_enabled and codex_required else "skipped",
             "ok": False,
-            "error_code": "codex_disabled" if codex_required else None,
+            "error_code": "codex_required" if codex_auto_enabled and codex_required else "codex_skipped",
             "message": (
-                "ENABLE_CODEX_AUTO=False，已保留账号并标记为可补跑"
-                if codex_required else "ENABLE_CODEX_AUTO=False，跳过 Codex"
+                "注册后自动 Codex 已关闭，已跳过 Codex 和手机号接码；可在账号页补跑"
+                if not codex_auto_enabled else "注册后 Codex 尚未完成，已保留账号并标记为可补跑"
             ),
         }
         if twofa_blocked:
@@ -3765,7 +3906,7 @@ def run_roxy_registration(
         else:
             try:
                 from config import codex as _codex_cfg
-                if bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False)):
+                if codex_auto_enabled:
                     from core.roxy_codex_oauth import run_roxy_codex_oauth
                     logger.info("[Roxy注册][Codex] ENABLE_CODEX_AUTO=True，2FA 完成后复用当前注册窗口授权")
                     _check_manual_stop()
@@ -3842,17 +3983,22 @@ def run_roxy_registration(
         )
         codex_status = str(codex_result.get("status") or ("success" if bool(codex_result.get("ok")) else "failed"))
         codex_ok = bool(codex_result.get("ok")) or codex_status == "success"
+        codex_skipped = codex_status == "skipped"
         return {
             "success": True,
             "task_status": "success" if codex_ok else "partial_success",
             "account_status": "success",
             "codex_status": codex_status,
             "phase": "completed" if codex_ok else "codex",
-            "error_code": None if codex_ok else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
+            "error_code": None if codex_ok or codex_skipped else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
             "retryable": (
-                not codex_ok
-                and codex_status != "deactivated"
-                and str(codex_result.get("error_code") or "") not in {"account_deactivated", "account_deleted", "account_banned"}
+                bool(codex_result.get("retryable"))
+                if codex_result.get("retryable") is not None
+                else (
+                    not codex_ok
+                    and codex_status != "deactivated"
+                    and str(codex_result.get("error_code") or "") not in {"account_deactivated", "account_deleted", "account_banned"}
+                )
             ),
             "email": email,
             "account_id": account_id,
@@ -3860,7 +4006,7 @@ def run_roxy_registration(
             "totp_secret": totp_secret,
             "codex": codex_result,
             "network_traffic": network_traffic,
-            "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
+            "error": None if codex_ok or codex_skipped else f"Codex 未完成: {codex_result.get('message')}",
         }
     except Exception as exc:
         if asset_cache is not None and asset_cache_snapshot is None and not asset_cache_stopped:

@@ -527,10 +527,27 @@ def _assert_not_external_idp(page, stage: str) -> None:
         raise RuntimeError(f"[BrowserUse] {stage} 误入第三方登录：{url}")
 
 
+def _classify_auth_state(url: str, *, has_otp: bool, has_password: bool, has_otp_route: bool) -> str:
+    url = str(url or "").lower()
+    if "/log-in/password" in url:
+        return "login_password"
+    if has_otp_route:
+        return "email_verification"
+    if any(route in url for route in ("/create-account/password", "/u/signup/password", "/signup/password")) or has_password:
+        return "password"
+    if has_otp:
+        return "email_verification"
+    if any(route in url for route in ("about-you", "profile", "create-account/about")):
+        return "profile"
+    if "chatgpt.com" in url and "/auth/" not in url:
+        return "chatgpt"
+    return "other"
+
+
 def _quick_auth_state(page) -> dict:
     """一次 JS 查询判断当前 auth 页面状态，避免多组 locator 逐个等待导致几十秒卡顿。"""
     try:
-        return page.evaluate(
+        signals = page.evaluate(
             """() => {
               const url = String(location.href || '').toLowerCase();
               const visible = (el) => {
@@ -562,6 +579,7 @@ def _quick_auth_state(page) -> dict:
                    text.includes('验证码') || text.includes('驗證碼')) &&
                   qv("input")
                 );
+              const hasOtpRoute = url.includes('email-verification') || url.includes('email_otp') || (url.includes('verify') && url.includes('email'));
               const hasPassword =
                 url.includes('/create-account/password') ||
                 url.includes('/u/signup/password') ||
@@ -569,17 +587,16 @@ def _quick_auth_state(page) -> dict:
                 qv("input[type='password']") ||
                 qv("input[name='password']") ||
                 qv("input[autocomplete='new-password']");
-              let state = 'other';
-              // /log-in/password 代表该邮箱已走登录密码分支；即便页面 DOM 里有 code/otp 字样，
-              // 注册流程也按不可用邮箱处理，不能误判成邮箱验证码页。
-              if (url.includes('/log-in/password')) state = 'login_password';
-              else if (hasOtp) state = 'email_verification';
-              else if (hasPassword) state = 'password';
-              else if (url.includes('about-you') || url.includes('profile') || url.includes('create-account/about')) state = 'profile';
-              else if (url.includes('chatgpt.com') && !url.includes('/auth/')) state = 'chatgpt';
-              return {state, url, hasOtp, hasPassword, textPreview: text.slice(0, 160)};
+              return {url, hasOtp, hasOtpRoute, hasPassword, textPreview: text.slice(0, 160)};
             }"""
-        ) or {"state": "other", "url": _page_url(page)}
+        ) or {"url": _page_url(page)}
+        signals["state"] = _classify_auth_state(
+            signals.get("url"),
+            has_otp=bool(signals.get("hasOtp")),
+            has_password=bool(signals.get("hasPassword")),
+            has_otp_route=bool(signals.get("hasOtpRoute")),
+        )
+        return signals
     except Exception as exc:
         if _is_target_closed_error(exc):
             raise
@@ -2870,17 +2887,23 @@ def run_browser_use_registration(
                 logger.info("[BrowserUse][2FA] 注册后 Codex 前设置完成")
             twofa_blocked = bool(_twofa_cfg.ENABLE_2FA) and not bool(pre_twofa_result.get("ok"))
             try:
+                from config import codex as _codex_cfg
+                codex_auto_enabled = bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False))
+            except Exception:
+                # 配置读取异常时按关闭处理，避免意外进入手机号接码。
+                codex_auto_enabled = False
+            try:
                 from config import codex as _codex_required_cfg
                 codex_required = bool(getattr(_codex_required_cfg, "CODEX_REQUIRED_ON_REGISTRATION", True))
             except Exception:
                 codex_required = True
             codex_result = {
-                "status": "failed" if codex_required else "skipped",
+                "status": "failed" if codex_auto_enabled and codex_required else "skipped",
                 "ok": False,
-                "error_code": "codex_disabled" if codex_required else None,
+                "error_code": "codex_required" if codex_auto_enabled and codex_required else "codex_skipped",
                 "message": (
-                    "ENABLE_CODEX_AUTO=False，已保留账号并标记为可补跑"
-                    if codex_required else "ENABLE_CODEX_AUTO=False，跳过 Codex"
+                    "注册后自动 Codex 已关闭，已跳过 Codex 和手机号接码；可在账号页补跑"
+                    if not codex_auto_enabled else "注册后 Codex 尚未完成，已保留账号并标记为可补跑"
                 ),
             }
             if twofa_blocked:
@@ -2894,7 +2917,6 @@ def run_browser_use_registration(
             else:
                 try:
                     from config import codex as _codex_cfg
-                    codex_auto_enabled = bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False))
                     oauth_driver = str(getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "") or "").strip() or "same_as_registration"
                     if codex_auto_enabled:
                         logger.info(
@@ -2945,17 +2967,22 @@ def run_browser_use_registration(
             _t_all.done("success")
             codex_status = str(codex_result.get("status") or ("success" if bool(codex_result.get("ok")) else "failed"))
             codex_ok = bool(codex_result.get("ok")) or codex_status == "success"
+            codex_skipped = codex_status == "skipped"
             return {
                 "success": True,
                 "task_status": "success" if codex_ok else "partial_success",
                 "account_status": "success",
                 "codex_status": codex_status,
                 "phase": "completed" if codex_ok else "codex",
-                "error_code": None if codex_ok else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
+                "error_code": None if codex_ok or codex_skipped else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
                 "retryable": (
-                    not codex_ok
-                    and codex_status != "deactivated"
-                    and str(codex_result.get("error_code") or "") not in {"account_deactivated", "account_deleted", "account_banned"}
+                    bool(codex_result.get("retryable"))
+                    if codex_result.get("retryable") is not None
+                    else (
+                        not codex_ok
+                        and codex_status != "deactivated"
+                        and str(codex_result.get("error_code") or "") not in {"account_deactivated", "account_deleted", "account_banned"}
+                    )
                 ),
                 "email": email,
                 "account_id": account_id,
@@ -2963,7 +2990,7 @@ def run_browser_use_registration(
                 "totp_secret": totp_secret,
                 "codex": codex_result,
                 "network_traffic": network_traffic,
-                "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
+                "error": None if codex_ok or codex_skipped else f"Codex 未完成: {codex_result.get('message')}",
             }
     except Exception as exc:
         logger.error("[BrowserUse] 注册失败：%s: %s", type(exc).__name__, exc)

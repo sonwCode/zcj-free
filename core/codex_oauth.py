@@ -228,7 +228,14 @@ def _codex_exception_metadata(exc: Exception) -> tuple[str | None, bool | None]:
     if any(marker in lowered for marker in ("ip banned", "ip_banned", "ip has been banned")):
         return "cpa_ip_banned", True
     if "phone_fraud_guard" in lowered or "fraud_guard" in lowered or "suspicious behavior from phone" in lowered:
-        return "phone_fraud_guard", True
+        return "phone_fraud_guard", False
+    if "current browsersession circuit open" in lowered or "当前 browsersession 已熔断冷却" in lowered or "browser_session_circuit_open" in lowered:
+        return "browser_session_circuit_open", False
+    if any(marker in lowered for marker in (
+        "just a moment", "performing security verification", "checking your browser",
+        "verify you are human", "cloudflare challenge", "challenge-platform", "cf-chl-",
+    )):
+        return "cloudflare_challenge", False
     if "codex_mfa_step_stalled" in lowered:
         return "codex_mfa_step_stalled", True
     if "callback" in lowered and "timeout" in lowered:
@@ -383,6 +390,10 @@ class CpaIpBannedError(RuntimeError):
 
 class PhoneFraudGuardError(RuntimeError):
     """手机号提交触发上游 fraud guard，应停止当前账号的重复取号。"""
+
+
+class BrowserSessionCircuitOpenError(RuntimeError):
+    """当前HTTP会话被上游熔断，停止取号和会话内重试。"""
 
 
 _CPA_REQUEST_LOCK = threading.Lock()
@@ -1615,11 +1626,13 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
     # 预检阶段可能直接抛出短信依赖错误；异常清理路径也会读取该变量。
     activation_id = None
 
-    def cancel_and_report_failure(activation_id, reason) -> None:
+    def cancel_and_report_failure(activation_id, reason, category: str | None = None) -> None:
         if not activation_id:
             return
         try:
-            sms_provider.cancel_and_report_failure(activation_id, http, reason)
+            sms_provider.cancel_and_report_failure(
+                activation_id, http, reason, category=category
+            )
         except Exception as feedback_exc:
             logger.warning("[Codex] 释放号码或记录短信失败反馈失败：%s", feedback_exc)
 
@@ -1674,14 +1687,33 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 send_text = _response_text(send_resp)
                 send_reason = _phone_failure_reason(send_text, send_resp.status_code)
                 if send_resp.status_code not in (200, 204) or send_reason:
-                    # 号码无效 / 无法发送 / WhatsApp 通道 / 限流等 → 释放当前号并换号。
+                    # 403/429 会打开当前 BrowserSession 熔断；继续换号只会重复
+                    # 触发同一会话失败，释放当前号码后立即结束本轮授权。
+                    if send_resp.status_code in (403, 429) or _is_codex_circuit_open_error(send_text):
+                        logger.warning(
+                            "[Codex] add-phone/send 触发会话熔断，停止换号：status=%s body=%s",
+                            send_resp.status_code, send_text[:240],
+                        )
+                        cancel_and_report_failure(
+                            activation_id,
+                            send_text or f"HTTP {send_resp.status_code}",
+                            category="session_circuit_open",
+                        )
+                        activation_id = None
+                        raise BrowserSessionCircuitOpenError(
+                            f"browser_session_circuit_open: add-phone/send status={send_resp.status_code}: {send_text[:220]}"
+                        )
+                    # 号码无效 / 无法发送 / WhatsApp 通道 / 限流等 → 释放当前号并换号；
+                    # fraud_guard 是账号级风控，换号只会重复触发，必须直接终止。
+                    send_fraud_guard = _is_codex_fraud_guard_error(send_text)
                     logger.warning(
                         f"[Codex] add-phone/send 未成功 reason={send_reason or 'unknown'}, "
-                        f"status={send_resp.status_code}: {send_text[:240]}，换号重试"
+                        f"status={send_resp.status_code}: {send_text[:240]}"
+                        + ("，账号级风控，停止换号" if send_fraud_guard else "，换号重试")
                     )
                     cancel_and_report_failure(activation_id, send_reason or send_text or "send_failed")
                     activation_id = None
-                    if _is_codex_fraud_guard_error(send_text):
+                    if send_fraud_guard:
                         raise PhoneFraudGuardError(
                             f"phone_fraud_guard: {send_text[:220]}"
                         )
@@ -1721,13 +1753,29 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 if val_resp.status_code != 200:
                     val_text = _response_text(val_resp)
                     val_reason = _phone_failure_reason(val_text, val_resp.status_code) or 'code_rejected'
+                    if val_resp.status_code in (403, 429) or _is_codex_circuit_open_error(val_text):
+                        logger.warning(
+                            "[Codex] phone-otp/validate 触发会话熔断，停止换号：status=%s body=%s",
+                            val_resp.status_code, val_text[:240],
+                        )
+                        cancel_and_report_failure(
+                            activation_id,
+                            val_text or f"HTTP {val_resp.status_code}",
+                            category="session_circuit_open",
+                        )
+                        activation_id = None
+                        raise BrowserSessionCircuitOpenError(
+                            f"browser_session_circuit_open: phone-otp/validate status={val_resp.status_code}: {val_text[:220]}"
+                        )
+                    val_fraud_guard = _is_codex_fraud_guard_error(val_text)
                     logger.warning(
                         f"[Codex] phone-otp/validate 失败 reason={val_reason}, status={val_resp.status_code}: "
-                        f"{val_text[:240]}，换号重试"
+                        f"{val_text[:240]}"
+                        + ("，账号级风控，停止换号" if val_fraud_guard else "，换号重试")
                     )
                     cancel_and_report_failure(activation_id, val_reason)
                     activation_id = None
-                    if _is_codex_fraud_guard_error(val_text):
+                    if val_fraud_guard:
                         raise PhoneFraudGuardError(
                             f"phone_fraud_guard: {val_text[:220]}"
                         )
@@ -1764,8 +1812,16 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                 last_err = exc
                 err_text = str(exc) or ""
                 logger.warning("[Codex] 手机验证流程异常（%s/%s）：%s", attempt, max_retries, err_text[:240])
-                if isinstance(exc, PhoneFraudGuardError):
+                if isinstance(exc, (PhoneFraudGuardError, BrowserSessionCircuitOpenError)):
                     raise
+                if _is_codex_circuit_open_error(exc):
+                    cancel_and_report_failure(
+                        activation_id, exc, category="session_circuit_open"
+                    )
+                    activation_id = None
+                    raise BrowserSessionCircuitOpenError(
+                        f"browser_session_circuit_open: {err_text[:220]}"
+                    ) from exc
                 cancel_and_report_failure(activation_id, exc)
                 if "invalid_auth_step" in err_text.lower():
                     raise
@@ -2175,6 +2231,25 @@ def _is_codex_fraud_guard_error(value: BaseException | str) -> bool:
     return "fraud_guard" in text or "suspicious behavior from phone" in text
 
 
+def _is_codex_circuit_open_error(value: BaseException | str) -> bool:
+    text = str(value or "").lower()
+    return (
+        "browser_session_circuit_open" in text
+        or "当前 browsersession 已熔断冷却" in text
+        or "current browsersession circuit open" in text
+        or "熔断冷却" in text
+    )
+
+
+def _is_codex_cloudflare_challenge(value: BaseException | str) -> bool:
+    text = str(value or "").lower()
+    return any(marker in text for marker in (
+        "just a moment", "performing security verification", "checking your browser",
+        "verify you are human", "cloudflare challenge", "cloudflare_challenge",
+        "challenge-platform", "cf-chl-",
+    ))
+
+
 def _pick_next_codex_proxy(current_proxy: str | None) -> str:
     """风控耗尽号码时换出口；代理池为空则保持原有直连行为。"""
     try:
@@ -2267,8 +2342,18 @@ def _is_codex_driver_recoverable(exc: BaseException | str) -> bool:
     if any(marker in text for marker in (
         "ip banned", "ip_banned", "ip has been banned",
         "phone_fraud_guard", "fraud_guard", "suspicious behavior from phone",
+        "browser_session_circuit_open", "当前 browsersession 已熔断冷却", "熔断冷却",
+        "just a moment", "performing security verification", "challenge-platform", "cf-chl-",
     )):
         return False
+    # 当前浏览器协议层卡住时可以交给 protocol 驱动重开一轮；账号/手机号级
+    # 拒绝已在上面的排除列表中，不能因为网络超时而重复消耗号码。
+    if any(marker in text for marker in (
+        "page.goto", "navigation timeout", "net::err_timed_out",
+        "err_connection_reset", "err_connection_closed",
+        "codex_email_submit_stalled", "email_submit_stalled",
+    )):
+        return True
     if any(marker in text for marker in _CODEX_DRIVER_RESOURCE_ERROR_MARKERS):
         return True
     if any(marker in text for marker in _CODEX_DRIVER_DEPENDENCY_ERROR_MARKERS):
@@ -2282,6 +2367,9 @@ def _run_codex_oauth_with_driver(
     email: str,
     otp_provider=None,
     proxy: str | None = None,
+    profile_name: str | None = None,
+    job_id: str | None = None,
+    pool_activation: dict | None = None,
 ) -> dict | None:
     """用指定驱动跑一轮 Codex 授权。
 
@@ -2292,7 +2380,17 @@ def _run_codex_oauth_with_driver(
     driver_name = _normalize_driver_name(oauth_driver) or oauth_driver
     if driver_name == "roxy":
         from core.roxy_codex_oauth import run_roxy_codex_oauth
-        return run_roxy_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
+        # profile_name/job_id 之前只在 cloak 分支透传，roxy 分支被丢掉，
+        # 导致"每任务隔离身份"只在 cloak 生效；这里沿同一调用边界补齐。
+        return run_roxy_codex_oauth(
+            email,
+            otp_provider=otp_provider,
+            proxy=proxy,
+            force=True,
+            pool_activation=pool_activation,
+            profile_name=profile_name,
+            job_id=job_id,
+        )
 
     if driver_name == "browser_use":
         from core.browser_use_codex_oauth import run_browser_use_codex_oauth
@@ -2308,7 +2406,9 @@ def _run_codex_oauth_with_driver(
         from core.roxy_codex_oauth import run_roxy_codex_oauth
         browser = opened = None
         try:
-            browser, opened = build_cloak_driver(proxy=proxy)
+            browser, opened = build_cloak_driver(
+                proxy=proxy, profile_name=profile_name, job_id=job_id,
+            )
         except Exception as exc:
             if _is_codex_driver_recoverable(exc):
                 _LAST_DRIVER_ERROR.append(f"{type(exc).__name__}: {exc}")
@@ -2324,6 +2424,9 @@ def _run_codex_oauth_with_driver(
                 existing_opened=opened,
                 reuse_existing_profile=True,
                 clear_existing_state=True,
+                pool_activation=pool_activation,
+                profile_name=profile_name,
+                job_id=job_id,
             )
         except Exception as exc:
             if _is_codex_driver_recoverable(exc):
@@ -2352,9 +2455,14 @@ def run_codex_oauth(
     _cpa_reauth_round: int = 1,
     _phone_activation: dict | None = None,
     _proxy_retry_attempt: int = 0,
+    profile_name: str | None = None,
+    job_id: str | None = None,
+    pool_activation: dict | None = None,
 ) -> dict:
     """
     注册成功后的 Codex OAuth 授权入口（全新 session + 接码方案）。
+
+    pool_activation 非空时使用号码池已锁定的号码，本次授权不再向供应商取号。
 
     不复用注册的 session：内部新建干净 BrowserSession，从头登录该邮箱，
     走 邮箱 OTP → 手机短信验证 → 选 workspace → 拿 code → 换 token → 落盘。
@@ -2396,6 +2504,9 @@ def run_codex_oauth(
                 email=email,
                 otp_provider=otp_provider,
                 proxy=active_proxy,
+                profile_name=profile_name,
+                job_id=job_id,
+                pool_activation=pool_activation,
             )
         except ImportError:
             # 没装 selenium / 未提供 roxy 配置时继续走协议模式，保持旧行为。
@@ -2403,7 +2514,15 @@ def run_codex_oauth(
         if result is not None:
             if result.get("ok"):
                 return result
-            result_message = str(result.get("message") or result.get("error") or "")
+            result_message = " ".join(
+                str(result.get(key) or "") for key in ("message", "error", "error_code")
+            )
+            if _is_codex_circuit_open_error(result_message):
+                result["error_code"] = "browser_session_circuit_open"
+                result["retryable"] = False
+            elif _is_codex_cloudflare_challenge(result_message):
+                result["error_code"] = "cloudflare_challenge"
+                result["retryable"] = False
             if has_next and _is_codex_driver_recoverable(result_message):
                 _LAST_DRIVER_ERROR.append(result_message[:300])
                 last_driver_result = {"driver": oauth_driver, "error": result_message}

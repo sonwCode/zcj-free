@@ -645,11 +645,15 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
             )
         else:
             deactivated = result_status == "deactivated"
+            retryable = result.get("retryable")
+            if retryable is None:
+                retryable = not deactivated
+            retryable = bool(retryable) and not deactivated
             db.update_job(
                 job_id,
                 status="partial_success" if deactivated else "failed",
                 phase="codex",
-                retryable=not deactivated,
+                retryable=retryable,
                 account_status="success",
                 codex_status=result_status or "failed",
                 error_code=result.get("error_code") or f"codex_{result_status or 'failed'}",
@@ -764,7 +768,30 @@ def get_retry_info(job: dict) -> dict:
     if account and job.get("account_id") is not None and status in ("failed", "stopped"):
         info["display_status"] = "success" if (account.get("codex_status") or "") == "success" else "partial_success"
 
+    stored_retryable = job.get("retryable")
+    if isinstance(stored_retryable, str):
+        stored_retryable = stored_retryable.strip().lower() not in ("", "0", "false", "no")
+    if stored_retryable is not None and not bool(stored_retryable):
+        info["retry_reason"] = "任务记录标记为不可重试"
+        return info
+
     if account:
+        error_code = str(job.get("error_code") or "").strip().lower()
+        error_text = str(job.get("error") or "").lower()
+        terminal_codex_errors = {
+            "phone_fraud_guard", "browser_session_circuit_open", "cloudflare_challenge",
+            "codex_phone_fraud_guard", "codex_browser_session_circuit_open",
+            "codex_cloudflare_challenge",
+        }
+        terminal_markers = (
+            "phone_fraud_guard", "suspicious behavior from phone",
+            "browser_session_circuit_open", "当前 browsersession 已熔断冷却",
+            "just a moment", "performing security verification", "cf-chl-",
+        )
+        if error_code in terminal_codex_errors or any(marker in error_text for marker in terminal_markers):
+            info["retry_reason"] = "Codex错误已判定为当前账号的终态失败"
+            return info
+
         codex_status = str(account.get("codex_status") or "")
         if codex_status == "deactivated":
             info["retry_reason"] = "账号已废号，不能补跑 Codex"

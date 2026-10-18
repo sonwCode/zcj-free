@@ -68,6 +68,37 @@ def _is_pickup_transient_error(exc: BaseException | str) -> bool:
 
 _CODE_REGEX = re.compile(r"\b(\d{6})\b")
 _CONTEXT_WORDS = ("code", "verify", "verification", "验证码", "代码", "确认码", "認証", "コード")
+
+# 取码基准 after_ts 是"本机触发发送验证码"的时刻，而邮件服务端记录的 receivedAt
+# 存在时区差、投递延迟和秒级取整。容差过小会把刚发出、正是本轮要用的那封验证码
+# 当成旧码过滤掉，表现为整轮轮询都"未提取到 6 位验证码"。
+_AFTER_TS_TOLERANCE_DEFAULT = 180
+
+
+# 重发后取码接口若一直只返回“已提交过的码”，说明服务端在本次会话里复用了同一个
+# 验证码（Job 415 连续三封邮件的验证码都是 012878）。此时继续把它当旧码排除，就
+# 等于把本轮唯一可用的码拉黑，只能按 3s 间隔空转到整轮超时（#415 累计空转 13 分钟）。
+# 因此等满这个窗口仍无新码时，回退复用该码再试一次，把死锁换成一次真实提交机会。
+# 重复失败仍由注册侧的 invalid 连击上限兜底。
+_OTP_EXCLUDED_REUSE_AFTER_SECONDS = 60
+
+
+def _excluded_reuse_after_seconds() -> float:
+    try:
+        value = float(getattr(
+            _email_cfg, "OTP_EXCLUDED_CODE_REUSE_SECONDS", _OTP_EXCLUDED_REUSE_AFTER_SECONDS
+        ))
+    except (TypeError, ValueError):
+        value = float(_OTP_EXCLUDED_REUSE_AFTER_SECONDS)
+    return max(0.0, value)
+
+
+def _after_ts_tolerance() -> float:
+    try:
+        value = float(getattr(_email_cfg, "OTP_AFTER_TS_TOLERANCE_SECONDS", _AFTER_TS_TOLERANCE_DEFAULT))
+    except (TypeError, ValueError):
+        value = float(_AFTER_TS_TOLERANCE_DEFAULT)
+    return max(0.0, value)
 _CONTEXT_CACHE: dict[str, "GenericApiEmailAccount"] = {}
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ACCOUNTS_FILE = _PROJECT_ROOT / "用于注册的API邮箱.txt"
@@ -209,7 +240,7 @@ def _fetch_public_inbox_page_otp(
     for item in items:
         received_at = item.get("receivedAt") or item.get("received_at")
         msg_ts = _parse_generic_api_ts(received_at)
-        if after_ts and msg_ts and msg_ts + 2 < after_ts:
+        if after_ts and msg_ts and msg_ts + _after_ts_tolerance() < after_ts:
             continue
         raw_codes = item.get("verificationCodes") or item.get("verification_codes") or []
         code = next(
@@ -472,7 +503,7 @@ def _extract_structured_message_list_code(
             None,
         )
         msg_ts = _parse_generic_api_ts(received_at)
-        if after_ts and msg_ts and msg_ts + 30 < after_ts:
+        if after_ts and msg_ts and msg_ts + _after_ts_tolerance() < after_ts:
             continue
 
         raw_code = next(
@@ -590,7 +621,7 @@ def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tu
         or data.get("timestamp")
     )
     msg_ts = _parse_generic_api_ts(ts_raw)
-    if after_ts and msg_ts and msg_ts + 2 < after_ts:
+    if after_ts and msg_ts and msg_ts + _after_ts_tolerance() < after_ts:
         logger.debug(
             "[GenericAPI] structured API 跳过旧验证码：length=%s ts=%s after=%s subject=%r",
             len(code),
@@ -655,7 +686,7 @@ def _fetch_yangyang_otp(
     for item in items:
         msg_ts_raw = item.get("received_at") or item.get("receivedAt")
         msg_ts = _parse_yangyang_ts(msg_ts_raw)
-        if after_ts and msg_ts and msg_ts + 2 < after_ts:
+        if after_ts and msg_ts and msg_ts + _after_ts_tolerance() < after_ts:
             logger.debug(
                 "[GenericAPI] yangyang 跳过旧邮件: id=%s ts=%s after=%s subject=%r",
                 item.get("id"), msg_ts_raw, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(after_ts)),
@@ -763,7 +794,7 @@ def _fetch_inline_messages_page_otp(
     items.sort(key=lambda x: float(x.get("msg_ts") or 0.0), reverse=True)
     for item in items:
         msg_ts = float(item.get("msg_ts") or 0.0)
-        if after_ts and msg_ts and msg_ts + 2 < after_ts:
+        if after_ts and msg_ts and msg_ts + _after_ts_tolerance() < after_ts:
             logger.debug(
                 "[GenericAPI] inline messages 跳过旧邮件: id=%s ts=%s after=%s subject=%r",
                 item.get("mail_id"), item.get("received_at"),
@@ -942,6 +973,10 @@ def fetch_latest_otp(
 
     attempt = 0
     transient_failures = 0
+    # 连续只看到“已提交过的码”的起始时刻与其值；用于判断重发是否真的产生了新码，
+    # 以及在新码始终不出现时回退复用该码。
+    excluded_only_since: float | None = None
+    excluded_hold: str = ""
     while time.time() < deadline:
         attempt += 1
         try:
@@ -1049,8 +1084,28 @@ def fetch_latest_otp(
                 if mailbox_mismatch:
                     code = None
                 if code and code in excluded_codes:
-                    logger.info("[GenericAPI] 跳过已提交的旧 OTP：length=%s", len(code))
-                    code = None
+                    # 服务端可能复用同一个验证码（Job 415）。等待窗口内先只记时间，
+                    # 超窗口仍未出现新码时回退复用，避免把唯一可用的码永久排除。
+                    excluded_hold = excluded_hold or code
+                    excluded_only_since = excluded_only_since or time.time()
+                    held = float(_excluded_reuse_after_seconds())
+                    waited = time.time() - excluded_only_since
+                    if held > 0 and waited < held:
+                        logger.info(
+                            "[GenericAPI] 暂缓已提交过的 OTP：length=%s，"
+                            "%.0fs 内等新码（仍无新码则回退复用）",
+                            len(code), held - waited,
+                        )
+                        code = None
+                    else:
+                        logger.warning(
+                            "[GenericAPI] 取码接口持续只返回已提交过的 OTP：length=%s，"
+                            "已等 %.0fs 仍无新码，回退复用该验证码再试一次",
+                            len(code), waited,
+                        )
+                elif code:
+                    excluded_only_since = None
+                    excluded_hold = ""
                 if code:
                     if (
                         public_inbox_api_url
@@ -1120,6 +1175,23 @@ def fetch_latest_otp(
                 f"候选锁定时间={time.strftime('%H:%M:%S', time.localtime(best_seen_at))}"
             )
             return best_otp
+
+        # 兜底：窗口内始终没有任何新码，但取码接口稳定返回某个已提交过的码。
+        # 这说明服务端本次会话复用了同一个验证码（Job 415），把它当旧码排除就再也
+        # 取不到码。直接返回它，交给注册侧再提交一次；重复失败由 invalid 连击上限兜底。
+        reuse_after = _excluded_reuse_after_seconds()
+        if (
+            not best_otp
+            and excluded_hold
+            and reuse_after > 0
+            and excluded_only_since is not None
+            and now - excluded_only_since >= reuse_after
+        ):
+            logger.warning(
+                "[GenericAPI] 无新码可用，复用已提交过的验证码作为最终候选：length=%s（已等 %.0fs）",
+                len(excluded_hold), now - excluded_only_since,
+            )
+            return excluded_hold
 
         remaining = int(deadline - now)
         if best_otp and settle_until is not None:

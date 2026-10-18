@@ -1,4 +1,5 @@
 import ast
+import re
 import unittest
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def _load(names):
             found = [t.id for t in tgts if isinstance(t, ast.Name)]
             if any(n.startswith("_PHONE_") for n in found):
                 body.append(node)
-    ns = {}
+    ns = {"re": re}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(CODEX), "exec"), ns)  # noqa: S102
     return ns
 
@@ -38,7 +39,9 @@ class ImmediateReleaseWiringTests(unittest.TestCase):
         self.assertIn("exclude_codes=used_otps", source)
         self.assertNotIn("max_wait=30 if used_otps else None", source)
         self.assertIn("outcome = _wait_after_email_otp_submit(driver, timeout=30)", source)
-        self.assertIn("after_ts=0.0", source)
+        # 宽松回退必须限定回看窗口，不能无界读取历史旧码。
+        self.assertNotIn("after_ts=0.0", source)
+        self.assertIn("after_ts=max(0.0, otp_after_ts - register_otp_lookback)", source)
         self.assertIn("max_wait=15", source)
         self.assertIn("poll_interval=3", source)
         self.assertNotIn("_bounded_email_otp_submit_wait", source)
@@ -131,6 +134,42 @@ class FraudGuardBackoffTests(unittest.TestCase):
         ns["_sleep_before_phone_retry"](1, 10, reason='add_phone_response code=fraud_guard')
         self.assertEqual(delays, [(21, 39)])
         self.assertTrue(messages)
+
+
+class AddPhoneErrorAttributionTests(unittest.TestCase):
+    """服务端明确拒绝码必须优先于页面态副作用。"""
+
+    def _extract(self):
+        ns = _load({"_extract_add_phone_error_code"})
+        return ns["_extract_add_phone_error_code"]
+
+    def test_fraud_guard_code_is_extracted_from_diagnostic(self):
+        extract = self._extract()
+        diagnostic = 'status=400 detail={"error":"{\"code\": \"fraud_guard\"}"}'
+        self.assertEqual(extract(diagnostic), "fraud_guard")
+
+    def test_voip_disallowed_code_is_extracted(self):
+        extract = self._extract()
+        diagnostic = 'status=400 detail={"error":"{\"code\": \"voip_phone_disallowed\"}"}'
+        self.assertEqual(extract(diagnostic), "voip_phone_disallowed")
+
+    def test_missing_or_placeholder_codes_return_empty(self):
+        extract = self._extract()
+        self.assertEqual(extract(None), "")
+        self.assertEqual(extract("status=500 detail=response_body_unavailable"), "")
+        self.assertEqual(extract('status=400 detail={"code":"null"}'), "")
+
+    def test_api_code_is_placed_before_page_state_in_error_text(self):
+        self.assertIn("add_phone_rejected: code=", TEXT)
+        self.assertIn("page_state=", TEXT)
+        # 服务端码分支必须在页面态分支之前判断
+        self.assertLess(
+            TEXT.index("if api_code:"),
+            TEXT.index("if not api_code and any(k in err_text"),
+        )
+
+    def test_page_state_hint_is_suppressed_when_api_code_present(self):
+        self.assertIn('if not api_code and any(k in err_text for k in (', TEXT)
 
 
 class ProtocolFraudGuardBackoffWiringTests(unittest.TestCase):

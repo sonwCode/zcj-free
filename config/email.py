@@ -57,6 +57,26 @@ OTP_SETTLE_SECONDS = 5
 # 会连续返回同一个验证码，三轮不足以等到真正的新码。
 REGISTER_OTP_MAX_ATTEMPTS = 4
 
+# 注册阶段邮箱验证码被页面判为 invalid 时，允许连续几次无效才判定服务端拒绝。
+# 单次 invalid 可能只是邮件投递延迟导致收到的码与当前发送轮次不匹配，
+# 直接终止会把可恢复的时序问题误判为终态。
+REGISTER_OTP_INVALID_STREAK_LIMIT = 2
+
+# 取码超时后的宽松回看窗口（秒）。宽松读取只在这段时间内找邮件，避免把更早阶段
+# 或上一轮的旧验证码重新取出来提交；设为 0 表示不回看（严格按本轮起始时间过滤）。
+REGISTER_OTP_FALLBACK_LOOKBACK_SECONDS = 180
+
+# 取码时对“邮件时间早于取码基准”的容差（秒）。基准取“提交邮箱/触发发送验证码”
+# 的时刻，而邮件服务端记录的 receivedAt 与运行机器存在时区差、投递延迟和秒级取整，
+# 容差过小会把刚发出、正是本轮要用的验证码当作旧码过滤掉，表现为一直取不到码。
+OTP_AFTER_TS_TOLERANCE_SECONDS = 180
+
+# 重发后取码接口若只返回“已提交过的验证码”，说明服务端在本次会话复用了同一个码
+# （Job 415 连续三封邮件都是 012878）。等满这个窗口仍无新码，就回退复用该码再提交
+# 一次，而不是把它永久排除后按 3s 间隔空转到整轮超时（#415 累计空转 13 分钟）。
+# 设为 0 关闭回退复用（保持旧的严格排除行为）。
+OTP_EXCLUDED_CODE_REUSE_SECONDS = 60
+
 # 通用 API 取码专用代理；不读取代理池，也不套用代理池上游链式。
 # 需要时填写例如 http://127.0.0.1:7897；留空则直连。
 GENERIC_API_PROXY: str = ""
@@ -195,4 +215,4 @@ REMAIL_ORDER_WAIT_SECONDS = 30
 REMAIL_REQUEST_TIMEOUT = 20
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'OTP_SETTLE_SECONDS': 'int', 'REGISTER_OTP_MAX_ATTEMPTS': 'int', 'GENERIC_API_PROXY': 'str', 'GENERIC_API_PICKUP_MIN_GAP': 'float', 'EMAIL_SOURCE': 'str', 'IMAP_MAILBOX': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDFLARE_API_BASE': 'str', 'CLOUDFLARE_API_KEY': 'str', 'CLOUDFLARE_AUTH_MODE': 'str', 'CLOUDFLARE_CUSTOM_AUTH': 'str', 'CLOUDFLARE_PATH_DOMAINS': 'str', 'CLOUDFLARE_PATH_ACCOUNTS': 'str', 'CLOUDFLARE_PATH_TOKEN': 'str', 'CLOUDFLARE_PATH_MESSAGES': 'str', 'CLOUDFLARE_DEFAULT_DOMAINS': 'list_str_multiline', 'CLOUDFLARE_REQUEST_TIMEOUT': 'int', 'CLOUDFLARE_NAME_LENGTH': 'int', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int', 'REMAIL_API_BASE': 'str', 'REMAIL_API_KEY': 'str', 'REMAIL_PROJECT_ID': 'int', 'REMAIL_EMAIL_SUFFIX': 'str', 'REMAIL_SERVICE_MODE': 'str', 'REMAIL_SUPPLY_POLICY': 'str', 'REMAIL_ORDER_WAIT_SECONDS': 'int', 'REMAIL_REQUEST_TIMEOUT': 'int'})
+apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'OTP_SETTLE_SECONDS': 'int', 'REGISTER_OTP_MAX_ATTEMPTS': 'int', 'REGISTER_OTP_INVALID_STREAK_LIMIT': 'int', 'REGISTER_OTP_FALLBACK_LOOKBACK_SECONDS': 'int', 'OTP_AFTER_TS_TOLERANCE_SECONDS': 'int', 'OTP_EXCLUDED_CODE_REUSE_SECONDS': 'int', 'GENERIC_API_PROXY': 'str', 'GENERIC_API_PICKUP_MIN_GAP': 'float', 'EMAIL_SOURCE': 'str', 'IMAP_MAILBOX': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDFLARE_API_BASE': 'str', 'CLOUDFLARE_API_KEY': 'str', 'CLOUDFLARE_AUTH_MODE': 'str', 'CLOUDFLARE_CUSTOM_AUTH': 'str', 'CLOUDFLARE_PATH_DOMAINS': 'str', 'CLOUDFLARE_PATH_ACCOUNTS': 'str', 'CLOUDFLARE_PATH_TOKEN': 'str', 'CLOUDFLARE_PATH_MESSAGES': 'str', 'CLOUDFLARE_DEFAULT_DOMAINS': 'list_str_multiline', 'CLOUDFLARE_REQUEST_TIMEOUT': 'int', 'CLOUDFLARE_NAME_LENGTH': 'int', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int', 'REMAIL_API_BASE': 'str', 'REMAIL_API_KEY': 'str', 'REMAIL_PROJECT_ID': 'int', 'REMAIL_EMAIL_SUFFIX': 'str', 'REMAIL_SERVICE_MODE': 'str', 'REMAIL_SUPPLY_POLICY': 'str', 'REMAIL_ORDER_WAIT_SECONDS': 'int', 'REMAIL_REQUEST_TIMEOUT': 'int'})

@@ -28,12 +28,18 @@ from core.roxy_registration import (  # noqa: F401
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _recover_pending_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
+    _raise_if_cloudflare_challenge,
     _is_signup_password_page, _password_page_state,
     _safe_get,
 )
 
 logger = logging.getLogger(__name__)
 _CLOAK_CLEANUP_TIMEOUT_SECONDS = 5.0
+
+
+class EmailOtpRejectedError(RuntimeError):
+    error_code = "email_otp_rejected"
+    retryable = False
 _ACTIVE_CLOAK_DRIVERS_LOCK = threading.RLock()
 _ACTIVE_CLOAK_DRIVERS: dict[int, object] = {}
 _CLOAK_PROXY_RETRY_MARKERS = (
@@ -52,9 +58,44 @@ class _CloakProxyBootstrapError(RuntimeError):
         self.retryable = True
 
 
+class _CloakNetworkError(RuntimeError):
+    """运行时检测到 Chrome 网络错误页（chrome-error://），需要换代理重试。"""
+
+    def __init__(self, message: str, failed_proxy: str | None = None, error_url: str | None = None):
+        super().__init__(message)
+        self.failed_proxy = str(failed_proxy or "").strip()
+        self.error_url = str(error_url or "").strip()
+        self.error_code = "chrome_network_error"
+        self.retryable = True
+
+
 def _is_cloak_proxy_bootstrap_error(exc: BaseException) -> bool:
     text = str(exc or "").lower()
     return any(marker in text for marker in _CLOAK_PROXY_RETRY_MARKERS)
+
+
+def _note_proxy_failure(proxy: str | None) -> None:
+    """记录出口故障，让该出口在冷却期内不再被优先选中。"""
+    try:
+        from config.proxy import note_proxy_failure
+    except Exception:
+        return
+    try:
+        note_proxy_failure(proxy)
+    except Exception as exc:
+        logger.debug("[Cloak注册] 记录代理冷却失败：%s", str(exc)[:120])
+
+
+def _note_proxy_success(proxy: str | None) -> None:
+    """出口恢复正常时清除冷却标记。"""
+    try:
+        from config.proxy import note_proxy_success
+    except Exception:
+        return
+    try:
+        note_proxy_success(proxy)
+    except Exception as exc:
+        logger.debug("[Cloak注册] 清除代理冷却失败：%s", str(exc)[:120])
 
 
 def _register_active_cloak_driver(driver) -> None:
@@ -183,6 +224,19 @@ def _run_cloak_registration_impl(
         driver, opened = build_cloak_driver(
             proxy=proxy, excluded_proxies=excluded_proxies,
         )
+        # 附加代理信息，供运行时 Chrome 错误检测使用
+        _current_proxy = str(
+            ((opened.raw or {}).get("proxy_pool_target") if opened else None)
+            or ((opened.raw or {}).get("proxy") if opened else None)
+            or proxy
+            or ""
+        ).strip()
+        if hasattr(driver, '_driver'):
+            # CloakSeleniumDriver 包装了 Playwright page，存储在 _driver 上
+            driver._driver._proxy_info = _current_proxy
+        else:
+            # 直接在 driver 上存储（兼容未来的其他 driver 类型）
+            driver._proxy_info = _current_proxy
         _register_active_cloak_driver(driver)
         try:
             traffic_tracker = PlaywrightTrafficTracker(driver.context, label="Cloak")
@@ -208,11 +262,15 @@ def _run_cloak_registration_impl(
                 ).strip()
                 if failed_target:
                     excluded_proxies.add(failed_target)
+                    _note_proxy_failure(failed_target)
                 raise _CloakProxyBootstrapError(
                     f"首个登录页代理/隧道失败：{type(exc).__name__}: {str(exc)[:240]}",
                     failed_proxy=failed_target,
                 ) from exc
             raise
+        _note_proxy_success(
+            str(((opened.raw or {}).get("proxy_pool_target") if opened else None) or "").strip()
+        )
         human_delay("navigate")
         _maybe_accept(driver)
         _check_manual_stop()
@@ -261,10 +319,24 @@ def _run_cloak_registration_impl(
             )))
         except (TypeError, ValueError):
             register_otp_wait = 180
+        try:
+            register_otp_lookback = max(0, int(
+                getattr(_email_cfg, "REGISTER_OTP_FALLBACK_LOOKBACK_SECONDS", 180) or 180
+            ))
+        except (TypeError, ValueError):
+            register_otp_lookback = 180
         otp_submitted_attempts = 0
         otp_resend_count = 0
         otp_final_outcome = "not_submitted"
+        try:
+            invalid_streak_limit = max(1, int(
+                getattr(_email_cfg, "REGISTER_OTP_INVALID_STREAK_LIMIT", 2) or 2
+            ))
+        except (TypeError, ValueError):
+            invalid_streak_limit = 2
+        otp_invalid_streak = 0
         for otp_attempt in range(1, max_otp_attempts + 1):
+            _raise_if_cloudflare_challenge(driver)
             if current_otp is None:
                 logger.info("[Cloak注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
                 try:
@@ -275,13 +347,15 @@ def _run_cloak_registration_impl(
                         exclude_codes=used_otps,
                     )
                 except Exception as exc:
-                    # 参考 Roxy 流程：after_ts 过滤可能漏掉同一封被重发/时间戳异常的验证码。
-                    # 最后一轮也先做一次宽松读取，避免邮件已到达但时间戳偏差导致直接失败。
+                    # 宽松读取用于兜住“邮件已到但时间戳偏差”的情况，必须限定回看窗口：
+                    # 旧实现把起始时间设为 0（等于完全不过滤），会把历史旧码（更早阶段或上一轮
+                    # 重发的邮件）重新取出来提交，形成“旧码 -> invalid -> 再取旧码”的空转。
+                    # 这里回看最近 register_otp_lookback 秒，既容忍时间戳偏差又够不到远古旧码。
                     fallback_otp = None
                     try:
                         fallback_otp = wait_for_otp(
                             email,
-                            after_ts=0.0,
+                            after_ts=max(0.0, otp_after_ts - register_otp_lookback),
                             max_wait=15,
                             poll_interval=3,
                             exclude_codes=used_otps,
@@ -306,7 +380,10 @@ def _run_cloak_registration_impl(
                     )
                     otp_after_ts = time.time()
                     otp_resend_count += 1
-                    _click_resend_email_otp(driver, timeout=25)
+                    resend_result = _click_resend_email_otp(driver, timeout=25)
+                    if isinstance(resend_result, dict) and resend_result.get("verified"):
+                        otp_final_outcome = "accepted"
+                        break
                     human_delay("api")
                     current_otp = None
                     continue
@@ -345,6 +422,18 @@ def _run_cloak_registration_impl(
                 outcome = _recover_pending_email_otp_submit(driver, timeout=18)
             otp_final_outcome = str(outcome or "unknown")
             logger.info("[Cloak注册][OTP] 提交后状态：%s", outcome)
+            if outcome == "invalid":
+                otp_invalid_streak += 1
+                if otp_invalid_streak >= invalid_streak_limit:
+                    raise EmailOtpRejectedError(
+                        f"邮箱验证码连续 {otp_invalid_streak} 次被判定无效，已停止后续重试"
+                    )
+                logger.warning(
+                    "[Cloak注册][OTP] 验证码被判无效（第 %s/%s 次），换码重试而不是直接终止",
+                    otp_invalid_streak, invalid_streak_limit,
+                )
+            else:
+                otp_invalid_streak = 0
             if outcome == "accepted":
                 logger.info(
                     "[Cloak注册][阶段] 邮箱OTP完成：outcome=accepted submit_attempts=%s resends=%s",
@@ -355,7 +444,10 @@ def _run_cloak_registration_impl(
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             otp_after_ts = time.time()
             otp_resend_count += 1
-            _click_resend_email_otp(driver, timeout=25)
+            resend_result = _click_resend_email_otp(driver, timeout=25)
+            if isinstance(resend_result, dict) and resend_result.get("verified"):
+                otp_final_outcome = "accepted"
+                break
             human_delay("api")
             current_otp = None
 
@@ -411,17 +503,23 @@ def _run_cloak_registration_impl(
             totp_secret = None
         twofa_blocked = bool(_twofa_cfg.ENABLE_2FA) and not bool(pre_twofa_result.get("ok"))
         try:
+            from config import codex as _codex_cfg
+            codex_auto_enabled = bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False))
+        except Exception:
+            # 配置读取异常时按关闭处理，避免意外进入手机号接码。
+            codex_auto_enabled = False
+        try:
             from config import codex as _codex_required_cfg
             codex_required = bool(getattr(_codex_required_cfg, "CODEX_REQUIRED_ON_REGISTRATION", True))
         except Exception:
             codex_required = True
         codex_result = {
-            "status": "failed" if codex_required else "skipped",
+            "status": "failed" if codex_auto_enabled and codex_required else "skipped",
             "ok": False,
-            "error_code": "codex_disabled" if codex_required else None,
+            "error_code": "codex_required" if codex_auto_enabled and codex_required else "codex_skipped",
             "message": (
-                "ENABLE_CODEX_AUTO=False，已保留账号并标记为可补跑"
-                if codex_required else "ENABLE_CODEX_AUTO=False，跳过 Codex"
+                "注册后自动 Codex 已关闭，已跳过 Codex 和手机号接码；可在账号页补跑"
+                if not codex_auto_enabled else "注册后 Codex 尚未完成，已保留账号并标记为可补跑"
             ),
         }
         if twofa_blocked:
@@ -435,7 +533,7 @@ def _run_cloak_registration_impl(
         else:
             try:
                 from config import codex as _codex_cfg
-                if bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False)):
+                if codex_auto_enabled:
                     from core.roxy_codex_oauth import run_roxy_codex_oauth
                     logger.info("[Cloak注册][Codex] ENABLE_CODEX_AUTO=True，2FA 完成后复用当前 CloakBrowser 窗口授权")
                     _check_manual_stop()
@@ -545,17 +643,22 @@ def _run_cloak_registration_impl(
             traffic_summary.get("failed_request_count", "-"),
             traffic_summary.get("unfinished_request_count", "-"),
         )
+        codex_skipped = codex_status == "skipped"
         return {
             "success": True,
             "task_status": "success" if codex_ok else "partial_success",
             "account_status": "success",
             "codex_status": codex_status,
             "phase": "completed" if codex_ok else "codex",
-            "error_code": None if codex_ok else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
+            "error_code": None if codex_ok or codex_skipped else (str(codex_result.get("error_code") or "") or f"codex_{codex_status}"),
             "retryable": (
-                not codex_ok
-                and codex_status != "deactivated"
-                and str(codex_result.get("error_code") or "") not in {"account_deactivated", "account_deleted", "account_banned"}
+                bool(codex_result.get("retryable"))
+                if codex_result.get("retryable") is not None
+                else (
+                    not codex_ok
+                    and codex_status != "deactivated"
+                    and str(codex_result.get("error_code") or "") not in {"account_deactivated", "account_deleted", "account_banned"}
+                )
             ),
             "email": email,
             "account_id": account_id,
@@ -563,7 +666,7 @@ def _run_cloak_registration_impl(
             "totp_secret": totp_secret,
             "codex": codex_result,
             "network_traffic": network_traffic,
-            "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
+            "error": None if codex_ok or codex_skipped else f"Codex 未完成: {codex_result.get('message')}",
         }
     except _CloakProxyBootstrapError:
         hard_cleanup = True
@@ -691,6 +794,7 @@ def run_cloak_registration(
                 raise
             if exc.failed_proxy:
                 excluded_proxies.add(exc.failed_proxy)
+                _note_proxy_failure(exc.failed_proxy)
             if attempt < max_attempts:
                 logger.warning(
                     "[Cloak注册] 初始代理故障后重建隔离Playwright线程（%s/%s，排除出口=%s）：%s",
@@ -700,6 +804,36 @@ def run_cloak_registration(
             if direct_fallback_enabled:
                 logger.warning(
                     "[Cloak注册] 已耗尽代理池凭据，最后使用服务器直连重建隔离Playwright线程（尝试=%s）",
+                    max_attempts,
+                )
+                return _run_in_isolated_thread(
+                    _run_cloak_registration_impl,
+                    email=email,
+                    name=name,
+                    birthday=birthday,
+                    proxy="",
+                    otp_code=otp_code,
+                    batch_dir=batch_dir,
+                    on_email_acquired=on_email_acquired,
+                    exclude_emails=exclude_emails,
+                    _excluded_proxies=excluded_proxies,
+                )
+            raise
+        except _CloakNetworkError as exc:
+            if proxy is not None:
+                raise
+            if exc.failed_proxy:
+                excluded_proxies.add(exc.failed_proxy)
+                _note_proxy_failure(exc.failed_proxy)
+            if attempt < max_attempts:
+                logger.warning(
+                    "[Cloak注册] 运行时检测到Chrome网络错误，换代理重建（%s/%s，排除出口=%s）：%s",
+                    attempt, max_attempts, len(excluded_proxies), str(exc)[:200],
+                )
+                continue
+            if direct_fallback_enabled:
+                logger.warning(
+                    "[Cloak注册] Chrome网络错误重试已耗尽，最后使用服务器直连（尝试=%s）",
                     max_attempts,
                 )
                 return _run_in_isolated_thread(

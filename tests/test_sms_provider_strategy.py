@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import json
 import sys
+import tempfile
 import types
 import unittest
 from decimal import Decimal
@@ -72,7 +73,8 @@ def _load_staged_provider():
             SMS_COUNTRY="10",
             SMS_REQUEST_TIMEOUT=5,
             SMS_FX_RATE_URL="",
-            SMS_FX_RATE_TTL=900,
+            SMS_FX_RATE_TTL=600,
+            SMS_FX_CACHE_FILE="",
             TIGER_SMS_API_KEY="tiger-key",
             TIGER_SMS_API_BASE="http://tiger.test/stubs/handler_api.php",
             TIGER_SMS_USE_V2=True,
@@ -87,12 +89,30 @@ def _load_staged_provider():
             SMSBOWER_API_BASE="http://sms.test/handler_api",
             SMSBOWER_USE_V2=True,
             SMSBOWER_MIN_PRICE="",
-            SMSBOWER_USD_CNY_RATE="7.2",
+            SMSBOWER_USD_CNY_RATE="",
             SMSBOWER_PROVIDER_IDS="",
             SMSBOWER_EXCEPT_PROVIDER_IDS="",
             SMSBOWER_PHONE_EXCEPTION="",
+            SMS_EXCEPT_REGIONS="",
             SMSBOWER_RANDOM_COUNTRY=True,
             SMSBOWER_RANDOM_COUNTRY_ATTEMPTS=12,
+            HEROSMS_API_KEY="",
+            HEROSMS_API_BASE="http://hero.test/stubs/handler_api.php",
+            HEROSMS_USE_V2=False,
+            HEROSMS_SERVICE="",
+            HEROSMS_COUNTRY="",
+            HEROSMS_MAX_PRICE="",
+            HEROSMS_PROVIDER_IDS="",
+            HEROSMS_EXCEPT_PROVIDER_IDS="",
+            HEROSMS_PHONE_EXCEPTION="",
+            SMSPOOL_API_KEY="",
+            SMSPOOL_API_BASE="http://pool.test",
+            SMSPOOL_SERVICE="",
+            SMSPOOL_COUNTRY="",
+            SMSPOOL_MAX_PRICE="",
+            SMSPOOL_MIN_PRICE="",
+            SMSPOOL_PRICING_OPTION="0",
+            SMSPOOL_POOL="",
             SMS_NUMBER_ACQUIRE_RETRIES=3,
             SMS_NUMBER_REJECT_TTL=1800,
             SMS_COUNTRY_REJECT_TTL=900,
@@ -155,6 +175,8 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
     def setUp(self):
         sms_provider._reset_runtime_state_for_tests()
+        codex_config.SMS_QUALITY_FILE = ""
+        codex_config.SMS_QUALITY_MIN_SAMPLES = 3
         codex_config.SMS_PROVIDER = "smsbower"
         codex_config.SMS_PROVIDER_CHAIN = ""
         codex_config.SMS_RELEASE_RETRIES = 3
@@ -170,9 +192,9 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS = 12
         codex_config.SMS_MAX_PRICE = ""
         codex_config.SMSBOWER_MIN_PRICE = ""
-        codex_config.SMSBOWER_USD_CNY_RATE = "7.2"
+        codex_config.SMSBOWER_USD_CNY_RATE = ""
         # 回退汇率优先读最近已知值，测试必须重置，否则用例之间会互相污染。
-        codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = ""
+        codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = "7.2"
         codex_config.SMS_FX_RATE_URLS = ""
         codex_config.TIGER_SMS_API_KEY = "tiger-key"
         codex_config.TIGER_SMS_API_BASE = "http://tiger.test/stubs/handler_api.php"
@@ -181,12 +203,31 @@ class SmsProviderStrategyTests(unittest.TestCase):
         codex_config.TIGER_SMS_RANDOM_COUNTRY_ATTEMPTS = 12
         codex_config.SMSBOWER_RANDOM_COUNTRY = True
         codex_config.SMSBOWER_RANDOM_COUNTRY_ATTEMPTS = 12
+        codex_config.SMS_NUMBER_ACQUIRE_RETRIES = 3
         codex_config.SMS_PREFLIGHT_RETRIES = 1
         codex_config.SMS_PREFLIGHT_RETRY_DELAY = 0
         codex_config.SMSBOWER_EXCEPT_PROVIDER_IDS = ""
+        codex_config.SMS_EXCEPT_REGIONS = ""
         codex_config.SMS_TIER_FAILURE_THRESHOLD = 2
         codex_config.SMS_TIER_COOLDOWN_SECONDS = 2700
         codex_config.SMS_COUNTRY_REJECT_TTL = 900
+        codex_config.HEROSMS_API_KEY = ""
+        codex_config.HEROSMS_API_BASE = "http://hero.test/stubs/handler_api.php"
+        codex_config.HEROSMS_USE_V2 = False
+        codex_config.HEROSMS_SERVICE = ""
+        codex_config.HEROSMS_COUNTRY = ""
+        codex_config.HEROSMS_MAX_PRICE = ""
+        codex_config.HEROSMS_PROVIDER_IDS = ""
+        codex_config.HEROSMS_EXCEPT_PROVIDER_IDS = ""
+        codex_config.HEROSMS_PHONE_EXCEPTION = ""
+        codex_config.SMSPOOL_API_KEY = ""
+        codex_config.SMSPOOL_API_BASE = "http://pool.test"
+        codex_config.SMSPOOL_SERVICE = ""
+        codex_config.SMSPOOL_COUNTRY = ""
+        codex_config.SMSPOOL_MAX_PRICE = ""
+        codex_config.SMSPOOL_MIN_PRICE = ""
+        codex_config.SMSPOOL_PRICING_OPTION = "0"
+        codex_config.SMSPOOL_POOL = ""
 
     def test_smsbower_request_uses_configured_country_and_rmb_price(self):
         codex_config.SMS_COUNTRY = "35"
@@ -198,6 +239,66 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(params["country"], "35")
         self.assertEqual(params["service"], "dr")
         self.assertEqual(params["maxPrice"], "0.038888")
+
+    def test_region_exclusion_matches_aliases_and_accents(self):
+        codex_config.SMS_EXCEPT_REGIONS = "36/Quebec,Ontario"
+
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Québec"}),
+            "Québec",
+        )
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Ontario"}),
+            "Ontario",
+        )
+        self.assertEqual(
+            sms_provider._excluded_region({"phone_country_name": "Alberta", "phone_region": "CA"}),
+            "",
+        )
+
+    def test_smsbower_excluded_region_is_released_then_retried(self):
+        codex_config.SMSBOWER_RANDOM_COUNTRY = False
+        codex_config.SMS_EXCEPT_REGIONS = "36/Quebec"
+        codex_config.SMS_NUMBER_ACQUIRE_RETRIES = 2
+        http = _Http([
+            _Response(json.dumps({"activationId": "blocked-region", "phoneNumber": "15550001111", "countryCode": "36"})),
+            _Response("ACCESS_CANCEL"),
+            _Response(json.dumps({"activationId": "accepted-region", "phoneNumber": "15550002222", "countryCode": "36"})),
+        ])
+        regions = iter(("Quebec", "Ontario"))
+
+        with patch.object(
+            sms_provider,
+            "_phone_location_metadata",
+            side_effect=lambda phone: {"phone_country_name": next(regions)},
+        ):
+            activation_id, phone = sms_provider._acquire_number_for_provider(
+                "smsbower", http, service="dr", country="36"
+            )
+
+        self.assertEqual((activation_id, phone), ("accepted-region", "15550002222"))
+        self.assertEqual(
+            [call["params"].get("action") for call in http.calls],
+            ["getNumberV2", "setStatus", "getNumberV2"],
+        )
+        self.assertEqual(http.calls[1]["params"]["status"], "8")
+
+    def test_excluded_region_filter_also_covers_other_providers(self):
+        codex_config.SMS_EXCEPT_REGIONS = "Quebec"
+        codex_config.SMS_NUMBER_ACQUIRE_RETRIES = 2
+        states = iter(({"phone_country_name": "Quebec"}, {"phone_country_name": "Ontario"}))
+
+        with patch.object(
+            sms_provider, "_acquire_tiger_number",
+            side_effect=(("blocked-region", "15550001111"), ("accepted-region", "15550002222")),
+        ) as acquire, patch.object(
+            sms_provider, "_activation_state", side_effect=lambda activation_id: next(states),
+        ), patch.object(sms_provider, "_release_strategy_rejected") as release:
+            result = sms_provider._acquire_number_for_provider("tiger", _Http([]), service="dr", country="36")
+
+        self.assertEqual(result, ("accepted-region", "15550002222"))
+        self.assertEqual(acquire.call_count, 2)
+        release.assert_called_once_with("blocked-region", unittest.mock.ANY)
 
     def test_smsbower_blank_country_is_left_for_dynamic_inventory_selection(self):
         codex_config.SMS_COUNTRY = ""
@@ -294,6 +395,33 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertEqual(http.calls[12]["params"]["country"], "6")
         self.assertEqual(http.calls[12]["params"]["maxPrice"], "0.034722")
 
+    def test_stock_wait_seconds_extends_refresh_beyond_legacy_budget(self):
+        codex_config.SMS_COUNTRY = ""
+        codex_config.SMSBOWER_RANDOM_COUNTRY = True
+        codex_config.SMS_MAX_PRICE = "0.25"
+        codex_config.SMS_PREFLIGHT_RETRIES = 2
+        codex_config.SMS_PREFLIGHT_RETRY_DELAY = 2
+        codex_config.SMSBOWER_STOCK_WAIT_SECONDS = 90
+        high_snapshot = json.dumps({"117": {"dr": {"cost": "0.04", "count": 20}}})
+
+        class _PersistentHttp(_Http):
+            def __init__(self):
+                super().__init__([])
+
+            def get(self, url, params=None, **kwargs):
+                self.calls.append({"method": "GET", "url": url, "params": dict(params or {})})
+                return _Response(high_snapshot)
+
+        http = _PersistentHttp()
+
+        with patch.object(sms_provider, "_stop_sleep"):
+            with self.assertRaises(sms_provider.SmsNoNumbersError):
+                sms_provider.acquire_number(http=http)
+
+        # 旧实现固定 12 轮；按总等待时长应显著超过该下限。
+        self.assertGreater(len(http.calls), 12)
+        self.assertEqual({call["params"]["action"] for call in http.calls}, {"getPrices"})
+
     def test_preflight_never_queries_live_inventory(self):
         codex_config.SMS_PROVIDER_CHAIN = "smsbower"
         codex_config.SMS_PREFLIGHT_RETRIES = 2
@@ -368,6 +496,44 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertNotIn("minPrice", params)
         self.assertNotIn("phoneException", params)
         self.assertEqual(sms_provider._provider(), "tiger")
+
+    def test_common_cny_ceiling_limits_herosms_and_smspool_requests(self):
+        codex_config.SMS_MAX_PRICE = "7.20"
+        codex_config.HEROSMS_MAX_PRICE = "1.50"
+        codex_config.HEROSMS_COUNTRY = "6"
+        hero_params = sms_provider._herosms_number_params("dr", None)
+        self.assertEqual(hero_params["maxPrice"], "1.000000")
+
+        codex_config.SMSPOOL_MAX_PRICE = "1.50"
+        codex_config.SMSPOOL_COUNTRY = "1"
+        codex_config.SMSPOOL_SERVICE = "671"
+        pool_params = sms_provider._smspool_number_params("671", None)
+        self.assertEqual(pool_params["max_price"], "1.000000")
+
+    def test_provider_specific_usd_caps_can_only_lower_common_cny_ceiling(self):
+        codex_config.SMS_MAX_PRICE = "14.40"
+        codex_config.HEROSMS_MAX_PRICE = "0.20"
+        codex_config.SMSPOOL_MAX_PRICE = "0.30"
+        self.assertEqual(
+            sms_provider._provider_price_bounds_usd("herosms"),
+            (None, Decimal("0.20")),
+        )
+        self.assertEqual(
+            sms_provider._provider_price_bounds_usd("smspool"),
+            (None, Decimal("0.30")),
+        )
+
+    def test_common_cny_ceiling_hard_rejects_overpriced_herosms_activation(self):
+        codex_config.SMS_MAX_PRICE = "7.20"
+        codex_config.HEROSMS_MAX_PRICE = ""
+        sms_provider._remember_activation("hero-over-cap", "15550001111", {
+            "provider": "herosms",
+            "price_amount": "1.01",
+            "price_currency": "USD",
+            "request_max_price_usd": "1.000000",
+        })
+        with self.assertRaises(sms_provider.SmsNumberRejectedError):
+            sms_provider._validate_activation_price("hero-over-cap")
 
     def test_tiger_acquire_parses_v2_price_and_uses_tiger_endpoint(self):
         codex_config.SMS_PROVIDER = "tiger"
@@ -597,6 +763,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
         self.assertIn('SMS_MAX_PRICE: str = ""', source)
         self.assertIn("'SMS_MAX_PRICE': 'str'", source)
         self.assertIn("'SMSBOWER_USD_CNY_RATE': 'str'", source)
+        self.assertIn("'SMS_EXCEPT_REGIONS': 'str'", source)
 
     def test_fx_refresh_log_uses_usd_cny_direction_and_source(self):
         codex_config.SMS_FX_RATE_URL = "https://fx.test/latest?from=CNY&to=USD"
@@ -649,6 +816,26 @@ class SmsProviderStrategyTests(unittest.TestCase):
         rate, source = sms_provider._fallback_usd_cny_rate()
         self.assertIn("last known", source)
         self.assertAlmostEqual(float(rate), 1 / 6.70, places=6)
+
+    def test_fallback_does_not_use_fixed_legacy_rate(self):
+        codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = ""
+        codex_config.SMSBOWER_USD_CNY_RATE = "7.2"
+        with self.assertRaises(sms_provider.SmsProviderConfigurationError):
+            sms_provider._fallback_usd_cny_rate()
+
+    def test_successful_rate_is_persisted_for_restart_fallback(self):
+        original_cache = getattr(codex_config, "SMS_FX_CACHE_FILE", "")
+        original_known = codex_config.SMS_LAST_KNOWN_USD_CNY_RATE
+        with tempfile.TemporaryDirectory() as directory:
+            codex_config.SMS_FX_CACHE_FILE = str(Path(directory) / "fx.json")
+            codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = ""
+            sms_provider._remember_usd_cny_rate(Decimal("6.8"))
+            codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = ""
+            rate, source = sms_provider._fallback_usd_cny_rate()
+        codex_config.SMS_FX_CACHE_FILE = original_cache
+        codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = original_known
+        self.assertAlmostEqual(float(rate), 1 / 6.8, places=6)
+        self.assertIn("persisted last known", source)
 
     def test_price_bounds_convert_rmb_values_and_preserve_order(self):
         codex_config.SMS_MAX_PRICE = "0.25"
@@ -725,7 +912,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
             "number_rejected",
         )
 
-    def test_voip_rejection_cools_only_provider_country(self):
+    def test_voip_rejection_blocks_only_the_specific_number(self):
         sms_provider._remember_activation(
             "voip-1",
             "15550008",
@@ -737,11 +924,29 @@ class SmsProviderStrategyTests(unittest.TestCase):
         )
         state = sms_provider._activation_state("voip-1")
         self.assertEqual(category, "number_rejected")
-        self.assertTrue(sms_provider._country_is_recently_rejected(state))
+        self.assertFalse(sms_provider._country_is_recently_rejected(state))
+        self.assertTrue(sms_provider._quality_voip_number_is_blocked("15550008"))
+        self.assertTrue(sms_provider._quality_number_is_blocked("15550008"))
         self.assertFalse(sms_provider._country_is_recently_rejected({
             "provider": "smsbower", "service": "dr", "country": "36",
         }))
-        self.assertEqual(sms_provider.get_sms_runtime_metrics()["rejected_countries"], 1)
+        self.assertEqual(sms_provider.get_sms_runtime_metrics()["rejected_countries"], 0)
+
+    def test_voip_rejection_does_not_block_same_country_candidates(self):
+        sms_provider._remember_activation(
+            "voip-same-country",
+            "15550009",
+            {"provider": "smsbower", "service": "dr", "country": "12", "tier": "default"},
+        )
+        sms_provider.report_failure(
+            "voip-same-country",
+            'add_phone_response={"code":"voip_phone_disallowed"}',
+        )
+        self.assertTrue(sms_provider._quality_voip_number_is_blocked("15550009"))
+        self.assertFalse(sms_provider._voip_country_is_blocked({
+            "provider": "smsbower", "service": "dr", "country": "12",
+        }))
+        self.assertFalse(sms_provider._number_is_recently_rejected("15550010"))
 
     def test_fraud_guard_does_not_cool_entire_country(self):
         sms_provider._remember_activation(
@@ -754,6 +959,36 @@ class SmsProviderStrategyTests(unittest.TestCase):
             'add_phone_response={"code":"fraud_guard"}',
         )
         self.assertEqual(sms_provider.get_sms_runtime_metrics()["rejected_countries"], 0)
+
+    def test_sms_quality_ledger_persists_aggregate_scores_without_plain_phone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "sms-quality.json"
+            codex_config.SMS_QUALITY_FILE = str(ledger_path)
+            for index in range(3):
+                activation_id = f"quality-good-{index}"
+                sms_provider._remember_activation(activation_id, f"1555001000{index}", {
+                    "provider": "smsbower", "service": "dr", "country": "12", "tier": "default",
+                })
+                sms_provider.report_success(activation_id)
+            for index in range(3):
+                activation_id = f"quality-bad-{index}"
+                sms_provider._remember_activation(activation_id, f"1555002000{index}", {
+                    "provider": "smsbower", "service": "dr", "country": "73", "tier": "default",
+                })
+                sms_provider.report_failure(activation_id, 'add_phone_response={"code":"fraud_guard"}')
+
+            ranked = sms_provider._quality_rank_candidates([
+                {"country": "73"}, {"country": "12"}, {"country": "99"},
+            ], "smsbower", "dr")
+            self.assertEqual(ranked[0]["country"], "12")
+            payload = ledger_path.read_text(encoding="utf-8")
+            self.assertNotIn("15550010000", payload)
+            self.assertNotIn("15550020000", payload)
+            self.assertIn('"successes":3', payload)
+
+            sms_provider._reset_runtime_state_for_tests()
+            summary = sms_provider.get_sms_runtime_metrics()["quality"]["buckets"]
+            self.assertTrue(any(row["country"] == "12" and row["success_rate"] == 1.0 for row in summary))
 
     def test_smsbower_default_tier_never_cools_entire_provider(self):
         codex_config.SMS_TIER_FAILURE_THRESHOLD = 1
@@ -821,7 +1056,7 @@ class SmsProviderStrategyTests(unittest.TestCase):
 
     def test_actual_price_above_converted_max_is_released_and_next_candidate_is_used(self):
         codex_config.SMS_MAX_PRICE = "0.4"
-        codex_config.SMSBOWER_USD_CNY_RATE = "10"
+        codex_config.SMS_LAST_KNOWN_USD_CNY_RATE = "10"
         codex_config.SMSBOWER_RANDOM_COUNTRY_ATTEMPTS = 2
         http = _Http([
             _Response(json.dumps({
@@ -930,7 +1165,9 @@ class SmsProviderStrategyTests(unittest.TestCase):
         config_branch = source.index("sms_provider.SmsProviderConfigurationError")
         config_release_feedback = source.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)", config_branch)
         generic_branch = source.index("except Exception as exc", config_release_feedback)
-        generic_release_feedback = source.index("sms_provider.cancel_and_report_failure(activation_id, http, exc)", generic_branch)
+        generic_release_feedback = source.index(
+            "sms_provider.cancel_and_report_failure(", generic_branch
+        )
 
         self.assertLess(success, complete)
         self.assertLess(config_release_feedback, generic_branch)
@@ -947,12 +1184,132 @@ class SmsProviderStrategyTests(unittest.TestCase):
         )
         generic_branch = source.index("except Exception as exc", config_release_feedback)
         generic_release_feedback = source.index(
-            "sms_provider.cancel_and_report_failure(activation_id, http, exc)", generic_branch
+            "sms_provider.cancel_and_report_failure(", generic_branch
         )
 
         self.assertLess(config_branch, config_release_feedback)
         self.assertLess(config_release_feedback, generic_branch)
         self.assertGreater(generic_release_feedback, generic_branch)
+
+    def test_herosms_compatible_protocol_acquire_poll_complete_and_cancel(self):
+        codex_config.SMS_PROVIDER_CHAIN = "herosms"
+        codex_config.HEROSMS_API_KEY = "hero-key"
+        codex_config.HEROSMS_COUNTRY = "6"
+        codex_config.HEROSMS_USE_V2 = False
+        http = _Http([_Response("ACCESS_NUMBER:hero-a:15550001111")])
+        activation_id, phone = sms_provider.acquire_number(http=http)
+        self.assertEqual((activation_id, phone), ("hero-a", "15550001111"))
+        self.assertEqual(http.calls[0]["url"], "http://hero.test/stubs/handler_api.php")
+        self.assertEqual(http.calls[0]["params"]["action"], "getNumber")
+
+        status_http = _Http([_Response("STATUS_WAIT_CODE"), _Response("STATUS_OK:654321")])
+        self.assertEqual(
+            sms_provider.wait_for_sms_code("hero-a", http=status_http, max_wait=2, poll_interval=0),
+            "654321",
+        )
+        self.assertEqual([call["params"]["action"] for call in status_http.calls], ["getStatus", "getStatus"])
+
+        complete_http = _Http([_Response("ACCESS_ACTIVATION")])
+        sms_provider.complete("hero-a", http=complete_http)
+        self.assertEqual(complete_http.calls[0]["params"]["status"], "6")
+
+        sms_provider._remember_activation("hero-b", "15550002222", {"provider": "herosms"})
+        cancel_http = _Http([_Response("ACCESS_CANCEL")])
+        result = sms_provider.cancel("hero-b", http=cancel_http, background=False)
+        self.assertEqual(result["status"], 8)
+        self.assertEqual(cancel_http.calls[0]["params"]["status"], "8")
+
+    def test_herosms_v2_uses_get_status_v2_and_extracts_json_code(self):
+        codex_config.SMS_PROVIDER_CHAIN = "herosms"
+        codex_config.HEROSMS_API_KEY = "hero-key"
+        codex_config.HEROSMS_COUNTRY = "6"
+        codex_config.HEROSMS_USE_V2 = True
+        purchase_http = _Http([_Response(json.dumps({
+            "activationId": "hero-v2",
+            "phoneNumber": "15550009999",
+            "countryCode": "6",
+        }))])
+        activation_id, phone = sms_provider.acquire_number(http=purchase_http)
+        self.assertEqual((activation_id, phone), ("hero-v2", "15550009999"))
+        self.assertEqual(sms_provider.get_activation_info(activation_id)["status_action"], "getStatusV2")
+
+        status_http = _Http([
+            _Response(json.dumps({"status": "pending"})),
+            _Response(json.dumps({"sms": {"code": "246810"}})),
+        ])
+        self.assertEqual(
+            sms_provider.wait_for_sms_code(activation_id, http=status_http, max_wait=2, poll_interval=0),
+            "246810",
+        )
+        self.assertEqual([call["params"]["action"] for call in status_http.calls], ["getStatusV2", "getStatusV2"])
+
+    def test_herosms_maps_no_numbers_and_bad_key_without_network_fallback(self):
+        codex_config.HEROSMS_API_KEY = "hero-key"
+        with self.assertRaises(sms_provider.SmsNoNumbersError):
+            sms_provider._request_herosms(_Http([_Response("NO_NUMBERS")]), {"action": "getNumber"})
+        with self.assertRaises(sms_provider.SmsProviderConfigurationError):
+            sms_provider._request_herosms(_Http([_Response("BAD_KEY")]), {"action": "getNumber"})
+
+    def test_smspool_native_protocol_acquire_poll_cancel_and_skip_complete(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smspool"
+        codex_config.SMSPOOL_API_KEY = "pool-key"
+        codex_config.SMSPOOL_COUNTRY = "1"
+        codex_config.SMSPOOL_SERVICE = "671"
+        codex_config.SMSPOOL_MAX_PRICE = "0.20"
+        purchase_http = _Http([_Response(json.dumps({
+            "success": 1, "order_id": "pool-a", "number": "15550003333", "cost": "0.11",
+        }))])
+        activation_id, phone = sms_provider.acquire_number(http=purchase_http)
+        self.assertEqual((activation_id, phone), ("pool-a", "15550003333"))
+        self.assertEqual(purchase_http.calls[0]["url"], "http://pool.test/purchase/sms")
+        self.assertEqual(purchase_http.calls[0]["data"]["country"], "1")
+        self.assertEqual(purchase_http.calls[0]["data"]["service"], "671")
+        self.assertEqual(purchase_http.calls[0]["data"]["max_price"], "0.20")
+        self.assertEqual(purchase_http.calls[0]["data"]["pricing_option"], "0")
+
+        status_http = _Http([_Response(json.dumps({"success": 1, "status": "pending"})), _Response(json.dumps({
+            "success": 1, "status": "completed", "sms": "Your verification code is 765432",
+        }))])
+        self.assertEqual(
+            sms_provider.wait_for_sms_code("pool-a", http=status_http, max_wait=2, poll_interval=0),
+            "765432",
+        )
+        complete_http = _Http([])
+        sms_provider.complete("pool-a", http=complete_http)
+        self.assertEqual(complete_http.calls, [])
+
+        sms_provider._remember_activation("pool-b", "15550004444", {"provider": "smspool"})
+        cancel_http = _Http([_Response(json.dumps({"success": 1, "message": "cancelled"}))])
+        result = sms_provider.cancel("pool-b", http=cancel_http, background=False)
+        self.assertEqual(result["status"], 8)
+        self.assertEqual(cancel_http.calls[0]["url"], "http://pool.test/sms/cancel")
+
+    def test_smspool_terminal_order_does_not_wait_until_timeout(self):
+        codex_config.SMSPOOL_API_KEY = "pool-key"
+        sms_provider._remember_activation("pool-terminal", "15550005555", {"provider": "smspool"})
+        http = _Http([_Response(json.dumps({"success": 1, "status": "completed"}))])
+        with self.assertRaises(sms_provider.SmsProviderError):
+            sms_provider.wait_for_sms_code("pool-terminal", http=http, max_wait=10, poll_interval=0)
+        self.assertEqual(len(http.calls), 1)
+
+    def test_unconfigured_herosms_is_automatically_skipped_from_chain(self):
+        codex_config.SMS_PROVIDER_CHAIN = "herosms,smsbower"
+        codex_config.HEROSMS_API_KEY = ""
+        codex_config.SMSBOWER_API_KEY = "test-key"
+        self.assertEqual(sms_provider._attempt_provider_chain(), ["smsbower"])
+
+    def test_preflight_uses_provider_specific_service_and_country(self):
+        codex_config.SMS_PROVIDER_CHAIN = "smspool"
+        codex_config.SMSPOOL_API_KEY = "pool-key"
+        codex_config.SMSPOOL_SERVICE = "671"
+        codex_config.SMSPOOL_COUNTRY = "1"
+        codex_config.SMS_SERVICE = "dr"
+        codex_config.SMS_COUNTRY = "10"
+        result = sms_provider.preflight_sms_dependency(http=_Http([]))
+        self.assertEqual(result["provider"], "smspool")
+        self.assertEqual(result["service"], "671")
+        self.assertEqual(result["country"], "1")
+        self.assertTrue(result["deferred"])
 
 
 if __name__ == "__main__":

@@ -47,6 +47,42 @@ class CloakOtpResendTests(unittest.TestCase):
         self.assertIn("REGISTER_OTP_MAX_ATTEMPTS", otp_loop)
         self.assertIn("max(3, min(6", otp_loop)
 
+    def test_invalid_otp_tolerates_single_strike_before_stopping(self):
+        """单次 invalid 可能只是投递延迟导致码与发送轮次不匹配，必须允许换码重试。"""
+        body = _function_source("_run_cloak_registration_impl")
+        otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
+        invalid_at = otp_loop.index('if outcome == "invalid":')
+        retry_at = otp_loop.index("if otp_attempt >= max_otp_attempts:", invalid_at)
+        invalid_branch = otp_loop[invalid_at:retry_at]
+        self.assertIn("otp_invalid_streak += 1", invalid_branch)
+        self.assertIn("otp_invalid_streak >= invalid_streak_limit", invalid_branch)
+        self.assertIn("raise EmailOtpRejectedError", invalid_branch)
+        # 未达阈值时不得抛终态，仍要走重发换码
+        self.assertLess(
+            invalid_branch.index("otp_invalid_streak >= invalid_streak_limit"),
+            invalid_branch.index("raise EmailOtpRejectedError"),
+        )
+        self.assertIn("_click_resend_email_otp", otp_loop[invalid_at:])
+
+    def test_invalid_streak_is_configurable_and_resets_on_other_outcomes(self):
+        body = _function_source("_run_cloak_registration_impl")
+        otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
+        self.assertIn("REGISTER_OTP_INVALID_STREAK_LIMIT", otp_loop)
+        self.assertIn("otp_invalid_streak = 0", otp_loop)
+        config = (ROOT / "config" / "email.py").read_text(encoding="utf-8")
+        self.assertIn("REGISTER_OTP_INVALID_STREAK_LIMIT", config)
+
+    def test_invalid_otp_has_terminal_error_metadata(self):
+        self.assertIn('error_code = "email_otp_rejected"', TEXT)
+        self.assertIn("retryable = False", TEXT)
+
+    def test_challenge_is_checked_before_waiting_for_email_otp(self):
+        body = _function_source("_run_cloak_registration_impl")
+        otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
+        guard = otp_loop.index("_raise_if_cloudflare_challenge(driver)")
+        wait = otp_loop.index("current_otp = wait_for_otp(")
+        self.assertLess(guard, wait)
+
     def test_repeated_otp_is_excluded_before_retry(self):
         """Remail 可能在 resend 后短暂返回旧邮件，旧码不能再次提交。"""
         body = _function_source("_run_cloak_registration_impl")
@@ -58,7 +94,10 @@ class CloakOtpResendTests(unittest.TestCase):
     def test_otp_wait_matches_reference_and_has_timestamp_fallback(self):
         body = _function_source("_run_cloak_registration_impl")
         otp_loop = body[body.index("current_otp = otp_code"):body.index("profile_submitted =")]
-        self.assertIn("after_ts=0.0", otp_loop)
+        # 宽松回退必须限定回看窗口；after_ts=0.0 会读到远古旧码导致反复提交无效码。
+        self.assertNotIn("after_ts=0.0", otp_loop)
+        self.assertIn("after_ts=max(0.0, otp_after_ts - register_otp_lookback)", otp_loop)
+        self.assertIn("REGISTER_OTP_FALLBACK_LOOKBACK_SECONDS", otp_loop)
         self.assertIn("max_wait=15", otp_loop)
         self.assertIn("poll_interval=3", otp_loop)
         self.assertIn("fallback", otp_loop)

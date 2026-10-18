@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextvars import copy_context
 from contextlib import ExitStack
 import time
 from urllib.parse import urlparse
@@ -349,6 +350,15 @@ def _body_snippet(page, limit: int = 600) -> str:
 
 def _current_state_for_log(page) -> str:
     return f"url={_page_url(page) or '-'} body={_body_snippet(page, 500) or '-'}"
+
+
+def _is_cloudflare_challenge_page(page) -> bool:
+    try:
+        title = str(page.title() or "")
+    except Exception:
+        title = ""
+    state = " ".join((_page_url(page), title, _body_snippet(page, 700)))
+    return _codex_proto._is_codex_cloudflare_challenge(state)
 
 
 def _looks_next_step_after_login(page) -> bool:
@@ -1126,6 +1136,8 @@ def _wait_after_phone_send(page, timeout: int = 18) -> str:
     end = time.time() + timeout
     last_state = ""
     while time.time() < end:
+        if _is_cloudflare_challenge_page(page):
+            return "cloudflare_challenge"
         url = _page_url(page).lower()
         if _is_callback_url(url):
             return "callback"
@@ -1320,6 +1332,8 @@ def _wait_phone_code_page(page, timeout: int = 25) -> bool:
 def _wait_after_phone_otp(page, timeout: int = 25) -> str:
     end = time.time() + timeout
     while time.time() < end:
+        if _is_cloudflare_challenge_page(page):
+            return "cloudflare_challenge"
         url = _page_url(page).lower()
         if _is_callback_url(url):
             return "callback"
@@ -1526,9 +1540,22 @@ def _do_phone_verification_if_present(page) -> dict | None:
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {str(exc)[:220]}"
             logger.warning("[Codex][BrowserUse] 手机验证失败（%s/%s）：%s", attempt, max_retries, last_error)
+            is_session_circuit = (
+                _codex_proto._is_codex_circuit_open_error(last_error)
+                or "status=403" in last_error.lower()
+                or "http 403" in last_error.lower()
+            )
+            is_cloudflare_challenge = _codex_proto._is_codex_cloudflare_challenge(last_error)
+            failure_category = (
+                "session_circuit_open" if is_session_circuit
+                else "cloudflare_challenge" if is_cloudflare_challenge
+                else None
+            )
             if activation_id:
                 try:
-                    sms_provider.cancel_and_report_failure(activation_id, http, exc)
+                    sms_provider.cancel_and_report_failure(
+                        activation_id, http, exc, category=failure_category
+                    )
                 except Exception as feedback_exc:
                     logger.warning("[Codex][BrowserUse] 释放号码或记录短信失败反馈失败：%s", feedback_exc)
                 activation_id = None
@@ -1540,6 +1567,20 @@ def _do_phone_verification_if_present(page) -> dict | None:
                 raise _codex_proto.PhoneFraudGuardError(
                     f"phone_fraud_guard: {last_error[:220]}"
                 ) from exc
+            if is_session_circuit:
+                try:
+                    http.close()
+                except Exception:
+                    pass
+                raise _codex_proto.BrowserSessionCircuitOpenError(
+                    f"browser_session_circuit_open: {last_error[:220]}"
+                ) from exc
+            if is_cloudflare_challenge:
+                try:
+                    http.close()
+                except Exception:
+                    pass
+                raise RuntimeError(f"cloudflare_challenge: {last_error[:220]}") from exc
             if attempt >= max_retries:
                 break
             try:
@@ -1799,11 +1840,12 @@ def _run_in_isolated_thread(fn, *args, **kwargs):
     error_box = {}
     parent_thread_name = threading.current_thread().name
     parent_job_id = _current_job_id()
+    parent_context = copy_context()
 
     def _target():
         _bind_job_id(parent_job_id)
         try:
-            result_box["value"] = fn(*args, **kwargs)
+            result_box["value"] = parent_context.run(fn, *args, **kwargs)
         except BaseException as exc:  # noqa: BLE001 - 需要跨线程回传
             error_box["error"] = exc
         finally:
@@ -1865,19 +1907,13 @@ def _run_browser_use_codex_oauth_impl(email: str, otp_provider=None, proxy: str 
 
 
 def run_browser_use_codex_oauth(email: str, otp_provider=None, proxy: str | None = None, force: bool = False, cloud_provider: str = "browser_use") -> dict:
-    """Browser Use Codex OAuth 入口。
-
-    如果当前线程已经有 Playwright/asyncio loop（典型场景：BrowserUse 注册成功后
-    自动触发 Codex），则切到独立线程执行，避免 sync_playwright 嵌套报错。
-    """
-    if _has_running_asyncio_loop():
-        logger.info("[Codex][BrowserUse] 检测到当前线程已有 Playwright/asyncio loop，切换到隔离线程执行 Codex")
-        return _run_in_isolated_thread(
-            _run_browser_use_codex_oauth_impl,
-            email=email,
-            otp_provider=otp_provider,
-            proxy=proxy,
-            force=force,
-            cloud_provider=cloud_provider,
-        )
-    return _run_browser_use_codex_oauth_impl(email=email, otp_provider=otp_provider, proxy=proxy, force=force, cloud_provider=cloud_provider)
+    """Browser Use Codex OAuth 入口；与调用线程的 Playwright 会话隔离。"""
+    logger.info("[Codex][BrowserUse] 使用隔离线程执行，避免复用现有 Playwright 会话")
+    return _run_in_isolated_thread(
+        _run_browser_use_codex_oauth_impl,
+        email=email,
+        otp_provider=otp_provider,
+        proxy=proxy,
+        force=force,
+        cloud_provider=cloud_provider,
+    )
