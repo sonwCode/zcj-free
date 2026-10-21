@@ -2436,6 +2436,33 @@ def create_app(auth_code: str | None = None) -> Flask:
             try:
                 content, real_fname = db.read_codex_credential(fname)
                 parsed = _json.loads(content)
+                # 本地可能只存了 CPA callback 回执（auth_url/state，没有 token）。
+                # 参考项目通过 CPA auth-files 下载真实凭证，这里同样补一次：
+                # 缺 access_token/refresh_token 时按 email 去 CPA 拉真实 auth json。
+                if isinstance(parsed, dict) and not (
+                    parsed.get("access_token") or parsed.get("refresh_token")
+                ):
+                    try:
+                        from core import codex_oauth as _cpa_proto
+
+                        _cpa_email = str(parsed.get("email") or "").strip()
+                        _text, _dl_name, _meta = _cpa_proto.download_cpa_codex_auth_text(
+                            email=_cpa_email, local_filename=real_fname
+                        )
+                        _upgraded = _json.loads(_text)
+                        if isinstance(_upgraded, dict) and (
+                            _upgraded.get("access_token") or _upgraded.get("refresh_token")
+                        ):
+                            parsed = _upgraded
+                            parsed["_from_cpa"] = True
+                            parsed["_cpa_name"] = str((_meta or {}).get("name") or _dl_name or "")
+                        else:
+                            errors.append({"filename": real_fname, "error": "CPA 返回的凭证不含 token"})
+                    except Exception as exc:
+                        errors.append({
+                            "filename": real_fname,
+                            "error": f"CPA 取真实凭证失败: {type(exc).__name__}: {str(exc)[:120]}",
+                        })
                 # 下游导入平台要求每个凭证带 license_id：凭证里没有就按
                 # account_id / email / 文件名派生一个稳定值，保证多次导出一致。
                 if isinstance(parsed, dict) and not str(parsed.get("license_id") or "").strip():
