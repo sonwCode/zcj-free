@@ -707,6 +707,98 @@ def _phone_is_virtual_number(phone: str) -> bool:
     )
 
 
+def _excluded_regions_for_provider(provider: str) -> set:
+    """读取该平台当前配置的排除地区（已归一化）。"""
+    provider_name = str(provider or "").strip().lower()
+    specific_names = tuple(_REGION_SETTING_BY_PROVIDER.values())
+    has_specific = any(str(getattr(_cfg, name, "") or "").strip() for name in specific_names)
+    specific_name = _REGION_SETTING_BY_PROVIDER.get(provider_name)
+    if has_specific and specific_name:
+        raw = str(getattr(_cfg, specific_name, "") or "")
+    else:
+        raw = str(getattr(_cfg, "SMS_EXCEPT_REGIONS", "") or "")
+    out = set()
+    for entry in re.split(r"[,，;；\n]+", raw):
+        for alias in re.split(r"[/|]", entry):
+            normalized = _normalized_region(alias)
+            if normalized:
+                out.add(normalized)
+    return out
+
+
+def region_blocked_countries(provider: str) -> set:
+    """返回因"地区被排除"而暂缓的 country id 集合，供查价阶段过滤。"""
+    provider_name = str(provider or "").strip().lower()
+    now = int(time.time())
+    out = set()
+    with _QUALITY_LOCK:
+        data = _quality_data_locked()
+        table = (data or {}).get("region_blocked_countries", {})
+        for key, item in table.items():
+            if not str(key).startswith(provider_name + "|"):
+                continue
+            if int(item.get("until") or 0) > now:
+                out.add(str(key).split("|", 1)[1])
+    return out
+
+
+def _record_region_blocked_country(provider: str, country: str, region: str) -> None:
+    """买到被排除地区的号码时记住 (provider, country)，查价阶段不再选它。"""
+    provider_name = str(provider or "").strip().lower()
+    country_id = str(country or "").strip()
+    if not provider_name or not country_id:
+        return
+    # 自适应退避：连续命中排除地区时冷却指数增长（10min → 20 → 40 … 上限 6h），
+    # 而不是一刀切固定 12 小时；一旦该国家出现成功会立刻清零（见下）。
+    try:
+        base = _setting_int("SMS_REGION_BLOCK_BASE_SECONDS", 600, 60)
+        cap = _setting_int("SMS_REGION_BLOCK_MAX_SECONDS", 6 * 3600, 600)
+    except Exception:
+        base, cap = 600, 6 * 3600
+    now = int(time.time())
+    with _QUALITY_LOCK:
+        data = _quality_data_locked()
+        if data is None:
+            return
+        table = data.setdefault("region_blocked_countries", {})
+        key = provider_name + "|" + country_id
+        entry = table.setdefault(key, {})
+        streak = int(entry.get("streak") or 0) + 1
+        ttl = min(cap, base * (2 ** (streak - 1)))
+        entry["until"] = now + ttl
+        entry["last_at"] = now
+        entry["streak"] = streak
+        entry["region"] = str(region or "")
+        entry["count"] = int(entry.get("count") or 0) + 1
+        _quality_save_locked(data)
+    logger.info(
+        "[SMS] 地区冷却：provider=%s country=%s region=%s streak=%s 冷却=%ss",
+        provider_name, country_id, region, streak, ttl,
+    )
+
+
+def clear_region_blocked_country(provider: str, country: str) -> None:
+    """该国家拿到可用号码时立刻解除冷却：说明排除不是整国失效。"""
+    provider_name = str(provider or "").strip().lower()
+    country_id = str(country or "").strip()
+    if not provider_name or not country_id:
+        return
+    key = provider_name + "|" + country_id
+    with _QUALITY_LOCK:
+        data = _quality_data_locked()
+        table = (data or {}).get("region_blocked_countries") or {}
+        entry = table.get(key)
+        if not entry:
+            return
+        if int(entry.get("streak") or 0) == 0 and int(entry.get("until") or 0) == 0:
+            return
+        entry["until"] = 0
+        entry["streak"] = 0
+        entry["cleared_at"] = int(time.time())
+        _quality_save_locked(data)
+    logger.info("[SMS] 地区冷却解除：provider=%s country=%s", provider_name, country_id)
+
+
 def _quality_country_is_blocked(provider: str, service: str, country: str) -> bool:
     key = _quality_bucket_key(provider, service, country)
     with _QUALITY_LOCK:
@@ -2844,12 +2936,14 @@ def _acquire_number_for_provider(
             state = _activation_state(activation_id)
             excluded_region = _excluded_region(state, provider)
             if not excluded_region:
+                clear_region_blocked_country(provider, state.get("country"))
                 return activation_id, phone
             _metric("candidate_skipped", state)
             logger.info(
                 "[%s] 按地区策略释放候选并换号：attempt=%s/%s region=%s phone=%s",
                 _provider_label(provider), attempt, attempts, excluded_region, _mask_phone(phone),
             )
+            _record_region_blocked_country(provider, state.get("country"), excluded_region)
             _release_strategy_rejected(activation_id, http)
         raise SmsNumberRejectedError(
             f"{_provider_label(provider)} 连续 {attempts} 次号码地区命中排除规则"
@@ -2913,6 +3007,7 @@ def _acquire_number_for_provider(
                 "[SMSBower] 按地区策略释放候选并换号：attempt=%s/%s region=%s phone=%s",
                 attempt, attempts, excluded_region, _mask_phone(phone),
             )
+            _record_region_blocked_country(provider, state.get("country"), excluded_region)
             _release_strategy_rejected(activation_id, http)
             continue
         recently_rejected = _number_is_recently_rejected(phone)

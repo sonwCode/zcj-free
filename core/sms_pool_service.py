@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -456,6 +457,317 @@ def resolve_price_limit() -> tuple[Decimal | None, str, Decimal | None]:
         return max_cny, "", None
     return max_cny, str(source or ""), max_cny * rate
 
+
+_PROBE_CACHE: dict = {}
+_PROBE_CACHE_LOCK = threading.Lock()
+
+
+def _probe_cache_seconds() -> int:
+    try:
+        value = int(getattr(_pool_cfg(), "SMS_POOL_PROBE_CACHE_SECONDS", 30) or 30)
+    except Exception:
+        value = 30
+    return max(0, min(300, value))
+
+
+def _countries_with_success(hours: int = 720):
+    """近 N 天有过成功成交的 (provider, country) 集合。
+
+    国家粒度太粗：smsbower 的 country=36 同时包含 Ontario（应排除）和 Quebec
+    （唯一出过成功的地区）。只有该国家从来没有成功过，才允许整国屏蔽。
+    """
+    out = set()
+    conn = None
+    try:
+        conn = db._sqlite_conn()
+        rows = conn.execute(
+            "select provider, country from sms_pool_reservations "
+            "where status='completed' and created_at >= datetime('now', ?) "
+            "group by provider, country",
+            ("-%d hour" % int(hours),),
+        ).fetchall()
+        for row in rows:
+            out.add((str(row["provider"] or "").lower(), str(row["country"] or "")))
+    except Exception:
+        logger.debug("[号码池] 读取成功国家失败", exc_info=True)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return out
+
+
+def _country_decay_scores(hours: int = 3, tau_minutes: int = 45):
+    """按时间衰减统计每个 (provider, country) 的近期表现。
+
+    评分规则：成功 +1、失败 -1，权重按 exp(-Δt/τ) 衰减（τ 默认 45 分钟）。
+    返回 (scores, last_success_at)：
+      scores[(provider, country)] = 加权分（负数代表近期偏差）
+      last_success_at[(provider, country)] = 最近成功时间戳
+    只有"近期加权分明显为负且窗口内没有成功"的组合才会在查价阶段被跳过，
+    随时间自然衰减恢复，不再是从始至终的硬排除。
+    """
+    scores = {}
+    last_success = {}
+    conn = None
+    try:
+        conn = db._sqlite_conn()
+        rows = conn.execute(
+            "select provider, country, status, created_at from sms_pool_reservations "
+            "where created_at >= datetime('now', ?)",
+            ("-%d hour" % int(hours),),
+        ).fetchall()
+        now_ts = datetime.now(timezone.utc).timestamp()
+        tau = max(60.0, float(tau_minutes) * 60.0)
+        for row in rows:
+            provider = str(row["provider"] or "").lower()
+            country = str(row["country"] or "")
+            if not provider or not country:
+                continue
+            raw = str(row["created_at"] or "").strip()
+            try:
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age = max(0.0, now_ts - ts.timestamp())
+            except ValueError:
+                age = 0.0
+            weight = 2.718281828 ** (-age / tau)
+            key = (provider, country)
+            if str(row["status"] or "") == "completed":
+                scores[key] = scores.get(key, 0.0) + weight
+                last_success[key] = max(last_success.get(key, 0.0), now_ts - age)
+            else:
+                scores[key] = scores.get(key, 0.0) - weight
+    except Exception:
+        logger.debug("[号码池] 读取国家衰减评分失败", exc_info=True)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return scores, last_success
+
+
+def _hour_demand_penalty(hours: int = 72):
+    """当前小时段（±1 小时）的历史表现，用于"这个点别家更好"时的排序降权。"""
+    penalty = {}
+    conn = None
+    try:
+        hour_now = datetime.now().hour
+        conn = db._sqlite_conn()
+        rows = conn.execute(
+            "select provider, country, status, created_at from sms_pool_reservations "
+            "where created_at >= datetime('now', ?)",
+            ("-%d hour" % int(hours),),
+        ).fetchall()
+        stats = {}
+        for row in rows:
+            raw = str(row["created_at"] or "").strip()
+            try:
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if not (abs((ts.hour - hour_now) % 24) <= 1 or abs((ts.hour - hour_now) % 24) >= 23):
+                continue
+            key = (str(row["provider"] or "").lower(), str(row["country"] or ""))
+            item = stats.setdefault(key, [0, 0])
+            item[0] += 1
+            if str(row["status"] or "") == "completed":
+                item[1] += 1
+        for key, (total, ok) in stats.items():
+            if total >= 3 and ok == 0:
+                penalty[key] = 0.5
+    except Exception:
+        logger.debug("[号码池] 读取小时段表现失败", exc_info=True)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return penalty
+
+def probe_providers(providers: list[str]) -> list[dict]:
+    """并行查询各平台价内库存（只调 getPrices，不下单）。
+
+    优化点：
+      1. 三家同时查，不再串行（原来 smsbower 等库存最多阻塞 90 秒）；
+      2. 结果缓存 SMS_POOL_PROBE_CACHE_SECONDS 秒，连续多轮共享，省一次往返；
+      3. 过滤"近 6 小时只失败没成功"的国家，避免必然失败的平台排在最前面。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from core import sms_provider
+
+    names = [str(p or "").strip().lower() for p in (providers or []) if str(p or "").strip()]
+    if not names:
+        return []
+
+    max_cny, _fx_source, max_usd = resolve_price_limit()
+    if max_cny is None or max_usd is None:
+        return [
+            {"provider": name, "available": False, "candidates": 0,
+             "error": "未配置人民币单号上限或汇率不可用"}
+            for name in names
+        ]
+
+    service_code = str(getattr(_pool_cfg(), "SMS_POOL_SERVICE", "") or "").strip()
+    if not service_code:
+        service_code = str(getattr(sms_provider._cfg, "SMS_SERVICE", "") or "").strip()
+    country = str(getattr(_pool_cfg(), "SMS_POOL_COUNTRY", "") or "").strip() or None
+
+    cache_key = (tuple(names), service_code, country, str(max_cny))
+    ttl = _probe_cache_seconds()
+    if ttl > 0:
+        with _PROBE_CACHE_LOCK:
+            hit = _PROBE_CACHE.get(cache_key)
+        if hit and (datetime.now(timezone.utc).timestamp() - hit[0]) < ttl:
+            logger.info("[号码池] 复用 %.0fs 前的查价结果", datetime.now(timezone.utc).timestamp() - hit[0])
+            return [dict(item) for item in hit[1]]
+
+    probes = {
+        "smsbower": lambda http: sms_provider._smsbower_price_rows(http, service_code),
+        "tiger": lambda http: sms_provider._tiger_price_rows(http, service_code, country),
+        "vaksms": lambda http: sms_provider._vaksms_price_rows(http, service_code, country),
+    }
+    decay_scores, last_success = _country_decay_scores()
+    hour_penalty = _hour_demand_penalty()
+
+    def _one(name: str) -> dict:
+        fn = probes.get(name)
+        if fn is None:
+            return {"provider": name, "available": None, "candidates": 0,
+                    "error": "该平台暂不支持并行查价"}
+        http = sms_provider._http()
+        try:
+            rows = fn(http) or []
+        except Exception as exc:
+            return {"provider": name, "available": False, "candidates": 0,
+                    "error": "%s: %s" % (type(exc).__name__, str(exc)[:120])}
+        finally:
+            try:
+                http.close()
+            except Exception:
+                pass
+        priced = []
+        skipped = 0
+        skipped_region = 0
+        region_blocked = sms_provider.region_blocked_countries(name)
+        with_success = _countries_with_success()
+        for row in rows:
+            try:
+                cost = Decimal(str(row.get("cost") if row.get("cost") is not None else row.get("price") or "0"))
+                stock = int(row.get("count") or row.get("stock") or 0)
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if stock <= 0 or cost <= 0 or cost > max_usd:
+                continue
+            country_id = str(row.get("country") or "")
+            if (
+                country_id
+                and country_id in region_blocked
+                and (name, country_id) not in with_success
+            ):
+                skipped_region += 1
+                continue
+            score = decay_scores.get((name, country_id), 0.0)
+            last_ok = last_success.get((name, country_id), 0.0)
+            recent_success = last_ok and (datetime.now(timezone.utc).timestamp() - last_ok) < 7200
+            if score <= -1.2 and not recent_success:
+                skipped += 1
+                continue
+            sort_cost = cost + Decimal(str(hour_penalty.get((name, country_id), 0.0)))
+            priced.append((sort_cost, cost, country_id))
+        if not priced:
+            reason = "价内无库存"
+            parts = []
+            if skipped_region:
+                parts.append("%d 国地区被排除" % skipped_region)
+            if skipped:
+                parts.append("%d 国近 6 小时全失败" % skipped)
+            if parts:
+                reason = "价内 %s，已跳过" % "，".join(parts)
+            return {"provider": name, "available": False, "candidates": 0,
+                    "skipped_countries": skipped, "skipped_region": skipped_region,
+                    "error": reason}
+        priced.sort(key=lambda item: (item[0], item[1]))
+        _sort_cost, best_cost, best_country = priced[0]
+        try:
+            best_cny = format(best_cost / (max_usd / max_cny), ".3f")
+        except Exception:
+            best_cny = ""
+        return {
+            "provider": name,
+            "available": True,
+            "candidates": len(priced),
+            "skipped_countries": skipped,
+            "skipped_region": skipped_region,
+            "min_price_usd": format(best_cost, "f"),
+            "min_price_cny": best_cny,
+            "best_country": str(best_country or ""),
+        }
+
+    with ThreadPoolExecutor(max_workers=min(4, len(names)), thread_name_prefix="pool-probe") as pool:
+        results = list(pool.map(_one, names))
+
+    if ttl > 0:
+        with _PROBE_CACHE_LOCK:
+            _PROBE_CACHE[cache_key] = (datetime.now(timezone.utc).timestamp(), [dict(item) for item in results])
+
+    for item in results:
+        logger.info(
+            "[号码池] 并行查价：provider=%s available=%s 候选=%s 地区排除=%s 历史失败=%s 最低=%s",
+            item.get("provider"), item.get("available"), item.get("candidates"),
+            item.get("skipped_region", 0), item.get("skipped_countries", 0),
+            ("¥" + item["min_price_cny"]) if item.get("min_price_cny") else "-",
+        )
+    return results
+
+
+def acquire_many(need: int, order: list[str]) -> list[dict]:
+    """并行抢号：多家有货时每家先各抢一个，缺额再顺序补。
+
+    原实现是逐家串行 acquire_one（每单 1~7 秒，capacity=4 时要 5~25 秒）。
+    现在第一波并行下单，把 4 个号的总耗时压到单家的量级。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    need = max(0, int(need or 0))
+    names = [str(n or "").strip().lower() for n in (order or []) if str(n or "").strip()]
+    if need <= 0 or not names:
+        return []
+
+    results: list[dict] = []
+    got = 0
+    wave = names[:need] if len(names) >= need else list(names)
+    if wave:
+        with ThreadPoolExecutor(max_workers=min(4, len(wave)), thread_name_prefix="pool-buy") as pool:
+            futures = {pool.submit(acquire_one, name): name for name in wave}
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    row = fut.result()
+                except Exception as exc:
+                    logger.warning("[号码池] 并行抢号异常：provider=%s error=%s", name, exc)
+                    row = None
+                results.append({"provider": name, "reservation": row})
+                if row:
+                    got += 1
+
+    shortfall = need - got
+    if shortfall > 0:
+        for name in names:
+            if shortfall <= 0:
+                break
+            row = acquire_one(name)
+            if row:
+                results.append({"provider": name, "reservation": row})
+                shortfall -= 1
+    return results
 
 def acquire_one(provider: str) -> dict | None:
     """通过底层 provider 采购一个号码并登记为 reserved。

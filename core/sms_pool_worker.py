@@ -237,28 +237,60 @@ def run_once() -> dict:
                 "[号码池] 采购需求：capacity=%s eligible=%s unclaimed=%s active=%s",
                 need, capacity.get("eligible"), capacity.get("unclaimed"), capacity.get("active"),
             )
-            # Try each configured provider until the prewarm capacity is met.
-            # A provider with no stock must not prevent later providers from
-            # being queried in the same polling round.
-            for provider in providers:
-                if purchased >= need:
-                    break
-                provider_state[provider] = {"status": "requesting", "last_result": "请求库存/低价号码"}
-                _write_poll_state(status="polling", providers=providers, current_provider=provider, provider_state=provider_state, last_result=f"正在请求 {provider}")
-                try:
-                    reservation = service.acquire_one(provider)
-                except Exception as exc:
-                    provider_state[provider] = {"status": "error", "last_result": f"{type(exc).__name__}: {exc}"[:240]}
-                    _write_poll_state(status="error", providers=providers, current_provider=provider, provider_state=provider_state, last_result=f"{provider} 请求异常", error=str(exc))
-                    reservation = None
-                if reservation is not None:
-                    provider_state[provider] = {"status": "success", "last_result": f"已锁定号码 #{reservation.get('id')}"}
-                else:
-                    provider_state[provider] = {"status": "no_match", "last_result": "本轮未锁定号码"}
-                _write_poll_state(status="polling", providers=providers, current_provider=provider, provider_state=provider_state, last_result=f"{provider} 本轮完成")
-                if reservation is None:
+            # 先并行查价（getPrices，不下单），再按"有货且最便宜"的顺序去抢，
+            # 避免串行等待：前一家在等库存时后面几家根本不会被查询。
+            try:
+                probes = service.probe_providers(providers)
+            except Exception:
+                logger.exception("[号码池] 并行查价异常，回退为按配置顺序尝试")
+                probes = []
+            for item in probes:
+                name = str(item.get("provider") or "")
+                if not name:
                     continue
-                purchased += 1
+                if item.get("available"):
+                    price = item.get("min_price_cny") or ""
+                    provider_state[name] = {
+                        "status": "waiting",
+                        "last_result": f"候选 {item.get('candidates')} 个" + (f"，最低 ¥{price}" if price else ""),
+                    }
+                else:
+                    provider_state[name] = {
+                        "status": "no_match",
+                        "last_result": str(item.get("error") or "价内无库存")[:120],
+                    }
+            if probes:
+                summary = "，".join(
+                    f"{i.get('provider')}={'有货' if i.get('available') else '无货'}" for i in probes
+                )
+                _write_poll_state(status="polling", providers=providers, provider_state=provider_state,
+                                  last_result="并行查价完成：" + summary)
+                order = [
+                    str(item.get("provider"))
+                    for item in sorted(
+                        probes,
+                        key=lambda item: (
+                            0 if item.get("available") else 1,
+                            float(item.get("min_price_usd") or 10 ** 6),
+                        ),
+                    )
+                    if item.get("provider")
+                ]
+                providers = order + [p for p in providers if p not in order]
+            buy_results = service.acquire_many(need, providers)
+            for item in buy_results:
+                name = str(item.get("provider") or "")
+                reservation = item.get("reservation")
+                if reservation is not None:
+                    provider_state[name] = {"status": "success", "last_result": f"已锁定号码 #{reservation.get('id')}"}
+                    purchased += 1
+                else:
+                    provider_state[name] = {"status": "no_match", "last_result": "本轮未锁定号码"}
+            if buy_results:
+                _write_poll_state(
+                    status="polling", providers=providers, provider_state=provider_state,
+                    last_result=f"本轮采购 {purchased}/{need} 个",
+                )
         elif int(capacity.get("eligible") or 0) <= 0:
             logger.info("[号码池] 无合格账号，跳过采购")
             _write_poll_state(status="idle", providers=providers, provider_state=provider_state, last_result="无合格账号，跳过采购")
