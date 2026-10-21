@@ -1739,6 +1739,126 @@ def _assert_sms_channel_or_raise(driver) -> None:
         raise RuntimeError(f"whatsapp_channel: 页面仅提供 WhatsApp 通道 state={state}")
 
 
+def _sms_channel_ok(state: dict) -> bool:
+    """SMS 已选中且 WhatsApp 未选中。"""
+    radios = (state or {}).get("radios") or []
+
+    def norm(item):
+        return str(item.get("value") or "").lower().replace(" ", "")
+
+    sms_checked = any(
+        norm(r) in ("sms", "text", "text_message", "text-message") and r.get("checked") for r in radios
+    )
+    wa_checked = any("whatsapp" in norm(r) and r.get("checked") for r in radios)
+    return bool(sms_checked and not wa_checked)
+
+
+def _js_select_sms_channel(driver) -> dict:
+    """JS 直接选择 SMS 通道。
+
+    add-phone 用 React-Aria 分段控件（role=radiogroup + 隐藏 input[type=radio]），
+    纯鼠标点击会被重渲染覆盖回 WhatsApp。这里在页面上下文里同时：
+      · 置位 input.checked 并派发 pointer/mouse/click/input/change
+      · 同步 role=radio 节点的 aria-checked / data-state
+    """
+    try:
+        return driver.execute_script(r"""
+        const norm = v => String(v || '').toLowerCase().replace(/\s+/g, '');
+        const radios = [...document.querySelectorAll('input[type=radio]')];
+        const sms = radios.find(el => ['sms','text','text_message','text-message'].includes(norm(el.value)));
+        if (!sms) return {found:false};
+        const whatsapp = radios.find(el => norm(el.value).includes('whatsapp'));
+        const label = sms.id ? [...document.querySelectorAll('label')].find(el => el.htmlFor === sms.id) : null;
+        const clickable = label || sms.closest('label') || sms.closest('[role="radio"]') || sms;
+
+        sms.checked = true;
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+          const Ctor = type === 'pointerdown' ? PointerEvent : MouseEvent;
+          const opts = {bubbles:true, cancelable:true, view:window};
+          if (type === 'pointerdown') opts.pointerType = 'mouse';
+          try { clickable.dispatchEvent(new Ctor(type, opts)); } catch (e) {}
+        }
+        try { sms.click(); } catch (e) {}
+        sms.dispatchEvent(new Event('input', {bubbles:true}));
+        sms.dispatchEvent(new Event('change', {bubbles:true}));
+
+        const group = sms.closest('[role="radiogroup"]') || document;
+        group.querySelectorAll('[role="radio"]').forEach(node => {
+          const inner = node.querySelector('input[type=radio]');
+          const isSms = inner
+            ? ['sms','text','text_message','text-message'].includes(norm(inner.value))
+            : ['sms','text'].includes(norm(node.textContent));
+          node.setAttribute('aria-checked', isSms ? 'true' : 'false');
+          node.setAttribute('data-state', isSms ? 'checked' : 'unchecked');
+          if (inner) inner.checked = isSms;
+        });
+        if (whatsapp) whatsapp.checked = false;
+        return {found:true, smsChecked:!!sms.checked, whatsappChecked:!!(whatsapp && whatsapp.checked), clickable: clickable.tagName};
+        """) or {}
+    except Exception as exc:
+        logger.warning("[Codex][Browser] JS 选择 SMS 通道失败：%s", str(exc)[:160])
+        return {"found": False, "error": str(exc)[:120]}
+
+
+def _force_click_element(driver, el, *, label: str = "force_click") -> bool:
+    """humanize 点击失败时的兜底：解包 → JS 滚动 → CDP 鼠标事件 → JS 合成点击。
+
+    CloakElement.click() 走 Playwright humanize，radio 这类控件在 isolated world
+    里经常报 "cannot identify the element behind this ElementHandle"，结果短信通道
+    一直停在 WhatsApp，每次补跑白白消耗一个号码。
+    """
+    target = el
+    try:
+        from core.roxy_registration import _unwrap_cloak_element
+
+        target = _unwrap_cloak_element(el)
+    except Exception:
+        pass
+
+    clicked = False
+    try:
+        point = driver.execute_script(r"""
+        const el = arguments[0];
+        el.scrollIntoView({block:'center'});
+        const r = el.getBoundingClientRect();
+        return {x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height};
+        """, target) or {}
+        x = float(point.get("x") or 0)
+        y = float(point.get("y") or 0)
+        if x > 0 and y > 0 and hasattr(driver, "execute_cdp_cmd"):
+            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+            pressed = driver.execute_cdp_cmd(
+                "Input.dispatchMouseEvent",
+                {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+            )
+            released = driver.execute_cdp_cmd(
+                "Input.dispatchMouseEvent",
+                {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+            )
+            clicked = pressed is not None and released is not None
+    except Exception as exc:
+        logger.debug("[Codex][Browser] %s 坐标点击异常：%s", label, str(exc)[:120])
+
+    if not clicked:
+        try:
+            driver.execute_script(r"""
+            const el = arguments[0];
+            el.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
+            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+            el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+            if (el.tagName === 'INPUT' && el.type === 'radio') { el.checked = true; }
+            el.click();
+            el.dispatchEvent(new Event('input', {bubbles:true}));
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            """, target)
+            clicked = True
+        except Exception as exc:
+            logger.warning("[Codex][Browser] %s 兜底点击失败：%s", label, str(exc)[:160])
+    if clicked:
+        logger.info("[Codex][Browser] %s 已用兜底方式点击（humanize 不可用）", label)
+    return clicked
+
+
 def _select_sms_channel_or_raise(driver) -> None:
     state = _phone_page_state(driver)
     radios = state.get("radios") or []
@@ -1779,10 +1899,22 @@ def _select_sms_channel_or_raise(driver) -> None:
             _human_click(driver, target, label="codex_sms_channel")
         except Exception as click_exc:
             logger.warning("[Codex][Browser] SMS 真实控件点击失败：%s", str(click_exc)[:160])
-            continue
+            if not _force_click_element(driver, target, label="codex_sms_channel"):
+                continue
         # 只读取真实点击后的 React 状态，不再用 JS click/input/change 二次改写。
         _stop_sleep(0.8)
         last_state = _phone_page_state(driver)
+        if _sms_channel_ok(last_state):
+            logger.info("[Codex][Browser] 已确认 SMS 通道（真实点击）")
+            return
+        # 真实点击在 React-Aria 分段控件上会被重渲染覆盖，再补一次 JS 选择。
+        js_result = _js_select_sms_channel(driver)
+        if js_result.get("found"):
+            _stop_sleep(0.7)
+            last_state = _phone_page_state(driver)
+            if _sms_channel_ok(last_state):
+                logger.info("[Codex][Browser] 已确认 SMS 通道（JS 选择）js=%s", str(js_result)[:120])
+                return
         last_radios = last_state.get("radios") or []
         sms_checked = any(
             str(item.get("value") or "").lower().replace(" ", "") in ("sms", "text", "text_message", "text-message")
@@ -2116,7 +2248,10 @@ def _select_phone_country(driver, phone: str, *, timeout: int = 8) -> dict:
         option_value = str(selected.get("optionValue") or "")
         try:
             if native_select is not None and callable(getattr(native_select, "select_option", None)):
-                native_select.select_option(value=option_value)
+                try:
+                    native_select.select_option(value=option_value, timeout=15000)
+                except TypeError:
+                    native_select.select_option(value=option_value)
             elif native_select is not None:
                 # 标准 Selenium 回退；Cloak 路径使用上面的 Playwright 原生选择。
                 from selenium.webdriver.support.ui import Select
@@ -2774,7 +2909,43 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
             phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-",
             phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
         )
-    _assert_sms_channel_or_raise(driver)
+    # 提交前复核：国家、号码、SMS 通道都可能被 React 重渲染重置。
+    # 实测：国家从 Brazil 回到 Canada(+1) 后掩码按美式格式化，11 位号码被截成 10 位
+    # （expected 67984240990 → actual (679) 842-4099），提交必然失败。
+    for preflight_round in range(1, 3):
+        state_before = _phone_page_state(driver)
+        value_ok = True
+        try:
+            _verify_add_phone_value_before_submit(driver, e164, dial_code)
+        except RuntimeError as verify_exc:
+            value_ok = False
+            logger.warning(
+                "[Codex][Browser] 提交前号码/国家校验失败（第 %s 次）：%s",
+                preflight_round, str(verify_exc)[:200],
+            )
+        channel_ok = _sms_channel_ok(state_before)
+        if value_ok and channel_ok:
+            if preflight_round > 1:
+                logger.info("[Codex][Browser] 提交前复核通过（第 %s 次）", preflight_round)
+            break
+        if not channel_ok:
+            js_result = _js_select_sms_channel(driver)
+            logger.info("[Codex][Browser] 提交前重新选择 SMS 通道 js=%s", str(js_result)[:120])
+        if not value_ok:
+            phone_fill = _set_phone_value(driver, e164, timeout=10)
+            _blur_active_input_and_wait(driver, label="提交前重填完成")
+            logger.info(
+                "[Codex][Browser] 提交前重填号码：visible=%s hidden=%s country=%s",
+                phone_fill.get("actualVisible"), phone_fill.get("hiddenValue") or "-",
+                phone_fill.get("selectedText") or "-",
+            )
+            _js_select_sms_channel(driver)
+        _stop_sleep(0.3)
+    final_state = _phone_page_state(driver)
+    if not _sms_channel_ok(final_state):
+        raise RuntimeError(
+            f"whatsapp_channel_reverted: 提交前仍未选中 SMS state={_phone_state_digest(final_state)}"
+        )
     submit_info = _click_add_phone_continue_button(driver, timeout=10)
     logger.info("[Codex][Browser] 手机号提交动作已派发：%s，开始检查验证码页/错误状态", submit_info)
     return submit_info
