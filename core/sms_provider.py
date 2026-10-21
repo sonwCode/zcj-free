@@ -602,6 +602,17 @@ def _quality_record_outcome(state: dict, outcome: str) -> None:
                 number["blocked_until"] = now + ttl
             if voip_failure:
                 number["voip_blocked_until"] = now + ttl
+                prefix = _phone_prefix_key(phone)
+                if prefix:
+                    prefix_table = data.setdefault("voip_prefixes", {})
+                    entry = prefix_table.setdefault(prefix, {})
+                    entry["blocked_until"] = now + ttl * 4
+                    entry["last_at"] = now
+                    entry["count"] = int(entry.get("count") or 0) + 1
+                    logger.info(
+                        "[SMS] 学习到 VoIP 号段前缀：prefix=%s count=%s 冷却=%ss",
+                        prefix, entry["count"], ttl * 4,
+                    )
             elif outcome == "success":
                 number["blocked_until"] = 0
                 number["voip_blocked_until"] = 0
@@ -638,6 +649,62 @@ def _quality_voip_number_is_blocked(phone: str) -> bool:
         data = _quality_data_locked()
         record = (data or {}).get("numbers", {}).get(key, {})
         return int(record.get("voip_blocked_until") or 0) > int(time.time())
+
+
+def _phone_prefix_key(phone: str) -> str:
+    """取号码前 6 位作为号段前缀（用于学习被 OpenAI 判 VoIP 的号段）。"""
+    digits = _normalize_phone_digits(str(phone or ""))
+    return digits[:6] if len(digits) >= 6 else ""
+
+
+def _quality_voip_prefix_is_blocked(phone: str) -> bool:
+    prefix = _phone_prefix_key(phone)
+    if not prefix:
+        return False
+    with _QUALITY_LOCK:
+        data = _quality_data_locked()
+        record = (data or {}).get("voip_prefixes", {}).get(prefix, {})
+        return int(record.get("blocked_until") or 0) > int(time.time())
+
+
+def _phone_type_is_virtual(phone: str) -> bool:
+    """号段判型：短信平台不返回 line type，只能用本地 phonenumbers 判断。
+
+    实测 smsbower/tiger 的激活响应里没有 is_voip/virtual 字段，
+    原 _activation_declares_voip 永远为 False，导致 59 条号码被 OpenAI 判为
+    VoIP（voip_phone_disallowed）才事后发现。
+    """
+    if not _voip_rejection_enabled():
+        return False
+    raw = str(phone or "").strip()
+    if not raw:
+        return False
+    try:
+        import phonenumbers
+        from phonenumbers import PhoneNumberType
+    except Exception:
+        return False
+    try:
+        digits = _normalize_phone_digits(raw)
+        if not digits:
+            return False
+        parsed = phonenumbers.parse("+" + digits, None)
+        if not phonenumbers.is_valid_number(parsed):
+            return False
+        return phonenumbers.number_type(parsed) == PhoneNumberType.VOIP
+    except Exception:
+        return False
+
+
+def _phone_is_virtual_number(phone: str) -> bool:
+    """综合判定：具体号码记忆 + 号段前缀黑名单 + 本地号段类型。"""
+    if not _voip_rejection_enabled():
+        return False
+    return (
+        _quality_voip_number_is_blocked(phone)
+        or _quality_voip_prefix_is_blocked(phone)
+        or _phone_type_is_virtual(phone)
+    )
 
 
 def _quality_country_is_blocked(provider: str, service: str, country: str) -> bool:
@@ -2004,6 +2071,7 @@ def _acquire_vaksms_number(
         if (
             _number_is_recently_rejected(phone)
             or _activation_declares_voip(state)
+            or _phone_is_virtual_number(phone)
             or _tier_is_cooled(state)
         ):
             _release_strategy_rejected(activation_id, http)
@@ -2064,6 +2132,7 @@ def _acquire_tiger_number(
             if (
                 _number_is_recently_rejected(phone)
                 or _activation_declares_voip(state)
+                or _phone_is_virtual_number(phone)
                 or _tier_is_cooled(state)
             ):
                 _release_strategy_rejected(activation_id, http)
@@ -2124,6 +2193,7 @@ def _acquire_fixed_provider_number(
         if (
             _number_is_recently_rejected(phone)
             or _activation_declares_voip(state)
+            or _phone_is_virtual_number(phone)
             or _tier_is_cooled(state)
         ):
             _release_strategy_rejected(activation_id, http)
@@ -2608,7 +2678,7 @@ def _number_is_recently_rejected(phone: str) -> bool:
     return (
         recently_rejected
         or _quality_number_is_blocked(normalized)
-        or (_voip_rejection_enabled() and _quality_voip_number_is_blocked(normalized))
+        or (_voip_rejection_enabled() and _phone_is_virtual_number(normalized))
     )
 
 
@@ -2847,7 +2917,7 @@ def _acquire_number_for_provider(
             continue
         recently_rejected = _number_is_recently_rejected(phone)
         cooled = _tier_is_cooled(state)
-        declared_voip = _activation_declares_voip(state)
+        declared_voip = _activation_declares_voip(state) or _phone_is_virtual_number(phone)
         if recently_rejected or declared_voip or cooled:
             if recently_rejected:
                 reason = "recently_rejected_number"
