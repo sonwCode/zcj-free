@@ -140,36 +140,32 @@ class AccountExportTwofaTests(unittest.TestCase):
         self.assertEqual(session.reset_count, 1)
         sleep.assert_not_called()
 
-    def test_reauth_403_is_retried_after_circuit_reset(self):
+    def test_reauth_403_is_not_retried_after_circuit_reset(self):
         session = _CircuitSession()
         calls = []
 
         def trigger(_session, _email):
             calls.append(1)
-            if len(calls) < 3:
-                session.blocked_until = 9999999999.0
-                session.blocked_reason = "HTTP 403 from csrf"
-                raise RuntimeError("HTTP 403 from csrf")
-            return "https://auth.example/authorize"
+            session.blocked_until = 9999999999.0
+            session.blocked_reason = "HTTP 403 from csrf"
+            raise RuntimeError("HTTP 403 from csrf")
 
         with patch.object(account_export, "_trigger_reauth", side_effect=trigger), patch(
             "config.twofa.TWOFA_REAUTH_MAX_ATTEMPTS", 3
         ), patch("config.twofa.TWOFA_REAUTH_RETRY_DELAY", 0), patch.object(
             account_export.time, "sleep"
         ) as sleep:
-            result = account_export._trigger_reauth_with_retry(
-                session, "user@example.com"
-            )
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403 from csrf"):
+                account_export._trigger_reauth_with_retry(session, "user@example.com")
 
-        self.assertEqual(result, "https://auth.example/authorize")
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(session.reset_count, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(session.reset_count, 0)
         sleep.assert_not_called()
 
     def test_reauth_retry_exhaustion_exposes_initial_stage(self):
         session = _CircuitSession()
         with patch.object(
-            account_export, "_trigger_reauth", side_effect=RuntimeError("HTTP 403 from csrf")
+            account_export, "_trigger_reauth", side_effect=RuntimeError("HTTP 503 from csrf")
         ), patch("config.twofa.TWOFA_REAUTH_MAX_ATTEMPTS", 2), patch(
             "config.twofa.TWOFA_REAUTH_RETRY_DELAY", 0
         ):
@@ -177,8 +173,27 @@ class AccountExportTwofaTests(unittest.TestCase):
                 account_export._trigger_reauth_with_retry(session, "user@example.com")
 
         self.assertEqual(context.exception.stage, "initial")
-        self.assertEqual(context.exception.original.args[0], "HTTP 403 from csrf")
+        self.assertEqual(context.exception.original.args[0], "HTTP 503 from csrf")
         self.assertEqual(session.reset_count, 1)
+
+    def test_reauth_403_logs_safe_response_metadata(self):
+        session = Mock()
+        session.get_nextauth_headers.return_value = {}
+        response = Mock(status_code=403, headers={
+            "Cf-Mitigated": "challenge",
+            "CF-Ray": "abc123-LAX",
+            "Content-Type": "text/html; charset=utf-8",
+        })
+        response.raise_for_status.side_effect = RuntimeError("HTTP 403")
+        session.get.return_value = response
+
+        with self.assertLogs(account_export.logger, level="WARNING") as captured:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
+                account_export._trigger_reauth(session, "user@example.com")
+
+        output = " ".join(captured.output)
+        self.assertIn("cf_ray=abc123-LAX", output)
+        self.assertIn("challenge=True", output)
 
     def test_validate_reauth_otp_raises_account_unusable_for_deactivated(self):
         session = Mock()

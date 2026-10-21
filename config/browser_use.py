@@ -53,11 +53,11 @@ BROWSER_USE_FAST_MODE: bool = True
 BROWSER_USE_LOG_TIMING: bool = True
 
 # 资料页最大处理时间；超时后不再卡住，直接尝试读取 /api/auth/session 的 accessToken。
-BROWSER_USE_PROFILE_TIMEOUT: int = 28
+BROWSER_USE_PROFILE_TIMEOUT: int = 45
 SKYVERN_PROFILE_TIMEOUT: int = 45
 
 # 资料页结束/超时后读取 accessToken 的最大等待时间；取不到则任务失败。
-BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT: int = 18
+BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT: int = 45
 SKYVERN_SESSION_ACCESS_TOKEN_TIMEOUT: int = 35
 
 # 任务结束后是否保留云端 browser session；False 会关闭 CDP 并显式 stop。

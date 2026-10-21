@@ -278,10 +278,6 @@
     <pre id="logView" style="margin:0;padding:12px;background:#0f172a;color:#e2e8f0;border-radius:8px;max-height:420px;overflow:auto;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-all;">正在加载…</pre>
   </section>
 
-  <section class="card" aria-labelledby="eventsTitle">
-    <div class="head"><div><h2 id="eventsTitle">运行事件</h2><p>号码采购、分配、短信验证和终态记录。</p></div><span class="last-updated" id="eventCount"></span></div>
-    <div class="events-list" id="eventsBox"><div class="loading">正在加载事件…</div></div>
-  </section>
 </main>
 
 <dialog id="enableDialog" aria-labelledby="enableDialogTitle">
@@ -327,7 +323,6 @@ async function loadStatus() {
     else if(s.paused) notice("号码池已暂停新采购；已锁定号码仍会自动分配，已开始的补跑不受影响。","warn");
     else notice("号码池正在运行：新号码将自动分配给通过测活的账号；失效账号会从候选列表排除，账号记录保留。");
     if(!s.enabled&&ready){$("dialogProviders").textContent=providers.join(" · ");$("dialogPrice").textContent=money(s.max_price_cny);$("dialogCapacity").textContent=String(cap.capacity||0)+" 个";}
-    renderEvents(data.events||[]);
   } catch(error) { notice("读取号码池状态失败："+error.message,"err"); }
 }
 
@@ -355,17 +350,6 @@ function renderReservations(){
   const items=state.reservations;if(!items.length){$("reservationsBox").innerHTML='<div class="empty">暂无号码记录</div>';return;}
   const rows=items.map(x=>'<tr><td class="mono">#'+esc(x.id)+'</td><td>'+tag(x.status)+'</td><td>'+esc(x.provider||"—")+'</td><td class="mono">'+esc(x.phone_mask||"—")+'</td><td>'+esc(x.country||"—")+'</td><td class="mono">'+esc(x.account_id||"—")+'</td><td>'+esc(x.price_cny?money(x.price_cny):"—")+'</td><td>'+esc(x.failure_code||"—")+'</td><td class="mono">'+esc(fmtTime(x.expires_at))+'</td></tr>').join("");
   $("reservationsBox").innerHTML='<table><thead><tr><th class="col-id">ID</th><th class="col-status">状态</th><th>平台</th><th>号码</th><th>地区</th><th>账号 ID</th><th>费用</th><th>失败分类</th><th class="col-time">有效期至</th></tr></thead><tbody>'+rows+'</tbody></table>';
-}
-function renderEvents(events){$("eventCount").textContent=events.length?"最近 "+events.length+" 条":"";if(!events.length){$("eventsBox").innerHTML='<div class="empty">暂无运行事件</div>';return;}$("eventsBox").innerHTML=events.map(x=>'<div class="event-row"><span class="mono">'+esc(fmtTime(x.created_at))+'</span><span class="mono">#'+esc(x.reservation_id||"—")+'</span><span>'+tag(x.event)+'</span><span class="event-detail">'+esc(x.detail||"—")+'</span></div>').join("");}
-
-async function saveConfig(key,value){state.busy=true;$("btnToggle").disabled=true;$("btnPause").disabled=true;$("liveCheckToggle").disabled=true;$("liveCheckInterval").disabled=true;try{const result=await requestJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({updates:{[key]:value}})});notice(result.note||"配置已更新。");await loadStatus();}catch(error){notice("保存配置失败："+error.message,"err");}finally{state.busy=false;$("liveCheckToggle").disabled=false;$("liveCheckInterval").disabled=false;if(state.status){$("btnToggle").disabled=!state.status.enabled&&!((state.status.configured_providers||[]).length&&state.status.max_price_cny);$("btnPause").disabled=!state.status.enabled;}}}
-async function triggerLiveCheck(){const button=$("btnLiveCheck");button.disabled=true;$("liveCheckFeedback").textContent="正在加入后台查活队列…";try{const result=await requestJson("/api/sms-pool/live-check",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({limit:100})});$("liveCheckFeedback").textContent="已提交 "+(result.queued||0)+" 个查活任务；失效账号会自动从候选中排除。";await loadEligible();}catch(error){$("liveCheckFeedback").textContent="提交查活失败："+error.message;$("liveCheckFeedback").style.color="#b3261e";}finally{button.disabled=false;setTimeout(()=>{$("liveCheckFeedback").style.color="";},5000);}}
-async function refreshAll(){if(state.busy)return;await Promise.all([loadStatus(),loadEligible(),loadReservations()]);}
-
-function reportEmbeddedHeight(){
-  if(window.parent===window)return;
-  const height=Math.max(document.documentElement.scrollHeight,document.body.scrollHeight);
-  window.parent.postMessage({type:"sms-pool-embed-height",height},window.location.origin);
 }
 if(window.parent!==window){
   if(typeof ResizeObserver==="function"){

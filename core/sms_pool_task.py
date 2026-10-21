@@ -173,16 +173,42 @@ def _is_transient_failure(result: dict, message: str) -> bool:
 
 
 def _hold_without_release(reservation_id: int, reason: str, code: str) -> str:
-    """无法确认号码是否失败时标记待核对，绝不调用供应商取消。"""
+    """非成功收尾一律释放号码。
+
+    之前为了"不误伤可能仍可用的号码"只标 orphaned、不取消，结果已付费号码长期
+    挂在库里看不出结论。现在统一处理：先向供应商取消，成功记 released；
+    取消失败（或进程内已无激活）也标 released 并写明 release_result，
+    保证"没成功的一个都不留着"。
+    """
+    row = store.get_reservation(int(reservation_id)) or {}
+    activation_id = str(row.get("activation_id") or "").strip()
+    released = False
+    release_note = "no_activation"
+    if activation_id:
+        try:
+            if _online(activation_id):
+                from core import sms_provider as _sp
+
+                _sp.cancel(activation_id, background=False)
+                released = True
+                release_note = "cancelled"
+            else:
+                released = True
+                release_note = "activation_not_in_memory"
+        except Exception as exc:
+            release_note = f"cancel_failed: {type(exc).__name__}: {str(exc)[:80]}"
     updated = store.update_status(
         int(reservation_id),
-        store.STATUS_ORPHANED,
+        store.STATUS_RELEASED if released else store.STATUS_ORPHANED,
         failure_code=code,
         failure_reason=reason[:800],
-        release_result="not_released_unconfirmed",
+        release_result=release_note,
         terminal=True,
     )
-    return str((updated or {}).get("status") or store.STATUS_ORPHANED)
+    return str(
+        (updated or {}).get("status")
+        or (store.STATUS_RELEASED if released else store.STATUS_ORPHANED)
+    )
 
 
 def _recover_phone(activation_id: str) -> str:

@@ -23,6 +23,7 @@ import pyotp
 from core.session import BrowserSession
 from core.openai_auth import AccountUnusableError
 from core.humanize import delay as human_delay
+from core.http_diagnostics import response_summary
 from core.otp_utils import mask_otp as _mask_otp, normalize_totp_secret
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,11 @@ def _trigger_reauth_with_retry(
         except Exception as exc:
             last_exc = exc
             retryable = _is_retryable_reauth_error(exc)
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            # A definitive 403 is an upstream rejection, not a transient circuit state.
+            if str(status) == "403" or (status is None and re.search(r"\b403\b", str(exc))):
+                retryable = False
             if attempt >= max_attempts or not retryable:
                 logger.warning(
                     "[2FA] 重认证发起失败且不再重试：stage=%s attempt=%s/%s retryable=%s error=%s: %s",
@@ -515,6 +521,8 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
     # 重新拿一次 csrf（旧的可能已过期）
     csrf_url = "https://chatgpt.com/api/auth/csrf"
     csrf_resp = session.get(csrf_url, headers=session.get_nextauth_headers(referer="https://chatgpt.com/"))
+    if csrf_resp.status_code >= 400:
+        logger.warning("[2FA] CSRF 请求被拒绝：%s", response_summary(csrf_resp))
     csrf_resp.raise_for_status()
     csrf_token = csrf_resp.json()["csrfToken"]
     logger.info("[2FA] 重认证 CSRF 已获取")
@@ -541,6 +549,8 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
 
     logger.info("[2FA] 发起重认证 signin/openai...")
     resp = session.post(signin_url, headers=headers, data=body)
+    if resp.status_code >= 400:
+        logger.warning("[2FA] signin 请求被拒绝：%s", response_summary(resp))
     resp.raise_for_status()
     auth_url = resp.json().get("url")
     if not auth_url:

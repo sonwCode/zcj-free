@@ -15,7 +15,21 @@ from core.chatgpt_plan import _mask_proxy, open_plan_check_proxy, resolve_plan_c
 
 logger = logging.getLogger(__name__)
 
-_WORKERS = 3
+def _resolve_workers() -> int:
+    """查活并发：默认 2，可用 LIVE_CHECK_WORKERS 覆盖。
+
+    每个查活会话都会拉起一个 CloakBrowser（约 8~10 个进程、数百 MB），
+    小内存机器上 3 个并发就会把整机压到 swap。
+    """
+    import os
+    try:
+        value = int(str(os.environ.get("LIVE_CHECK_WORKERS", "") or "").strip() or 2)
+    except (TypeError, ValueError):
+        value = 2
+    return max(1, min(6, value))
+
+
+_WORKERS = _resolve_workers()
 _QUEUE_LIMIT = 500
 _EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="live-check")
 _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
@@ -25,6 +39,19 @@ _NETWORK_RETRY_HINTS = (
     "403", "429", "502", "503", "504", "proxy", "socks", "timeout",
     "timed out", "connection", "closed", "reset",
 )
+
+
+def _network_deferred_result(result: dict, *, attempts: int, proxy: str | None) -> dict:
+    """保留账号原有状态；网络拦截不能被展示成账号失效。"""
+    error = str(result.get("error") or "网络检查失败")[:500]
+    return {
+        **result,
+        "ok": False,
+        "status": "network_unavailable",
+        "error": f"网络暂不可用（已尝试 {attempts} 个出口）：{error}",
+        "network_retryable": True,
+        "network_proxy_used": _mask_proxy(proxy) or None,
+    }
 
 
 def _configured_live_check_proxies(proxy_cfg) -> list[str]:
@@ -156,6 +183,10 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                 route = resolve_plan_check_route(explicit_proxy="")
                 continue
             break
+        # 403/代理/超时只说明当前出口不可用，不应把账号覆盖成永久 failed。
+        # 保留 network_unavailable，让用户稍后重试查活。
+        if _retryable_live_check_result(result):
+            result = _network_deferred_result(result, attempts=max_routes, proxy=selected_proxy)
         db.update_account_liveness(account_id, result)
         if result.get("ok"):
             _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")

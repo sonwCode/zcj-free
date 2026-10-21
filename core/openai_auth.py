@@ -55,6 +55,11 @@ _ACCOUNT_DEAD_CODES = frozenset({
     "account_banned",
 })
 
+
+def is_account_unusable_code(code: str) -> bool:
+    return str(code or "").strip() in _ACCOUNT_DEAD_CODES
+
+
 _ACCOUNT_DEAD_TEXT_MARKERS = (
     "account_deactivated",
     "account_deleted",

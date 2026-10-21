@@ -81,23 +81,35 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertEqual(authorize_url, "https://auth.example/authorize")
         self.assertIsNone(session.kwargs["fingerprint_seed"])
 
-    def test_preflight_retries_with_same_session_when_csrf_is_blocked(self):
-        csrf_errors = [RuntimeError("HTTP Error 403"), "csrf"]
+    def test_preflight_does_not_retry_403_on_same_session(self):
         with patch.object(liveness, "BrowserSession", _DummyBrowserSession), \
              patch.object(liveness, "_warm_login_fingerprint_context"), \
              patch.object(liveness, "probe_auth_session"), \
-             patch.object(liveness, "get_csrf_token", side_effect=csrf_errors), \
+             patch.object(liveness, "get_csrf_token", side_effect=RuntimeError("HTTP Error 403")) as csrf, \
              patch.object(liveness, "signin_openai", return_value="authorize"), \
              patch.object(liveness.time, "sleep"):
-            session, _ = liveness._network_preflight_with_retry(
-                "user@example.com", None, max_attempts=2
-            )
+            with self.assertRaisesRegex(RuntimeError, "HTTP Error 403"):
+                liveness._network_preflight_with_retry("user@example.com", None, max_attempts=2)
 
-        self.assertIs(_DummyBrowserSession.created[-1], session)
-        # 403 下发的 CF Cookie 必须留在同一 Cookie Jar 中，不能每轮新建会话。
+        csrf.assert_called_once()
         self.assertEqual(len(_DummyBrowserSession.created), 1)
-        self.assertFalse(_DummyBrowserSession.created[0].session.closed)
+        self.assertTrue(_DummyBrowserSession.created[0].session.closed)
         self.assertIsNone(_DummyBrowserSession.created[0].received_proxy)
+
+    def test_cloudflare_challenge_stops_same_session_retries(self):
+        response = SimpleNamespace(
+            status_code=403,
+            headers={"Cf-Mitigated": "challenge", "CF-Ray": "abc123-LAX"},
+        )
+        challenge = liveness.CloudflareChallengeError(response)
+        with patch.object(liveness, "BrowserSession", _DummyBrowserSession), \
+             patch.object(liveness, "_warm_login_fingerprint_context", side_effect=challenge) as warm:
+            with self.assertRaises(liveness.CloudflareChallengeError) as ctx:
+                liveness._network_preflight_with_retry("user@example.com", "proxy", max_attempts=4)
+
+        warm.assert_called_once()
+        self.assertTrue(_DummyBrowserSession.created[-1].session.closed)
+        self.assertIn("cf_ray=abc123-LAX", str(ctx.exception))
 
     def test_callback_403_retries_in_same_session_before_fetching_token(self):
         session = _DummyBrowserSession(proxy="proxy")
@@ -201,6 +213,37 @@ class AccountLivenessTests(unittest.TestCase):
                 liveness._validate_reauth_with_retry(session, "user@example.com", 1.0)
 
         self.assertEqual(ctx.exception.error_code, "account_deactivated")
+
+    def test_reauth_403_page_text_is_not_enough_to_mark_account_dead(self):
+        response = SimpleNamespace(
+            status_code=403,
+            text="<html>Cloudflare error page mentioning account_deactivated in a script</html>",
+        )
+        error = RuntimeError("HTTP Error 403")
+        error.response = response
+        session = _DummyBrowserSession(proxy="proxy")
+
+        with patch.object(liveness, "_validate_reauth_otp", side_effect=error), \
+             patch.object(liveness, "wait_for_otp", return_value="123456"):
+            with self.assertRaises(RuntimeError) as ctx:
+                liveness._validate_reauth_with_retry(session, "user@example.com", 1.0)
+
+        self.assertIs(ctx.exception, error)
+
+    def test_unclassified_account_unusable_exception_is_not_defaulted_to_dead(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(liveness, "_LOG_DIR", Path(tmp)), \
+             patch.object(liveness, "_stored_access_token", return_value=""), \
+             patch.object(liveness, "_account_totp_secret", return_value=""), \
+             patch.object(
+                 liveness,
+                 "_login_via_full_web_flow",
+                 side_effect=liveness.AccountUnusableError("unclassified auth failure"),
+             ):
+            result = liveness.check_account_liveness("user@example.com")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("未确认", result["error"])
 
     def test_existing_access_token_uses_reauth_path(self):
         with tempfile.TemporaryDirectory() as tmp:
