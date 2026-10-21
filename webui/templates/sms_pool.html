@@ -184,7 +184,15 @@
     @media (max-width: 700px) {
       body.embed-mode main { width: 100%; margin: 0; padding: 12px 10px 18px; }
     }
-  </style>
+  
+    .log-btn { padding: 3px 9px; border: 1px solid #dbe3ee; border-radius: 6px; background: #fff; color: #2563eb; font-size: 12px; cursor: pointer; }
+    .log-btn:hover { border-color: #b9cdf0; background: #f4f8ff; }
+    .log-modal { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(16,24,40,.45); }
+    .log-modal > div { width: min(860px, 92vw); max-height: 78vh; display: flex; flex-direction: column; background: #fff; border-radius: 12px; overflow: hidden; }
+    .log-modal-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #edf1f5; font-weight: 700; }
+    .log-modal-head button { border: 0; background: transparent; font-size: 18px; color: #98a2b3; cursor: pointer; }
+    .log-modal pre { margin: 0; padding: 14px 16px; overflow: auto; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: #1d2939; }
+</style>
 </head>
 <body class="{{ 'embed-mode' if request.args.get('embed') == '1' else '' }}">
 <aside class="app-sidebar" aria-label="主导航">
@@ -348,8 +356,8 @@ async function loadReservations(){
 }
 function renderReservations(){
   const items=state.reservations;if(!items.length){$("reservationsBox").innerHTML='<div class="empty">暂无号码记录</div>';return;}
-  const rows=items.map(x=>'<tr><td class="mono">#'+esc(x.id)+'</td><td>'+tag(x.status)+'</td><td>'+esc(x.provider||"—")+'</td><td class="mono">'+esc(x.phone_mask||"—")+'</td><td>'+esc(x.country||"—")+'</td><td class="mono">'+esc(x.account_id||"—")+'</td><td>'+esc(x.price_cny?money(x.price_cny):"—")+'</td><td>'+esc(x.failure_code||"—")+'</td><td class="mono">'+esc(fmtTime(x.expires_at))+'</td></tr>').join("");
-  $("reservationsBox").innerHTML='<table><thead><tr><th class="col-id">ID</th><th class="col-status">状态</th><th>平台</th><th>号码</th><th>地区</th><th>账号 ID</th><th>费用</th><th>失败分类</th><th class="col-time">有效期至</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  const rows=items.map(x=>'<tr><td class="mono">#'+esc(x.id)+'</td><td>'+tag(x.status)+'</td><td>'+esc(x.provider||"—")+'</td><td class="mono">'+esc(x.phone_mask||"—")+'</td><td>'+esc(x.country||"—")+'</td><td class="mono">'+esc(x.account_id||"—")+'</td><td>'+esc(x.price_cny?money(x.price_cny):"—")+'</td><td><button type="button" class="log-btn" data-reslog="'+esc(x.id)+'">查看日志</button></td><td>'+esc(x.failure_code||"—")+'</td><td class="mono">'+esc(fmtTime(x.expires_at))+'</td></tr>').join("");
+  $("reservationsBox").innerHTML='<table><thead><tr><th class="col-id">ID</th><th class="col-status">状态</th><th>平台</th><th>号码</th><th>地区</th><th>账号 ID</th><th>费用</th><th>日志</th><th>失败分类</th><th class="col-time">有效期至</th></tr></thead><tbody>'+rows+'</tbody></table>';
 }
 if(window.parent!==window){
   if(typeof ResizeObserver==="function"){
@@ -400,6 +408,24 @@ setInterval(()=>{ if($("logAuto").checked){ loadLogList(); loadLogText(); } },10
 loadLogList().then(loadLogText);
 
 refreshAll();setInterval(loadStatus,15000);setInterval(loadReservations,30000);setInterval(loadEligible,60000);
+
+async function viewReservationLog(id) {
+  try {
+    const data = await requestJson('/api/sms-pool/reservations/' + encodeURIComponent(id) + '/log?tail=600');
+    const modal = document.createElement('div');
+    modal.className = 'log-modal';
+    modal.innerHTML = '<div><div class="log-modal-head"><span>号码 #' + esc(id) + ' 接码日志</span>'
+      + '<button type="button" aria-label="关闭">×</button></div><pre>' + esc(data.text || '暂无日志') + '</pre></div>';
+    document.body.appendChild(modal);
+    const close = () => modal.remove();
+    modal.querySelector('button').addEventListener('click', close);
+    modal.addEventListener('click', event => { if (event.target === modal) close(); });
+  } catch (error) { alert('日志读取失败：' + error.message); }
+}
+document.addEventListener('click', function (event) {
+  const btn = event.target.closest('[data-reslog]');
+  if (btn) viewReservationLog(btn.getAttribute('data-reslog'));
+});
 </script>
 </body>
 </html>

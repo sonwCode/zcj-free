@@ -102,3 +102,27 @@ def list_logs(limit: int = 20) -> list[dict]:
             "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
         })
     return out
+
+
+def find_task_log(reservation_id: int) -> Path | None:
+    """按号码记录 ID 找到对应的任务日志文件。"""
+    try:
+        matches = sorted(
+            log_dir().glob(f"sms-pool-{int(reservation_id)}-*.log"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    return matches[0] if matches else None
+
+
+def read_task_tail(reservation_id: int, tail: int = 600) -> str:
+    """读取某个号码的接码日志尾部；没有日志返回空串。"""
+    path = find_task_log(reservation_id)
+    if path is None:
+        return ""
+    with _LOCK:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    return "".join(lines[-max(1, min(2000, int(tail))):])

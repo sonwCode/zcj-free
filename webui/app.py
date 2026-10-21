@@ -537,6 +537,24 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
         return jsonify({"ok": True, "name": name, "text": text})
 
+    @app.get("/api/sms-pool/reservations/<int:reservation_id>/log")
+    def api_sms_pool_reservation_log(reservation_id: int):
+        from core import sms_pool_log as pool_log
+        try:
+            tail = _sms_pool_page_arg("tail", 600, 20, 2000)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        try:
+            text = pool_log.read_task_tail(reservation_id, tail=tail)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({
+            "ok": True,
+            "reservation_id": reservation_id,
+            "found": bool(text),
+            "text": text or "该号码暂无接码日志（可能还没开始补跑）",
+        })
+
     @app.get("/api/sms-pool/eligible")
     def api_sms_pool_eligible():
         from core import sms_pool_service as pool_service
