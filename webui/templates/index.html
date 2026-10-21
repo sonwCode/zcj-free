@@ -2324,7 +2324,52 @@
       .sms-pool-last-updated { white-space: normal; }
     }
 
-  </style>
+  
+    /* ===== 号码池概览重设计（追加覆盖） ===== */
+    .sms-pool-tab { --sp-ink:#101828; --sp-sub:#667085; --sp-line:#e6ebf2; --sp-soft:#f6f8fb; }
+    .sms-pool-page-head {
+      padding:20px 22px; border:1px solid var(--sp-line); border-radius:16px;
+      background:radial-gradient(900px 180px at 0% 0%, rgba(37,99,235,.10), transparent 62%), linear-gradient(180deg,#fff,#fbfcff);
+      box-shadow:0 1px 2px rgba(16,24,40,.04), 0 14px 30px -26px rgba(16,24,40,.45);
+    }
+    .sms-pool-page-head .register-title { font-size:21px; font-weight:700; letter-spacing:-.2px; color:var(--sp-ink); }
+    .sms-pool-page-caption { max-width:760px; margin-top:6px; color:var(--sp-sub); font-size:13px; }
+    .sms-pool-heading-state { display:inline-flex; align-items:center; gap:8px; margin-top:12px; padding:6px 12px;
+      border:1px solid var(--sp-line); border-radius:999px; background:#fff; color:#475467; font-size:12.5px; font-weight:600; }
+    .sms-pool-heading-state #smsPoolUpdatedAt { color:#98a2b3; font-weight:500; }
+    .sms-pool-state-dot { box-shadow:0 0 0 3px rgba(152,162,179,.15); }
+    .sms-pool-state-dot.on { box-shadow:0 0 0 3px rgba(18,183,106,.16); }
+    .sms-pool-heading-actions { align-self:flex-start; }
+    .sms-pool-btn { min-height:36px; border-radius:9px; font-weight:600; }
+    .sms-pool-notice { border-radius:12px; padding:11px 14px; }
+    .sms-pool-overview { gap:14px; padding:18px 20px; border-radius:16px; box-shadow:0 1px 2px rgba(16,24,40,.04); }
+    .sms-pool-stats { gap:12px; }
+    .sms-pool-stat { position:relative; overflow:hidden; padding:14px 16px 15px; border-radius:12px;
+      background:linear-gradient(180deg,#fff,#fcfdff); transition:border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+    .sms-pool-stat:hover { border-color:#cddcf5; box-shadow:0 12px 26px -20px rgba(37,99,235,.6); transform:translateY(-1px); }
+    .sms-pool-stat > span { color:var(--sp-sub); font-size:11.5px; font-weight:600; letter-spacing:.3px; }
+    .sms-pool-stat strong { margin-top:8px; color:var(--sp-ink); font-size:26px; font-weight:700; line-height:1.05;
+      font-variant-numeric:tabular-nums; letter-spacing:-.5px; }
+    .sms-pool-stat::after { content:""; position:absolute; inset:0 0 auto 0; height:3px; background:transparent; }
+    .sms-pool-stat.is-accent::after { background:linear-gradient(90deg,#2563eb,#60a5fa); }
+    .sms-pool-stat.is-good::after { background:linear-gradient(90deg,#12b76a,#6ce9a6); }
+    .sms-pool-stat.is-warn::after { background:linear-gradient(90deg,#f79009,#fdb022); }
+    .sms-pool-stat-bar { margin-top:10px; height:5px; border-radius:999px; background:#eef2f7; overflow:hidden; }
+    .sms-pool-stat-bar i { display:block; height:100%; width:0; border-radius:999px;
+      background:linear-gradient(90deg,#2563eb,#60a5fa); transition:width .35s ease; }
+    .sms-pool-summary-strip { gap:10px; padding:0; border:0; }
+    .sms-pool-summary-strip > div { padding:11px 14px; border:1px solid var(--sp-line); border-radius:10px; background:var(--sp-soft); }
+    .sms-pool-summary-strip span { color:#8a94a6; font-size:11px; font-weight:600; }
+    .sms-pool-summary-strip strong { margin-top:4px; color:#1d2939; font-size:13px; font-weight:700; }
+    .sms-pool-poll-box { border-top:0; }
+    .sms-pool-provider-list { gap:8px; margin-top:4px; }
+    .sms-pool-provider-row { grid-template-columns:150px 96px minmax(0,1fr); gap:12px; padding:10px 14px;
+      border-radius:10px; background:var(--sp-soft); }
+    .sms-pool-provider-row:hover { background:#f1f6ff; border-color:#cddcf5; }
+    .sms-pool-provider-status { font-weight:600; }
+    @media (max-width:1100px) { .sms-pool-stats { grid-template-columns:repeat(3,minmax(0,1fr)); }
+      .sms-pool-summary-strip { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+</style>
 </head>
 <body>
 <aside class="app-sidebar" aria-label="主导航">
@@ -2810,12 +2855,12 @@
       <section class="sms-pool-overview" aria-labelledby="smsPoolOverviewTitle">
         <div class="sms-pool-overview-head"><div><h2 id="smsPoolOverviewTitle">运行概览</h2><p>通过测活后自动分配号码；有号即并发执行补跑。</p></div><span class="sms-pool-last-updated" id="smsPoolStatusUpdated"></span></div>
         <div class="sms-pool-stats">
-          <div class="sms-pool-stat"><span>可补跑候选</span><strong id="smsPoolMetricEligible">—</strong></div>
-          <div class="sms-pool-stat"><span>测活正常</span><strong id="smsPoolMetricLiveReady">—</strong></div>
-          <div class="sms-pool-stat"><span>待测活</span><strong id="smsPoolMetricLiveWaiting">—</strong></div>
+          <div class="sms-pool-stat is-accent"><span>可补跑候选</span><strong id="smsPoolMetricEligible">—</strong></div>
+          <div class="sms-pool-stat is-good"><span>测活正常</span><strong id="smsPoolMetricLiveReady">—</strong></div>
+          <div class="sms-pool-stat is-warn"><span>待测活</span><strong id="smsPoolMetricLiveWaiting">—</strong></div>
           <div class="sms-pool-stat"><span>测活中</span><strong id="smsPoolMetricLiveChecking">—</strong></div>
           <div class="sms-pool-stat"><span>号码待分配</span><strong id="smsPoolMetricUnclaimed">—</strong></div>
-          <div class="sms-pool-stat"><span>并发任务</span><strong id="smsPoolMetricRunning">—</strong></div>
+          <div class="sms-pool-stat is-accent"><span>并发任务</span><strong id="smsPoolMetricRunning">—</strong><div class="sms-pool-stat-bar"><i id="smsPoolMetricRunningBar"></i></div></div>
         </div>
         <div class="sms-pool-summary-strip">
           <div><span>启用平台</span><strong id="smsPoolCfgProviders">—</strong></div>
@@ -3293,7 +3338,7 @@ async function loadSmsPoolStatus() {
     smsPoolEl('smsPoolUpdatedAt').textContent = '刷新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12:false});
     smsPoolEl('smsPoolStatusUpdated').textContent = '已完成花费 ' + smsPoolMoney(stats.spent_cny_total || 0);
     smsPoolEl('smsPoolMetricEligible').textContent = cap.eligible ?? 0; smsPoolEl('smsPoolMetricLiveReady').textContent = summary.ready ?? 0; smsPoolEl('smsPoolMetricLiveWaiting').textContent = summary.waiting ?? 0; smsPoolEl('smsPoolMetricLiveChecking').textContent = summary.checking ?? 0;
-    smsPoolEl('smsPoolMetricUnclaimed').textContent = stats.unclaimed ?? 0; smsPoolEl('smsPoolMetricRunning').textContent = (stats.running ?? 0) + ' / ' + (s.workers || 2); smsPoolEl('smsPoolMetricDeactivated').textContent = summary.deactivated ?? 0;
+    smsPoolEl('smsPoolMetricUnclaimed').textContent = stats.unclaimed ?? 0; smsPoolEl('smsPoolMetricRunning').textContent = (stats.running ?? 0) + ' / ' + (s.workers || 2); const __spBar = smsPoolEl('smsPoolMetricRunningBar'); if (__spBar) { const __spRun = Number(stats.running || 0), __spTot = Math.max(1, Number(s.workers || 2)); __spBar.style.width = Math.min(100, Math.round(__spRun / __spTot * 100)) + '%'; } smsPoolEl('smsPoolMetricDeactivated').textContent = summary.deactivated ?? 0;
     smsPoolEl('smsPoolCfgProviders').textContent = providers.length ? providers.join(' · ') : '未配置可用平台'; smsPoolEl('smsPoolCfgPrice').textContent = s.max_price_cny ? smsPoolMoney(s.max_price_cny) : '未设置 · 禁止采购'; smsPoolEl('smsPoolCfgCapacity').textContent = (s.poll_interval || 120) + ' 秒 · ' + (s.workers || 2) + ' 并发';
     renderSmsPoolPoll(s.poll || {});
     const pause = smsPoolEl('smsPoolBtnPause'); pause.disabled = !s.enabled; pause.innerHTML = s.paused ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 3 14 9-14 9z"/></svg><span>恢复采购</span>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg><span>暂停采购</span>';
