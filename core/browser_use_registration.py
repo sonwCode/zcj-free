@@ -966,7 +966,9 @@ def _submit_email_until_transition(
             if not _submit_email_step_pw(page, current_email):
                 raise RuntimeError(f"邮箱已输入但提交失败，页面={_page_url(page) or '-'} state={_email_entry_state_pw(page)}")
         _check_manual_stop()
-        last_state = _wait_after_email_submit_transition(page, context=context, timeout=10 if _fast_mode() else 16)
+        # 云端浏览器提交邮箱后可能先返回 login 页，再异步切换到 OTP。
+        # 网络抖动时延长观察窗口，避免把可恢复状态误报成失败。
+        last_state = _wait_after_email_submit_transition(page, context=context, timeout=22 if _fast_mode() else 30)
         logger.info("[BrowserUse] 邮箱提交后状态：%s url=%s", last_state, _page_url(page) or "-")
         if last_state == "login_password":
             raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={_page_url(page) or 'https://auth.openai.com/log-in/password'}")
@@ -2824,8 +2826,8 @@ def run_browser_use_registration(
                 profile_timeout = int(getattr(_cfg, "SKYVERN_PROFILE_TIMEOUT", 45) or 45)
                 session_timeout = int(getattr(_cfg, "SKYVERN_SESSION_ACCESS_TOKEN_TIMEOUT", 35) or 35)
             else:
-                profile_timeout = int(getattr(_cfg, "BROWSER_USE_PROFILE_TIMEOUT", 28 if _fast_mode() else 60) or (28 if _fast_mode() else 60))
-                session_timeout = int(getattr(_cfg, "BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT", 18 if _fast_mode() else 60) or (18 if _fast_mode() else 60))
+                profile_timeout = int(getattr(_cfg, "BROWSER_USE_PROFILE_TIMEOUT", 45 if _fast_mode() else 75) or (45 if _fast_mode() else 75))
+                session_timeout = int(getattr(_cfg, "BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT", 45 if _fast_mode() else 90) or (45 if _fast_mode() else 90))
 
             try:
                 profile_submitted = _complete_profile_page(page, name, birthday, timeout=profile_timeout)
@@ -2897,9 +2899,12 @@ def run_browser_use_registration(
                 codex_required = bool(getattr(_codex_required_cfg, "CODEX_REQUIRED_ON_REGISTRATION", True))
             except Exception:
                 codex_required = True
+            # 与上游一致：主动跳过 Codex 不是失败，ok 必须为 True，否则注册成功的任务
+            # 会被判成 partial_success。需要补跑时由 retryable 标记，不影响任务结论。
             codex_result = {
                 "status": "failed" if codex_auto_enabled and codex_required else "skipped",
-                "ok": False,
+                "ok": not (codex_auto_enabled and codex_required),
+                "retryable": not (codex_auto_enabled and codex_required),
                 "error_code": "codex_required" if codex_auto_enabled and codex_required else "codex_skipped",
                 "message": (
                     "注册后自动 Codex 已关闭，已跳过 Codex 和手机号接码；可在账号页补跑"

@@ -489,6 +489,25 @@ EDITABLE_FIELDS = [
         "label": "CloudMail随机名前缀长度", "help": "生成邮箱 local-part 的长度，建议 10-16",
     },
     {
+        "key": "MAILCODE_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "MailCode API Key", "help": "在官网 API 密钥页面创建；需要购买和读取权限，密钥保存在 .env；服务地址固定使用官网",
+        "external_url": "https://mailcode.bzb.qzz.io",
+        "external_label": "打开官网",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "MAILCODE_PRODUCT_ID", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "MailCode 商品 ID", "help": "查询 /api/open/v1/products 返回的 id；每个注册任务只购买一个邮箱",
+    },
+    {
+        "key": "MAILCODE_REQUEST_TIMEOUT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "MailCode 请求超时(秒)", "help": "单次 HTTP 请求超时，默认 20 秒",
+    },
+    {
+        "key": "MAILCODE_CHANNEL_WAIT_SECONDS", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "MailCode 通道准备超时(秒)", "help": "购买后等待取码通道就绪再交给注册流程，默认 60 秒",
+    },
+    {
         "key": "REMAIL_API_BASE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
         "label": "Remail API 地址", "help": "默认 https://remail.aishop6.com；也可填写文档地址 https://remail.aishop6.com/docs",
         "external_url": "https://remail.aishop6.com/register?aff=AFFLGYQMTYIXH",
@@ -931,7 +950,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "VAKSMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "Vak SMS 国家代码", "help": "按 Vak 文档的数字国家 ID 填写；留空继承 SMS_COUNTRY",
+        "label": "Vak SMS 国家代码", "help": "按 Vak 文档的数字国家 ID 填写；留空时按 Vak 实时价格和库存随机选择国家",
     },
     {
         "key": "VAKSMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -975,7 +994,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "SMSBOWER_EXCEPT_REGIONS", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "SMSBower 排除号码地区", "help": "仅过滤 SMSBower 号码；多个地区用逗号分隔，例如 Quebec,Ontario 或 36/Quebec",
+        "label": "SMSBower 排除号码地区", "help": "仅过滤 SMSBower 号码；多个地区用逗号分隔，例如 Quebec,Ontario",
     },
     # ---- 低价号码池（默认跟随接码链，可选平台覆盖）----
     {

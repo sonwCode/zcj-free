@@ -164,10 +164,6 @@ def ensure_tables() -> None:
             conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_sms_pool_created ON {_TABLE_RESERVATIONS}(created_at DESC)"
             )
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_sms_pool_event_reservation "
-                f"ON {_TABLE_EVENTS}(reservation_id, id DESC)"
-            )
             conn.commit()
         finally:
             conn.close()
@@ -352,7 +348,8 @@ def claim_for_account(reservation_id: int, account_id: int, email: str = "") -> 
         ).isoformat(timespec="seconds")
         cursor = conn.execute(
             f"""UPDATE {_TABLE_RESERVATIONS}
-                SET status=?, account_id=?, email=?, claimed_at=?, updated_at=?, lease_expires_at=?
+                SET status=?, account_id=?, email=?, claimed_at=?, updated_at=?, lease_expires_at=?,
+                    failure_code='', failure_reason='', release_result=''
                 WHERE id=? AND status=? AND account_id IS NULL""",
             (STATUS_CLAIMED, int(account_id), str(email or ""), now, now, lease,
              int(reservation_id), STATUS_RESERVED),
@@ -436,6 +433,68 @@ def update_status(
         _log_event(conn, int(reservation_id), str(status or ""), failure_code or release_result)
         conn.commit()
         return get_reservation(int(reservation_id))
+    finally:
+        conn.close()
+
+
+def requeue_for_retry(
+    reservation_id: int,
+    reason: str,
+    *,
+    code: str = "transient_network",
+    max_retries: int = 2,
+) -> dict | None:
+    """瞬时基础设施失败时保留激活，不取消，回到 reserved 等待下一轮重试。"""
+    ensure_tables()
+    conn = db._sqlite_conn()
+    try:
+        retry_count = int(conn.execute(
+            f"SELECT COUNT(*) FROM {_TABLE_EVENTS} WHERE reservation_id=? AND event='retry_pending'",
+            (int(reservation_id),),
+        ).fetchone()[0])
+        now = _utcnow()
+        if retry_count >= max(0, int(max_retries)):
+            cursor = conn.execute(
+                f"""UPDATE {_TABLE_RESERVATIONS}
+                    SET status=?, updated_at=?, finished_at=?, lease_expires_at=?,
+                        failure_code=?, failure_reason=?, release_result=?
+                    WHERE id=? AND status IN (?,?,?)""",
+                (
+                    STATUS_ORPHANED, now, now, "", "transient_retry_exhausted",
+                    str(reason or "")[:800], "not_released_retry_exhausted",
+                    int(reservation_id), STATUS_CLAIMED, STATUS_RUNNING, STATUS_WAITING_SMS,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return None
+            _log_event(conn, int(reservation_id), STATUS_ORPHANED, "transient_retry_exhausted")
+            conn.commit()
+            return {"status": STATUS_ORPHANED, "retry_exhausted": True}
+
+        cursor = conn.execute(
+            f"""UPDATE {_TABLE_RESERVATIONS}
+                SET status=?, account_id=NULL, email='', claimed_at='', lease_expires_at='',
+                    updated_at=?, finished_at='', failure_code=?, failure_reason=?,
+                    release_result=?
+                WHERE id=? AND status IN (?,?,?)""",
+            (
+                STATUS_RESERVED, now, str(code or "transient_network")[:120],
+                str(reason or "")[:800], "not_released_retry_pending",
+                int(reservation_id), STATUS_CLAIMED, STATUS_RUNNING, STATUS_WAITING_SMS,
+            ),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        _log_event(
+            conn,
+            int(reservation_id),
+            "retry_pending",
+            f"{code or 'transient_network'} retry={retry_count + 1}/{max_retries}",
+        )
+        conn.commit()
+        return {"status": STATUS_RESERVED, "retry_count": retry_count + 1}
     finally:
         conn.close()
 
@@ -562,42 +621,6 @@ def recent_events(limit: int = 50) -> list[dict]:
             f"SELECT * FROM {_TABLE_EVENTS} ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)
         ).fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
-def recent_reservation_event_summaries(*, limit: int = 20, offset: int = 0) -> list[dict]:
-    """Return one latest event per reservation, newest reservation activity first."""
-    ensure_tables()
-    conn = db._sqlite_conn()
-    try:
-        rows = conn.execute(
-            f"""SELECT event.*
-                FROM {_TABLE_EVENTS} AS event
-                JOIN (
-                    SELECT reservation_id, MAX(id) AS latest_id
-                    FROM {_TABLE_EVENTS}
-                    WHERE reservation_id > 0
-                    GROUP BY reservation_id
-                ) AS latest ON latest.latest_id = event.id
-                ORDER BY event.id DESC
-                LIMIT ? OFFSET ?""",
-            (max(1, int(limit)), max(0, int(offset))),
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
-
-
-def count_reservation_event_summaries() -> int:
-    """Count reservations represented in the runtime-event list."""
-    ensure_tables()
-    conn = db._sqlite_conn()
-    try:
-        row = conn.execute(
-            f"SELECT COUNT(DISTINCT reservation_id) FROM {_TABLE_EVENTS} WHERE reservation_id > 0"
-        ).fetchone()
-        return int(row[0] or 0)
     finally:
         conn.close()
 

@@ -1785,6 +1785,12 @@ def _do_phone_verification(session: BrowserSession) -> tuple[dict, dict]:
                         reason=f"{val_reason} {val_text}",
                     )
                     continue
+                    _sleep_before_phone_retry(
+                        attempt,
+                        max_retries,
+                        reason=f"{val_reason} {val_text}",
+                    )
+                    continue
 
                 # 成功
                 report_success(activation_id)

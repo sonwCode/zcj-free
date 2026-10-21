@@ -59,7 +59,7 @@ class _CloakProxyBootstrapError(RuntimeError):
 
 
 class _CloakNetworkError(RuntimeError):
-    """运行时检测到 Chrome 网络错误页（chrome-error://），需要换代理重试。"""
+    """运行时检测到 Chrome 网络错误页面, 需要换代理重试."""
 
     def __init__(self, message: str, failed_proxy: str | None = None, error_url: str | None = None):
         super().__init__(message)
@@ -202,8 +202,18 @@ def _run_cloak_registration_impl(
     on_email_acquired: Callable[[str], None] | None = None,
     exclude_emails=None,
     _excluded_proxies=None,
+    job_id: int | None = None,
 ) -> dict:
     """CloakBrowser 自动化注册入口。"""
+    # 方案 1：每个任务生成唯一 profile，完全隔离浏览器指纹
+    import time
+    if job_id is not None:
+        unique_profile = f"reg_job{job_id}_{int(time.time())}"
+        logger.info("[Cloak注册] 使用独立 profile 隔离指纹：%s", unique_profile)
+    else:
+        unique_profile = None
+        logger.info("[Cloak注册] 未指定 job_id，使用默认 profile（复用模式）")
+    
     driver = None
     opened = None
     excluded_proxies: set[str] = {
@@ -222,21 +232,8 @@ def _run_cloak_registration_impl(
     hard_cleanup = False
     try:
         driver, opened = build_cloak_driver(
-            proxy=proxy, excluded_proxies=excluded_proxies,
+            proxy=proxy, excluded_proxies=excluded_proxies, profile_name=unique_profile,
         )
-        # 附加代理信息，供运行时 Chrome 错误检测使用
-        _current_proxy = str(
-            ((opened.raw or {}).get("proxy_pool_target") if opened else None)
-            or ((opened.raw or {}).get("proxy") if opened else None)
-            or proxy
-            or ""
-        ).strip()
-        if hasattr(driver, '_driver'):
-            # CloakSeleniumDriver 包装了 Playwright page，存储在 _driver 上
-            driver._driver._proxy_info = _current_proxy
-        else:
-            # 直接在 driver 上存储（兼容未来的其他 driver 类型）
-            driver._proxy_info = _current_proxy
         _register_active_cloak_driver(driver)
         try:
             traffic_tracker = PlaywrightTrafficTracker(driver.context, label="Cloak")
@@ -347,6 +344,8 @@ def _run_cloak_registration_impl(
                         exclude_codes=used_otps,
                     )
                 except Exception as exc:
+                    # 参考 Roxy 流程：after_ts 过滤可能漏掉同一封被重发/时间戳异常的验证码。
+                    # 最后一轮也先做一次宽松读取，避免邮件已到达但时间戳偏差导致直接失败。
                     # 宽松读取用于兜住“邮件已到但时间戳偏差”的情况，必须限定回看窗口：
                     # 旧实现把起始时间设为 0（等于完全不过滤），会把历史旧码（更早阶段或上一轮
                     # 重发的邮件）重新取出来提交，形成“旧码 -> invalid -> 再取旧码”的空转。
@@ -380,10 +379,7 @@ def _run_cloak_registration_impl(
                     )
                     otp_after_ts = time.time()
                     otp_resend_count += 1
-                    resend_result = _click_resend_email_otp(driver, timeout=25)
-                    if isinstance(resend_result, dict) and resend_result.get("verified"):
-                        otp_final_outcome = "accepted"
-                        break
+                    _click_resend_email_otp(driver, timeout=25)
                     human_delay("api")
                     current_otp = None
                     continue
@@ -444,10 +440,7 @@ def _run_cloak_registration_impl(
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
             otp_after_ts = time.time()
             otp_resend_count += 1
-            resend_result = _click_resend_email_otp(driver, timeout=25)
-            if isinstance(resend_result, dict) and resend_result.get("verified"):
-                otp_final_outcome = "accepted"
-                break
+            _click_resend_email_otp(driver, timeout=25)
             human_delay("api")
             current_otp = None
 
@@ -506,16 +499,18 @@ def _run_cloak_registration_impl(
             from config import codex as _codex_cfg
             codex_auto_enabled = bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False))
         except Exception:
-            # 配置读取异常时按关闭处理，避免意外进入手机号接码。
             codex_auto_enabled = False
         try:
             from config import codex as _codex_required_cfg
             codex_required = bool(getattr(_codex_required_cfg, "CODEX_REQUIRED_ON_REGISTRATION", True))
         except Exception:
             codex_required = True
+        # 与上游一致：主动跳过 Codex 不是失败，ok 必须为 True，否则注册成功的任务
+        # 会被判成 partial_success。需要补跑时由 retryable 标记，不影响任务结论。
         codex_result = {
             "status": "failed" if codex_auto_enabled and codex_required else "skipped",
-            "ok": False,
+            "ok": not (codex_auto_enabled and codex_required),
+            "retryable": not (codex_auto_enabled and codex_required),
             "error_code": "codex_required" if codex_auto_enabled and codex_required else "codex_skipped",
             "message": (
                 "注册后自动 Codex 已关闭，已跳过 Codex 和手机号接码；可在账号页补跑"
@@ -634,6 +629,7 @@ def _run_cloak_registration_impl(
         traffic_summary = network_traffic or {}
         codex_status = str(codex_result.get("status") or ("success" if bool(codex_result.get("ok")) else "failed"))
         codex_ok = bool(codex_result.get("ok")) or codex_status == "success"
+        codex_skipped = codex_status == "skipped"
         logger.info(
             "[Cloak注册][摘要] email=%s account_id=%s account=success task=%s codex=%s phone=%s "
             "otp_outcome=%s otp_submit_attempts=%s otp_resends=%s requests=%s failed=%s unfinished=%s",
@@ -643,7 +639,6 @@ def _run_cloak_registration_impl(
             traffic_summary.get("failed_request_count", "-"),
             traffic_summary.get("unfinished_request_count", "-"),
         )
-        codex_skipped = codex_status == "skipped"
         return {
             "success": True,
             "task_status": "success" if codex_ok else "partial_success",
@@ -668,7 +663,7 @@ def _run_cloak_registration_impl(
             "network_traffic": network_traffic,
             "error": None if codex_ok or codex_skipped else f"Codex 未完成: {codex_result.get('message')}",
         }
-    except _CloakProxyBootstrapError:
+    except (_CloakProxyBootstrapError, _CloakNetworkError):
         hard_cleanup = True
         raise
     except Exception as exc:
@@ -759,6 +754,7 @@ def run_cloak_registration(
     batch_dir: Path | None = None,
     on_email_acquired: Callable[[str], None] | None = None,
     exclude_emails=None,
+    job_id: int | None = None,
 ) -> dict:
     """CloakBrowser 注册入口；同步 Playwright 始终运行在隔离线程。"""
     logger.info("[Cloak注册] 使用隔离线程启动同步 Playwright")
@@ -788,8 +784,9 @@ def run_cloak_registration(
                 on_email_acquired=on_email_acquired,
                 exclude_emails=exclude_emails,
                 _excluded_proxies=excluded_proxies,
+                job_id=job_id,
             )
-        except _CloakProxyBootstrapError as exc:
+        except (_CloakProxyBootstrapError, _CloakNetworkError) as exc:
             if proxy is not None:
                 raise
             if exc.failed_proxy:
@@ -804,36 +801,6 @@ def run_cloak_registration(
             if direct_fallback_enabled:
                 logger.warning(
                     "[Cloak注册] 已耗尽代理池凭据，最后使用服务器直连重建隔离Playwright线程（尝试=%s）",
-                    max_attempts,
-                )
-                return _run_in_isolated_thread(
-                    _run_cloak_registration_impl,
-                    email=email,
-                    name=name,
-                    birthday=birthday,
-                    proxy="",
-                    otp_code=otp_code,
-                    batch_dir=batch_dir,
-                    on_email_acquired=on_email_acquired,
-                    exclude_emails=exclude_emails,
-                    _excluded_proxies=excluded_proxies,
-                )
-            raise
-        except _CloakNetworkError as exc:
-            if proxy is not None:
-                raise
-            if exc.failed_proxy:
-                excluded_proxies.add(exc.failed_proxy)
-                _note_proxy_failure(exc.failed_proxy)
-            if attempt < max_attempts:
-                logger.warning(
-                    "[Cloak注册] 运行时检测到Chrome网络错误，换代理重建（%s/%s，排除出口=%s）：%s",
-                    attempt, max_attempts, len(excluded_proxies), str(exc)[:200],
-                )
-                continue
-            if direct_fallback_enabled:
-                logger.warning(
-                    "[Cloak注册] Chrome网络错误重试已耗尽，最后使用服务器直连（尝试=%s）",
                     max_attempts,
                 )
                 return _run_in_isolated_thread(

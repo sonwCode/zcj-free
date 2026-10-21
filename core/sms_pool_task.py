@@ -13,13 +13,22 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from core import sms_pool_store as store
+from core import sms_pool_log as pool_log
 from core import sms_provider
 
 logger = logging.getLogger(__name__)
+
+# 网络/代理故障只说明当前执行链不可用，不能证明已锁定号码有问题。
+# 熔断状态只驻留在 worker 进程内，服务重启后从关闭状态重新探测。
+_NETWORK_CIRCUIT_LOCK = threading.RLock()
+_NETWORK_FAILURE_STREAK = 0
+_NETWORK_CIRCUIT_UNTIL = 0.0
+_NETWORK_LAST_ERROR = ""
 
 # 上游拒码 -> 号码池失败分类。顺序即优先级。
 _FAILURE_CODES: tuple[tuple[str, str], ...] = (
@@ -35,10 +44,99 @@ _FAILURE_CODES: tuple[tuple[str, str], ...] = (
     ("暂无可用号码", "no_numbers"),
     ("没有可用号码", "no_numbers"),
     ("code_timeout", "code_timeout"),
+    ("codex_password_incorrect", "codex_password_incorrect"),
+    ("incorrect email address or password", "codex_password_incorrect"),
     ("等待", "code_timeout"),
 )
 
 _LEASE_HEARTBEAT_SECONDS = 60
+
+_RELEASE_FAILURE_CODES = frozenset({
+    "phone_fraud_guard", "fraud_guard", "voip_phone_disallowed",
+    "phone_number_in_use", "number_rejected", "sms_number_rejected",
+    "code_rejected", "sms_code_rejected", "code_timeout", "sms_code_timeout",
+    # 账号密码被服务端拒绝：号码根本没被用于手机验证，必须立即释放，
+    # 不能因为“未确认失败”而重试两次、把已付费号码拖成 orphaned。
+    "codex_password_incorrect",
+})
+_EXPLICIT_PHONE_ERROR_MARKERS = (
+    "voip_phone_disallowed", "phone_fraud_guard", "fraud_guard",
+    "suspicious behavior from phone", "phone_in_use", "phone number already in use",
+    "invalid_phone", "invalid phone", "not a valid phone", "phone number is not valid",
+    "already used", "手机号无效", "手机号已被使用",
+)
+_TRANSIENT_ERROR_MARKERS = (
+    "connectionerror", "proxyerror", "proxy connect", "connect tunnel failed",
+    "connection reset", "connection refused", "curl:", "http 502", "http 503",
+    "http 504", "page.goto", "net::err_", "timed out", "timeout waiting",
+    "service unavailable", "browser_session_circuit_open", "circuit open",
+    "cloudflare_challenge", "codex_mfa_step_stalled", "email_submit_stalled",
+    "http error 403", "http 403", "status=403", "access denied",
+)
+
+
+def _network_circuit_config() -> tuple[int, int]:
+    try:
+        from config import sms_pool as cfg
+
+        threshold = max(
+            1, int(getattr(cfg, "SMS_POOL_NETWORK_FAILURE_THRESHOLD", 2) or 2)
+        )
+        cooldown = max(
+            60, int(getattr(cfg, "SMS_POOL_NETWORK_COOLDOWN_SECONDS", 300) or 300)
+        )
+        return threshold, cooldown
+    except Exception:
+        return 2, 300
+
+
+def network_circuit_state() -> dict[str, Any]:
+    """返回号码池网络熔断状态，供采购/分配 worker 使用。"""
+    global _NETWORK_FAILURE_STREAK, _NETWORK_CIRCUIT_UNTIL
+    now = time.monotonic()
+    with _NETWORK_CIRCUIT_LOCK:
+        # 冷却结束后允许一次新的探测，不把旧故障计数带入下一窗口。
+        if _NETWORK_CIRCUIT_UNTIL and now >= _NETWORK_CIRCUIT_UNTIL:
+            _NETWORK_CIRCUIT_UNTIL = 0.0
+            _NETWORK_FAILURE_STREAK = 0
+        remaining = max(0, int(_NETWORK_CIRCUIT_UNTIL - now))
+        return {
+            "open": remaining > 0,
+            "remaining": remaining,
+            "failure_streak": int(_NETWORK_FAILURE_STREAK),
+            "last_error": str(_NETWORK_LAST_ERROR or "")[:240],
+        }
+
+
+def note_transient_network_failure(message: object) -> dict[str, Any]:
+    """累计一次基础设施故障，达到阈值后暂停新采购和新分配。"""
+    global _NETWORK_FAILURE_STREAK, _NETWORK_CIRCUIT_UNTIL, _NETWORK_LAST_ERROR
+    threshold, cooldown = _network_circuit_config()
+    text = str(message or "未提供错误信息").replace("\n", " ").strip()[:240]
+    with _NETWORK_CIRCUIT_LOCK:
+        _NETWORK_FAILURE_STREAK += 1
+        _NETWORK_LAST_ERROR = text
+        opened = False
+        if _NETWORK_FAILURE_STREAK >= threshold:
+            was_open = _NETWORK_CIRCUIT_UNTIL > time.monotonic()
+            _NETWORK_CIRCUIT_UNTIL = time.monotonic() + cooldown
+            opened = not was_open
+        state = network_circuit_state()
+    if opened:
+        logger.warning(
+            "[号码池] 网络故障熔断：连续失败=%s，暂停采购和分配 %ss；错误=%s",
+            state["failure_streak"], cooldown, text,
+        )
+    return state
+
+
+def note_successful_network_result() -> None:
+    """一次完整成功的补跑证明链路恢复，清除熔断计数。"""
+    global _NETWORK_FAILURE_STREAK, _NETWORK_CIRCUIT_UNTIL, _NETWORK_LAST_ERROR
+    with _NETWORK_CIRCUIT_LOCK:
+        _NETWORK_FAILURE_STREAK = 0
+        _NETWORK_CIRCUIT_UNTIL = 0.0
+        _NETWORK_LAST_ERROR = ""
 
 
 def _classify_failure(message: object) -> str:
@@ -50,6 +148,41 @@ def _classify_failure(message: object) -> str:
     if "timeout" in text or "超时" in text:
         return "code_timeout"
     return "failed"
+
+
+def _should_release_number(result: dict, failure_code: str, message: str) -> bool:
+    """只有明确手机号/验证码终态错误才允许取消已锁定号码。"""
+    error_code = str(result.get("error_code") or "").strip().lower()
+    if error_code in _RELEASE_FAILURE_CODES:
+        return True
+    if str(failure_code or "") in _RELEASE_FAILURE_CODES:
+        return True
+    text = str(message or "").lower()
+    return any(marker in text for marker in _EXPLICIT_PHONE_ERROR_MARKERS)
+
+
+def _is_transient_failure(result: dict, message: str) -> bool:
+    """识别代理、网络、浏览器基础设施故障；这些故障不能证明号码失败。"""
+    error_code = str(result.get("error_code") or "").strip().lower()
+    if error_code in _RELEASE_FAILURE_CODES:
+        return False
+    if result.get("retryable") is True:
+        return True
+    text = str(message or "").lower()
+    return any(marker in text for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def _hold_without_release(reservation_id: int, reason: str, code: str) -> str:
+    """无法确认号码是否失败时标记待核对，绝不调用供应商取消。"""
+    updated = store.update_status(
+        int(reservation_id),
+        store.STATUS_ORPHANED,
+        failure_code=code,
+        failure_reason=reason[:800],
+        release_result="not_released_unconfirmed",
+        terminal=True,
+    )
+    return str((updated or {}).get("status") or store.STATUS_ORPHANED)
 
 
 def _recover_phone(activation_id: str) -> str:
@@ -204,6 +337,11 @@ def run_pool_task(reservation_id: int, account: dict) -> dict:
         "[号码池] 开始补跑：reservation=%s account=%s 号码=%s provider=%s",
         reservation_id, account_id, masked, claimed.get("provider") or "-",
     )
+    pool_log.append_task(
+        int(reservation_id), email,
+        f"[开始] account={account_id} 号码={masked} provider={claimed.get('provider') or '-'} "
+        f"activation={activation_id}",
+    )
 
     heartbeat = _LeaseHeartbeat(int(reservation_id))
     heartbeat.start()
@@ -217,7 +355,7 @@ def run_pool_task(reservation_id: int, account: dict) -> dict:
             result = retry_service.run_worker(
                 email,
                 clear_log=False,
-                target_log_path=str(Path(retry_service.log_path(email))),
+                target_log_path=str(pool_log.task_log_path(int(reservation_id), email)),
                 pool_activation={
                     "activation_id": activation_id,
                     "phone_number": phone,
@@ -236,9 +374,14 @@ def run_pool_task(reservation_id: int, account: dict) -> dict:
 
     ok = bool(result.get("ok"))
     message = str(result.get("message") or result.get("error") or "")
+    pool_log.append_task(
+        int(reservation_id), email,
+        ("[结果] 成功" if ok else f"[结果] 失败 {message[:200]}"),
+    )
     _finish_request(account_id, ok)
 
     if ok:
+        note_successful_network_result()
         # 上游已 report_success + complete；这里只收口本地状态。
         release = _finalize(
             int(reservation_id), activation_id, "手机验证成功", code="completed", release=False
@@ -265,6 +408,55 @@ def run_pool_task(reservation_id: int, account: dict) -> dict:
             logger.debug("[号码池] 写入 VoIP 号码质量记录失败", exc_info=True)
     # OAuth 失败路径已经释放并遗忘该激活时，不再重复调用供应商取消接口。
     already_released = not _online(activation_id)
+
+    # 网络、代理、浏览器和其他无法证明号码失败的错误：保留激活，
+    # 回到 reserved 队列等待下一轮重试；达到上限后只标记待核对，仍不取消。
+    if not already_released and not _should_release_number(result, failure_code, message):
+        transient_failure = _is_transient_failure(result, message)
+        if transient_failure:
+            note_transient_network_failure(message)
+        retry_code = "transient_network" if transient_failure else "unconfirmed_failure"
+        retry = store.requeue_for_retry(
+            int(reservation_id),
+            message or "未确认的补跑失败",
+            code=retry_code,
+            max_retries=2,
+        )
+        if retry and retry.get("status") == store.STATUS_RESERVED:
+            logger.warning(
+                "[号码池] 补跑暂时失败，未释放号码并排队重试：reservation=%s account=%s code=%s retry=%s",
+                reservation_id, account_id, retry_code, retry.get("retry_count"),
+            )
+            return {
+                "ok": False,
+                "reservation_id": reservation_id,
+                "account_id": account_id,
+                "email": email,
+                "failure_code": retry_code,
+                "message": message[:300],
+                "status": store.STATUS_RESERVED,
+                "retry_pending": True,
+            }
+        held_status = _hold_without_release(
+            int(reservation_id),
+            message or "未确认的补跑失败",
+            retry_code if not retry else "transient_retry_exhausted",
+        )
+        logger.warning(
+            "[号码池] 补跑失败但无法确认号码状态，未释放：reservation=%s account=%s code=%s status=%s",
+            reservation_id, account_id, retry_code, held_status,
+        )
+        return {
+            "ok": False,
+            "reservation_id": reservation_id,
+            "account_id": account_id,
+            "email": email,
+            "failure_code": retry_code,
+            "message": message[:300],
+            "status": held_status,
+            "retry_pending": False,
+        }
+
     release = _finalize(
         int(reservation_id),
         activation_id,
@@ -323,4 +515,9 @@ def _finalize(
     return str(result.get("status") or store.STATUS_RELEASED)
 
 
-__all__ = ["run_pool_task"]
+__all__ = [
+    "run_pool_task",
+    "network_circuit_state",
+    "note_transient_network_failure",
+    "note_successful_network_result",
+]

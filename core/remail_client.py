@@ -113,6 +113,36 @@ def _error_message(payload, response) -> str:
     return text[:240] if text else "服务端未返回错误信息"
 
 
+_BUSINESS_ERROR_HINTS = (
+    ("insufficient_inventory", "库存不足"),
+    ("project is not available", "该项目当前不可下单"),
+    ("not available for ordering", "该项目当前不可下单"),
+    ("invalid project", "项目 ID 无效"),
+    ("rate limit", "请求过于频繁"),
+)
+
+
+def _business_error_hint(payload, response) -> str:
+    """把服务端业务错误翻译成可操作的中文。
+
+    之前所有 401 都报成"API Key 无效或已失效"，把库存不足、项目不可下单
+    这类可恢复的问题也归到了配置错误，导致排查方向被带偏。
+    """
+    codes: list[str] = []
+    if isinstance(payload, dict):
+        for key in ("code", "errorCode", "failureCode", "error"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                codes.append(value)
+            elif isinstance(value, dict):
+                codes.append(str(value.get("code") or value.get("message") or ""))
+    text = (" ".join(codes) + " " + _error_message(payload, response)).lower()
+    for needle, hint in _BUSINESS_ERROR_HINTS:
+        if needle in text:
+            return hint
+    return ""
+
+
 def _request(
     method: str,
     path: str,
@@ -156,11 +186,13 @@ def _request(
         raise RemailError(f"Remail 响应不是 JSON ({method.upper()} {path})") from exc
 
     if response.status_code >= 400:
-        if response.status_code == 401 and authenticated:
-            raise RemailError(f"Remail API Key 无效或已失效 ({path})")
+        detail = _error_message(payload, response)
+        hint = _business_error_hint(payload, response)
+        if response.status_code == 401 and authenticated and not hint:
+            raise RemailError(f"Remail API Key 无效或已失效 ({path}): {detail}")
         raise RemailError(
             f"Remail 请求失败 ({method.upper()} {path}): HTTP {response.status_code}; "
-            f"{_error_message(payload, response)}"
+            f"{detail}" + (f"；判定：{hint}" if hint else "")
         )
     return payload
 
@@ -472,7 +504,17 @@ def _order_status_error(order: dict) -> str | None:
     status = str(order.get("status") or "").strip().lower()
     if status in _FINAL_ORDER_STATUSES:
         failure = str(order.get("failureCode") or order.get("failure_code") or "").strip()
-        return f"Remail 订单未就绪: status={status}" + (f", failure={failure}" if failure else "")
+        lowered = failure.lower()
+        hint = ""
+        if "insufficient_inventory" in lowered:
+            hint = "（库存不足：请稍后重试，或改用其它邮箱来源）"
+        elif "project" in lowered:
+            hint = "（项目不可下单：请核对 REMAIL_PROJECT_ID 与套餐状态）"
+        return (
+            f"Remail 订单未就绪: status={status}"
+            + (f", failure={failure}" if failure else "")
+            + hint
+        )
     return None
 
 
@@ -515,6 +557,20 @@ def _wait_for_order_credentials(order: dict) -> tuple[str, str, str]:
     raise RemailError(f"Remail 订单等待 service token 超时: order={order_no}, status={status}")
 
 
+# OpenAI 会直接拒绝 Microsoft 租户域名（xxx.onmicrosoft.com）等公共/临时邮箱，
+# 表现为密码页 create-account/password 返回 "Failed to create account"。
+# 这类邮箱买到也用不了，取号阶段就拦下来并给出明确指引，避免白跑两分钟。
+_BLOCKED_EMAIL_DOMAINS = ("onmicrosoft.com", "onmicrosoft.us")
+
+
+def _blocked_email_domain(email: str) -> str:
+    domain = str(email or "").rsplit("@", 1)[-1].strip().lower().rstrip(".")
+    for bad in _BLOCKED_EMAIL_DOMAINS:
+        if domain == bad or domain.endswith("." + bad):
+            return bad
+    return ""
+
+
 def pick_account() -> RemailAccount:
     """按配置创建一个 Remail 接码/长效购买订单并返回交付邮箱。"""
     project_id = _project_id()
@@ -541,6 +597,17 @@ def pick_account() -> RemailAccount:
     )
     _cache_context(account)
     logger.info("[Remail] 已创建邮箱订单: %s order=%s project=%s", email, order_no or "-", project_id)
+    blocked = _blocked_email_domain(email)
+    if blocked:
+        logger.warning(
+            "[Remail] 交付邮箱域名会被 OpenAI 拒绝注册（%s）：%s；改用 public_only 库存或 mailcode 域名邮箱",
+            blocked, email,
+        )
+        release_account(email, status="failed", note=f"域名被 OpenAI 拒绝: {blocked}")
+        raise RemailError(
+            f"Remail 交付的邮箱域名 {blocked} 会被 OpenAI 拒绝（密码页返回 Failed to create account）；"
+            "请把 REMAIL_SUPPLY_POLICY 改为 public_only，或改用 mailcode 域名邮箱来源"
+        )
     return account
 
 

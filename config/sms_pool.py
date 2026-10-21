@@ -50,6 +50,11 @@ SMS_POOL_COUNTRY: str = ""
 # 单次轮询最多采购多少个号码，避免一次请求打爆供应商。
 SMS_POOL_MAX_ACQUIRE_PER_TICK: int = 2
 
+# 连续代理/网络故障达到阈值后暂停新查活、采购和分配，避免网络异常时继续
+# 购买号码；已有任务仍会按原流程收口，冷却结束后自动恢复探测。
+SMS_POOL_NETWORK_FAILURE_THRESHOLD: int = 2
+SMS_POOL_NETWORK_COOLDOWN_SECONDS: int = 300
+
 # 是否定时复查号码池候选账号的可用性。未知/待补跑账号在分配号码前仍会
 # 自动做一次查活；此开关仅控制已检查账号的周期性复查。
 SMS_POOL_LIVE_CHECK_ENABLED: bool = False
@@ -74,6 +79,8 @@ apply_env_overrides(globals(), {
     "SMS_POOL_SERVICE": "str",
     "SMS_POOL_COUNTRY": "str",
     "SMS_POOL_MAX_ACQUIRE_PER_TICK": "int",
+    "SMS_POOL_NETWORK_FAILURE_THRESHOLD": "int",
+    "SMS_POOL_NETWORK_COOLDOWN_SECONDS": "int",
     "SMS_POOL_LIVE_CHECK_ENABLED": "bool",
     "SMS_POOL_LIVE_CHECK_INTERVAL": "int",
     "SMS_POOL_LIVE_CHECK_BATCH": "int",

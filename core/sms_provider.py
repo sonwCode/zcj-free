@@ -211,13 +211,7 @@ _REGION_SETTING_BY_PROVIDER = {
 
 
 def _excluded_region(state: dict, provider: str | None = None) -> str:
-    """Return the matching excluded region for one provider's number.
-
-    Provider-specific settings take precedence.  The legacy shared setting is
-    used only while no provider-specific setting is configured at all, so an
-    operator can migrate one platform at a time without silently applying a
-    blank platform rule to every provider.
-    """
+    """Return a matching provider-specific excluded region."""
     state = state or {}
     provider_name = str(provider or state.get("provider") or "").strip().lower()
     specific_names = tuple(_REGION_SETTING_BY_PROVIDER.values())
@@ -235,7 +229,6 @@ def _excluded_region(state: dict, provider: str | None = None) -> str:
                 excluded.add(normalized)
     if not excluded:
         return ""
-
     for key in ("phone_country_name", "phone_region", "region", "province", "state"):
         value = str(state.get(key) or "").strip()
         if value and _normalized_region(value) in excluded:
@@ -532,20 +525,19 @@ def _quality_empty() -> dict:
 def _quality_data_locked() -> dict | None:
     global _QUALITY_CACHE, _QUALITY_CACHE_PATH
     path = _quality_path()
-    if path is None:
-        return None
-    path_key = str(path.resolve())
+    path_key = str(path.resolve()) if path is not None else "<memory>"
     if _QUALITY_CACHE is not None and _QUALITY_CACHE_PATH == path_key:
         return _QUALITY_CACHE
     data = _quality_empty()
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict) and isinstance(loaded.get("buckets"), dict) and isinstance(loaded.get("numbers"), dict):
-            data.update(loaded)
-    except FileNotFoundError:
-        pass
-    except Exception as exc:
-        logger.warning("[SMS质量] 账本读取失败，将创建新账本：%s", exc)
+    if path is not None:
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and isinstance(loaded.get("buckets"), dict) and isinstance(loaded.get("numbers"), dict):
+                data.update(loaded)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning("[SMS质量] 账本读取失败，将创建新账本：%s", exc)
     _QUALITY_CACHE = data
     _QUALITY_CACHE_PATH = path_key
     return data
@@ -553,11 +545,11 @@ def _quality_data_locked() -> dict | None:
 
 def _quality_save_locked(data: dict) -> None:
     path = _quality_path()
+    data["updated_at"] = int(time.time())
     if path is None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data["updated_at"] = int(time.time())
         tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
         os.replace(tmp, path)
@@ -1478,7 +1470,17 @@ def _configured_price_bounds_cny(provider: str) -> tuple[Decimal | None, Decimal
     provider = str(provider or "").strip().lower()
     override = _price_limit_override()
     if override is not None:
-        # 独立流程的价格上限优先；provider 专属上限仍作为额外收紧条件生效。
+        # 独立流程的最高价覆盖通用最高价，但不能绕过 SMSBower
+        # 自己配置的最低价；否则号码池会重新买回被最低价排除的号码。
+        override_min, override_max = override
+        if provider == "smsbower":
+            configured_min = _smsbower_price_bound("SMSBOWER_MIN_PRICE")
+            configured_max = _smsbower_price_bound("SMS_MAX_PRICE")
+            min_cny = configured_min if override_min is None else max(override_min, configured_min or override_min)
+            max_cny = override_max
+            if configured_max is not None:
+                max_cny = configured_max if max_cny is None else min(max_cny, configured_max)
+            return min_cny, max_cny
         return override
     if provider == "smsbower":
         return _smsbower_price_bound("SMSBOWER_MIN_PRICE"), _smsbower_price_bound("SMS_MAX_PRICE")
@@ -1755,8 +1757,9 @@ def _smsbower_random_country_candidates(http: CurlSession, service: str) -> list
     """返回有库存且价格在配置区间内的国家，并随机打乱顺序。"""
     if _smsbower_country() or not bool(getattr(_cfg, "SMSBOWER_RANDOM_COUNTRY", True)):
         return []
-    min_price_cny = _smsbower_price_bound("SMSBOWER_MIN_PRICE")
-    max_price_cny = _smsbower_price_bound("SMS_MAX_PRICE")
+    # Use the effective bounds so pool logs/errors reflect its independent
+    # ceiling while retaining SMSBower's configured price floor.
+    min_price_cny, max_price_cny = _configured_price_bounds_cny("smsbower")
     cny_to_usd_rate, fx_source = _cny_to_usd_rate()
     min_price_usd, max_price_usd = _provider_price_bounds_usd(
         "smsbower", cny_to_usd_rate=cny_to_usd_rate
@@ -1884,6 +1887,131 @@ def _tiger_random_country_candidates(http: CurlSession, service: str) -> list[di
     return candidates
 
 
+def _vaksms_price_rows(http: CurlSession, service: str, country: str | None = None) -> list[dict]:
+    """读取 Vak getPrices 的国家/服务价格库存表，不申请号码。"""
+    params = {"action": "getPrices", "service": service}
+    if country is not None and str(country).strip():
+        params["country"] = str(country).strip()
+    text = _request_vaksms(http, params)
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise SmsProviderError("Vak SMS getPrices 响应不是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise SmsProviderError("Vak SMS getPrices 响应格式异常")
+    rows: list[dict] = []
+    for country_id, services in payload.items():
+        if not isinstance(services, dict):
+            continue
+        item = services.get(service)
+        if not isinstance(item, dict):
+            continue
+        try:
+            cost = Decimal(str(item.get("cost") if item.get("cost") is not None else item.get("price")))
+            count = int(item.get("count") or 0)
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if cost.is_finite() and cost >= 0:
+            rows.append({"country": str(country_id), "cost": cost, "count": count})
+    return rows
+
+
+def _vaksms_random_country_candidates(http: CurlSession, service: str) -> list[dict]:
+    """Vak 未指定国家时，从 getPrices 结果中挑选价格范围内的有库存国家。"""
+    min_price_usd, max_price_usd = _provider_price_bounds_usd("vaksms")
+    rows = _vaksms_price_rows(http, service)
+    stocked = [row for row in rows if row.get("count", 0) > 0]
+    candidates = [
+        row for row in stocked
+        if (max_price_usd is None or row["cost"] <= max_price_usd)
+        and (min_price_usd is None or row["cost"] >= min_price_usd)
+    ]
+    candidates = _quality_rank_candidates(candidates, "vaksms", service)
+    rate, source = _cny_to_usd_rate()
+    min_price_cny, max_price_cny = _configured_price_bounds_cny("vaksms")
+    logger.info(
+        "[Vak SMS] 随机国家候选：service=%s count=%s price_usd=%s..%s price_cny=%s..%s rate_usd_cny=%s fx_source=%s",
+        service, len(candidates), min_price_usd if min_price_usd is not None else 0,
+        max_price_usd if max_price_usd is not None else "unbounded",
+        min_price_cny if min_price_cny is not None else 0,
+        max_price_cny if max_price_cny is not None else "unbounded",
+        _format_usd_cny_rate(rate), source,
+    )
+    if not candidates:
+        if max_price_usd is None:
+            raise SmsNoNumbersError("Vak SMS 当前价格/库存范围内没有可用国家")
+        cheapest = min(stocked, key=lambda row: row["cost"]) if stocked else None
+        detail = (
+            "；当前在库最低价 USD {}，国家={}，库存={}"
+            .format(cheapest["cost"], cheapest["country"], cheapest.get("count", 0))
+            if cheapest else "；getPrices 当前没有在库国家"
+        )
+        raise SmsNoNumbersError(
+            f"Vak SMS 在人民币最高价格 ¥{max_price_cny}（约 USD {max_price_usd:.6f}）内没有可用国家{detail}"
+        )
+    return candidates
+
+
+def _acquire_vaksms_number(
+    http: CurlSession,
+    service: str | None = None,
+    country: str | None = None,
+    provider: str = "vaksms",
+) -> tuple[str, str]:
+    """Vak 未固定国家时按 getPrices 候选逐国尝试，直到拿到合格号码。"""
+    service_code = _provider_service_code("VAKSMS_SERVICE", service)
+    attempts = _setting_int("SMS_NUMBER_ACQUIRE_RETRIES", 3, 1)
+    configured_country = str(
+        country or getattr(_cfg, "VAKSMS_COUNTRY", "") or getattr(_cfg, "SMS_COUNTRY", "") or ""
+    ).strip()
+    candidates: list[dict] = []
+    if not configured_country:
+        candidates = _vaksms_random_country_candidates(http, service_code)
+        attempts = min(max(1, attempts), len(candidates))
+    for attempt in range(1, attempts + 1):
+        candidate = candidates[attempt - 1] if candidates else None
+        selected_country = candidate["country"] if candidate else configured_country
+        if not selected_country:
+            raise SmsProviderConfigurationError("Vak SMS 需要 VAKSMS_COUNTRY、SMS_COUNTRY 或可用价格库存")
+        try:
+            activation_id, phone = _acquire_number_once(
+                http,
+                service=service_code,
+                country=selected_country,
+                price_quote=candidate,
+                provider=provider,
+            )
+        except SmsNoNumbersError:
+            if candidates and attempt < attempts:
+                logger.info(
+                    "[Vak SMS] 候选国家库存已变化，尝试下一个国家：country=%s attempt=%s/%s",
+                    selected_country, attempt, attempts,
+                )
+                continue
+            raise
+        try:
+            state = _validate_activation_price(activation_id)
+        except SmsNumberRejectedError as exc:
+            logger.warning(
+                "[Vak SMS] 号码不符合价格策略，释放并换号：attempt=%s/%s phone=%s reason=%s",
+                attempt, attempts, _mask_phone(phone), str(exc)[:180],
+            )
+            try:
+                cancel_and_report_failure(activation_id, http=http, reason=exc)
+            except Exception as release_exc:
+                logger.warning("[Vak SMS] 超价号码释放失败，继续换号：id=%s error=%s", activation_id, release_exc)
+            continue
+        if (
+            _number_is_recently_rejected(phone)
+            or _activation_declares_voip(state)
+            or _tier_is_cooled(state)
+        ):
+            _release_strategy_rejected(activation_id, http)
+            continue
+        return activation_id, phone
+    raise SmsNumberRejectedError(f"Vak SMS 连续 {attempts} 次取到的号码或供应商层级均被策略排除")
+
+
 def _acquire_tiger_number(
     http: CurlSession,
     service: str | None = None,
@@ -1971,6 +2099,8 @@ def _acquire_fixed_provider_number(
         selected_country = str(
             country or getattr(_cfg, "VAKSMS_COUNTRY", "") or getattr(_cfg, "SMS_COUNTRY", "") or ""
         ).strip()
+        if not selected_country:
+            return _acquire_vaksms_number(http, service=service_code, country=None, provider=provider)
     else:
         raise SmsProviderConfigurationError(f"不支持的短信平台：{provider}")
     if not selected_country:
@@ -2060,7 +2190,12 @@ def _preflight_sms_dependency_for_provider(
     if provider == "vaksms":
         target = str(country or getattr(_cfg, "VAKSMS_COUNTRY", "") or country_code).strip()
         if not target:
-            raise SmsProviderConfigurationError("Vak SMS 需要 VAKSMS_COUNTRY 或 SMS_COUNTRY")
+            candidates = _vaksms_random_country_candidates(http, service_code)
+            return {
+                "provider": "vaksms", "service": service_code, "country": None,
+                "probe": "getPrices", "available": True,
+                "candidate_count": len(candidates), "countries": [row["country"] for row in candidates],
+            }
         return {"provider": provider, "service": service_code, "country": target, "probe": "deferred_to_get_number", "available": None, "deferred": True}
     if provider == "tiger":
         return _preflight_tiger(http, service_code, country)
@@ -2478,11 +2613,10 @@ def _number_is_recently_rejected(phone: str) -> bool:
 
 
 def _release_strategy_rejected(activation_id: str, http: CurlSession) -> None:
-    provider = _provider_for_activation(activation_id)
     try:
         cancel(activation_id, http=http)
     except Exception as exc:
-        logger.warning("[SMS] 策略排除号码释放请求失败：provider=%s id=%s error=%s", provider, activation_id, exc)
+        logger.warning("[SMSBower] 策略排除号码释放请求失败：id=%s error=%s", activation_id, exc)
     finally:
         _forget_activation(activation_id)
 
@@ -2618,13 +2752,41 @@ def _acquire_number_once(
             http.close()
 
 
-def _acquire_smsbower_number(
+def _acquire_number_for_provider(
+    provider: str,
     http: CurlSession,
     service: str | None = None,
     country: str | None = None,
 ) -> tuple[str, str]:
-    """按 SMSBower 的价格、库存和号码质量策略取号。"""
-    provider = "smsbower"
+    """在单个平台内按价格/库存策略取号；一个激活只归属该平台。"""
+    provider = str(provider or "").strip().lower()
+    if provider in {"tiger", "herosms", "smspool", "vaksms"}:
+        attempts = _setting_int("SMS_NUMBER_ACQUIRE_RETRIES", 3, 1)
+        for attempt in range(1, attempts + 1):
+            if provider == "tiger":
+                activation_id, phone = _acquire_tiger_number(
+                    http, service=service, country=country, provider=provider
+                )
+            else:
+                activation_id, phone = _acquire_fixed_provider_number(
+                    provider, http, service=service, country=country
+                )
+            state = _activation_state(activation_id)
+            excluded_region = _excluded_region(state, provider)
+            if not excluded_region:
+                return activation_id, phone
+            _metric("candidate_skipped", state)
+            logger.info(
+                "[%s] 按地区策略释放候选并换号：attempt=%s/%s region=%s phone=%s",
+                _provider_label(provider), attempt, attempts, excluded_region, _mask_phone(phone),
+            )
+            _release_strategy_rejected(activation_id, http)
+        raise SmsNumberRejectedError(
+            f"{_provider_label(provider)} 连续 {attempts} 次号码地区命中排除规则"
+        )
+    if provider != "smsbower":
+        raise SmsProviderConfigurationError(f"不支持的短信平台：{provider}")
+
     attempts = _setting_int("SMS_NUMBER_ACQUIRE_RETRIES", 3, 1)
     service_code = _sms_service_code(service)
     configured_country = _smsbower_country(country)
@@ -2707,43 +2869,6 @@ def _acquire_smsbower_number(
             f"供应商随机取号重试 {attempts} 次后仍无可用号码{detail}"
         ) from last_no_numbers
     raise SmsNumberRejectedError(f"连续 {attempts} 次取到的号码或供应商层级均被策略排除")
-
-
-def _acquire_number_for_provider(
-    provider: str,
-    http: CurlSession,
-    service: str | None = None,
-    country: str | None = None,
-) -> tuple[str, str]:
-    """在号码登记后统一应用地区排除策略；被排除号码会取消并重试。"""
-    provider = str(provider or "").strip().lower()
-    if provider == "smsbower":
-        return _acquire_smsbower_number(http, service=service, country=country)
-    if provider not in {"tiger", "herosms", "smspool", "vaksms"}:
-        raise SmsProviderConfigurationError(f"不支持的短信平台：{provider}")
-
-    attempts = _setting_int("SMS_NUMBER_ACQUIRE_RETRIES", 3, 1)
-    for attempt in range(1, attempts + 1):
-        if provider == "tiger":
-            activation_id, phone = _acquire_tiger_number(
-                http, service=service, country=country, provider=provider
-            )
-        else:
-            activation_id, phone = _acquire_fixed_provider_number(
-                provider, http, service=service, country=country
-            )
-        state = _activation_state(activation_id)
-        excluded_region = _excluded_region(state, provider)
-        if not excluded_region:
-            return activation_id, phone
-        _metric("candidate_skipped", state)
-        logger.info(
-            "[%s] 按地区策略释放候选并换号：attempt=%s/%s region=%s phone=%s",
-            _provider_label(provider), attempt, attempts, excluded_region, _mask_phone(phone),
-        )
-        _release_strategy_rejected(activation_id, http)
-
-    raise SmsNumberRejectedError(f"{_provider_label(provider)} 连续 {attempts} 次号码地区命中排除规则")
 
 
 def acquire_number(

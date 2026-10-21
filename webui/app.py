@@ -468,12 +468,14 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/api/sms-pool/status")
     def api_sms_pool_status():
         from core import sms_pool_service as pool_service
+        from core import sms_pool_store as pool_store
         try:
             status = pool_service.pool_status()
+            events = pool_store.recent_events(limit=500)
         except Exception as exc:
             logger.exception("读取号码池状态失败")
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
-        return jsonify({"ok": True, "status": status})
+        return jsonify({"ok": True, "status": status, "events": events})
 
     @app.get("/api/sms-pool/reservations")
     def api_sms_pool_reservations():
@@ -481,42 +483,22 @@ def create_app(auth_code: str | None = None) -> Flask:
         raw = str(request.args.get("status") or "").strip().lower()
         statuses = [raw] if raw else None
         try:
-            limit = _sms_pool_page_arg("limit", 500, 1, 500)
-            offset = _sms_pool_page_arg("offset", 0, 0, 1_000_000)
-        except ValueError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
-        try:
+            # 浏览器分页状态异常时可能发出 NaN/空字符串；接口必须按默认页
+            # 处理，不能让一个展示问题变成 500。
+            try:
+                limit_value = int(str(request.args.get("limit") or "500").strip())
+            except (TypeError, ValueError):
+                limit_value = 500
+            try:
+                offset_value = int(str(request.args.get("offset") or "0").strip())
+            except (TypeError, ValueError):
+                offset_value = 0
+            limit = max(1, min(500, limit_value))
+            offset = max(0, offset_value)
             items = pool_store.list_reservations(statuses=statuses, limit=limit, offset=offset)
-            total = pool_store.count_reservations(statuses=statuses)
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
-        return jsonify({"ok": True, "items": items, "total": total, "limit": limit, "offset": offset})
-
-    def _sms_pool_page_arg(name: str, default: int, minimum: int, maximum: int) -> int:
-        raw = request.args.get(name)
-        if raw is None or not str(raw).strip():
-            return default
-        try:
-            value = int(str(raw).strip())
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{name} 必须是整数") from exc
-        if value < minimum or value > maximum:
-            raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
-        return value
-
-    @app.get("/api/sms-pool/events")
-    def api_sms_pool_events():
-        from core import sms_pool_store as pool_store
-        try:
-            limit = _sms_pool_page_arg("limit", 20, 1, 100)
-            offset = _sms_pool_page_arg("offset", 0, 0, 1_000_000)
-        except ValueError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
-        try:
-            items = pool_store.recent_reservation_event_summaries(limit=limit, offset=offset)
-            total = pool_store.count_reservation_event_summaries()
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        total = pool_store.count_reservations(statuses=statuses)
         return jsonify({"ok": True, "items": items, "total": total, "limit": limit, "offset": offset})
 
     @app.get("/api/sms-pool/reservations/<int:reservation_id>/events")
@@ -526,6 +508,33 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": True, "items": pool_store.reservation_events(reservation_id)})
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.get("/api/sms-pool/logs")
+    def api_sms_pool_logs():
+        from core import sms_pool_log as pool_log
+        try:
+            limit = _sms_pool_page_arg("limit", 20, 1, 100)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "items": pool_log.list_logs(limit=limit)})
+
+    @app.get("/api/sms-pool/log")
+    def api_sms_pool_log_text():
+        from core import sms_pool_log as pool_log
+        name = str(request.args.get("name") or "").strip()
+        if not name:
+            return jsonify({"ok": False, "error": "缺少 name"}), 400
+        try:
+            tail = _sms_pool_page_arg("tail", 400, 20, 2000)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        try:
+            text = pool_log.read_tail(name, tail=tail)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "name": name, "text": text})
 
     @app.get("/api/sms-pool/eligible")
     def api_sms_pool_eligible():

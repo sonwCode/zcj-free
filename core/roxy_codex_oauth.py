@@ -766,6 +766,20 @@ def _fill_login_password_if_present(
                 return "email_otp"
             if not _is_login_password_page(driver):
                 return "next_step"
+            # 服务端明确拒绝密码时，继续等只会白等 12 秒，并在上层被误判成
+            # “未确认失败”反复重试、把已付费号码拖成 orphaned。这里直接给出确定结论。
+            try:
+                page_text = str(driver.execute_script(
+                    "return ((document.body && document.body.innerText) || '')"
+                    ".toString().toLowerCase();"
+                ) or "")
+            except Exception:
+                page_text = ""
+            if "incorrect email address or password" in page_text or "密码不正确" in page_text:
+                raise RuntimeError(
+                    "codex_password_incorrect: 账号登录密码被 OpenAI 拒绝"
+                    "（Incorrect email address or password），该账号无法用密码登录"
+                )
             time.sleep(0.5)
         if _is_login_password_page(driver):
             passwordless = _click_passwordless_signup_if_present(driver)
@@ -810,9 +824,6 @@ def _fill_email_and_otp(
     auth_url: str,
     registration_password: str | None = None,
 ) -> None:
-    # OTP 取码基准：应取“本次触发验证码的邮箱提交时刻”。密码页/MFA 会额外耗时
-    # 十几秒，若把基准前移到“页面已到达验证码页”的时刻，authorize 提交邮箱时刚发出
-    # 的那封验证码会被 after_ts 容差当成旧码丢掉，表现为轮询整轮拿不到码。
     otp_after_ts = time.time()
     # 最近一次“提交邮箱”的时刻。authorize 提交邮箱时服务端就会发出验证码，
     # 这个时刻才是取码基准；后续密码页/MFA 消耗的时间不能算进 after_ts。
@@ -907,7 +918,12 @@ def _fill_email_and_otp(
                     _require_mfa_completion(driver, email, timeout=90)
                     return
                 else:
-                    current_url = str(getattr(driver, "current_url", "") or "")
+                    # 优先用 JS location.href 获取最新 URL，避免 Playwright current_url 延迟
+                    try:
+                        current_url_js = driver.execute_script("return location.href;")
+                        current_url = str(current_url_js or "") if current_url_js else str(getattr(driver, "current_url", "") or "")
+                    except Exception:
+                        current_url = str(getattr(driver, "current_url", "") or "")
                     lower_url = current_url.lower()
                     if any(marker in lower_url for marker in (
                         "/oauth/authorize", "/consent", "/workspace", "/phone", "localhost:1455",
@@ -936,7 +952,12 @@ def _fill_email_and_otp(
                     elif recovered_state == "next_step":
                         return
                     else:
-                        current_url = str(getattr(driver, "current_url", "") or "")
+                        # 优先用 JS location.href 获取最新 URL
+                        try:
+                            current_url_js = driver.execute_script("return location.href;")
+                            current_url = str(current_url_js or "") if current_url_js else str(getattr(driver, "current_url", "") or "")
+                        except Exception:
+                            current_url = str(getattr(driver, "current_url", "") or "")
                         lower_url = current_url.lower()
                         if any(marker in lower_url for marker in (
                             "/oauth/authorize", "/consent", "/workspace", "/phone", "localhost:1455",
@@ -2672,7 +2693,6 @@ def _extract_add_phone_error_code(diagnostic: object) -> str:
                 return code
     return ""
 
-
 def _phone_state_digest(state: dict) -> str:
     """把 add-phone 页的关键状态压成一行，便于在日志里完整看出卡点。
 
@@ -3093,16 +3113,7 @@ def _do_phone_verification_if_present(driver, activation: dict | None = None) ->
                         "[Codex][Browser] 号码池号码由号码池负责释放，本次不取消：activation=%s",
                         activation_id,
                     )
-                if _codex_proto._is_codex_fraud_guard_error(err_text):
-                    raise _codex_proto.PhoneFraudGuardError(
-                        f"phone_fraud_guard: {err_text[:220]}"
-                    ) from exc
-                if is_session_circuit:
-                    raise _codex_proto.BrowserSessionCircuitOpenError(
-                        f"browser_session_circuit_open: {err_text[:220]}"
-                    ) from exc
-                if is_cloudflare_challenge:
-                    raise RuntimeError(f"cloudflare_challenge: {err_text[:220]}") from exc
+                # 参考 reference-repo：fraud_guard/session_circuit/cloudflare_challenge 不终止，继续换号重试
                 # 余额不足 / 无可用号码：重试多少次都不会成功，立即失败止损，
                 # 避免白等 N 轮换号重试（每轮还要刷新页面 + 随机等待）。
                 if any(k in err_text for k in (
@@ -3311,9 +3322,6 @@ def _run_roxy_codex_oauth_once(
 
     existing_driver/existing_opened 用于“注册成功后立刻跑 Codex”：
     复用注册时的 Roxy 窗口，不新建环境，只清理浏览器状态后开始授权。
-
-    profile_name/job_id 只作为隔离标识写入日志，便于把补跑与创建它的任务对上；
-    Roxy 分支此前拿不到这两个参数，导致隔离记录只出现在 cloak 分支。
     """
     from core import codex_oauth as proto
 
@@ -3536,7 +3544,7 @@ def run_roxy_codex_oauth(
         remember_registration_password(email, registration_password)
 
     # 号码池号码是一次性资源：已经用它提交过一次验证后，重新授权再提交同一个
-    # 号码会被上游判为重复/可疑，因此池场景只允许一轮，不做 CPA 重授权。
+    # 号码会被上游判为重复/可疑，因此池场景只允许一轮。
     max_rounds = 1 if pool_activation else 2
     last_result = None
     phone_activation: dict = {}

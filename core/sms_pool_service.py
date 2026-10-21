@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal, InvalidOperation
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core import db
@@ -189,6 +189,31 @@ def enqueue_live_checks(
     max_count = max(1, min(500, int(limit or 20)))
     interval = _live_check_interval()
     retry_cooldown = min(interval, 600)
+    # Cloudflare 挑战潮保护：最近 10 分钟内查活大面积落到网络失败时，本轮不再继续
+    # 把账号烧成 network_unavailable，等出口冷却后由下一轮接手。
+    try:
+        recent_cutoff = (datetime.now() - timedelta(minutes=10)).isoformat(timespec="seconds")
+        recent_failures = sum(
+            1
+            for item in accounts
+            if str(item.get("live_check_status") or "").strip().lower() == "network_unavailable"
+            and str(item.get("live_checked_at") or "") >= recent_cutoff
+        )
+    except Exception:
+        recent_failures = 0
+    if not force and recent_failures >= 10:
+        logger.warning(
+            "[号码池] 最近 10 分钟有 %s 个查活网络失败，本轮暂停查活，等待出口冷却",
+            recent_failures,
+        )
+        return {
+            "queued": 0,
+            "busy": 0,
+            "skipped": 0,
+            "deferred": True,
+            "recent_network_failures": recent_failures,
+            "error": "",
+        }
     queued = 0
     busy = 0
     skipped = 0
@@ -312,24 +337,89 @@ def scan_eligible_accounts() -> dict:
     }
 
 
+def _poll_state_with_staleness() -> dict:
+    """给 UI 的轮询快照补上"是否过期"。
+
+    worker 进程停掉后，SQLite 里最后一条心跳会一直留着；直接把它当当前状态
+    展示，就会出现"平台全部已暂停"这种假状态。这里按 2 个轮询周期判定过期，
+    过期后把整体状态标成 stale，并把各平台标成 unknown。
+    """
+    state = dict(store.get_poll_state() or {})
+    if not state:
+        return {"status": "stale", "stale": True, "age_seconds": None,
+                "stale_reason": "worker 尚未运行过", "provider_state": {}}
+
+    try:
+        interval = max(30, int(getattr(_pool_cfg(), "SMS_POOL_POLL_INTERVAL", 120) or 120))
+    except Exception:
+        interval = 120
+    raw = str(state.get("heartbeat_at") or state.get("last_poll_at") or "").strip()
+    age: float | None = None
+    if raw:
+        try:
+            ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age = max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+        except ValueError:
+            age = None
+
+    stale = age is None or age > max(120, interval * 2)
+    state["age_seconds"] = int(age) if age is not None else None
+    state["stale"] = bool(stale)
+    if stale:
+        # 旧快照不代表当前状态，不能继续显示成"已暂停/轮询中"。
+        state["status"] = "stale"
+        state["stale_reason"] = (
+            f"worker 未运行，状态快照已过期（{int(age)} 秒前）" if age is not None
+            else "缺少心跳时间"
+        )
+        previous = state.get("provider_state") or {}
+        state["provider_state"] = {
+            name: {
+                "status": "unknown",
+                "last_result": state["stale_reason"],
+            }
+            for name in previous
+        }
+    return state
+
+
 def purchase_capacity() -> dict:
-    """计算本次可采购数量：min(eligible 缺口, 预热容量, 单次上限)。"""
+    """计算本次可采购数量：由「并发上限 − 已在途」驱动，而不是固定抢几个。
+
+    硬约束：
+      - 同时在手的号码（未分配 + 运行中）不超过 SMS_POOL_WORKERS + SMS_POOL_PREWARM_SIZE；
+      - 只有某个并发真正空闲（active 下降）时，下一轮才会补上对应数量的号码；
+      - 单轮仍受 SMS_POOL_MAX_ACQUIRE_PER_TICK 限制，避免一次打爆供应商。
+    """
     cfg = _pool_cfg()
     scan = scan_eligible_accounts()
     eligible_count = len(scan["eligible"])
     unclaimed = store.count_reservations([store.STATUS_RESERVED])
     active = store.count_reservations(list(store.ACTIVE_STATUSES))
 
+    workers = max(1, int(getattr(cfg, "SMS_POOL_WORKERS", 2) or 2))
     prewarm = max(0, int(getattr(cfg, "SMS_POOL_PREWARM_SIZE", 2) or 0))
     per_tick = max(0, int(getattr(cfg, "SMS_POOL_MAX_ACQUIRE_PER_TICK", 2) or 0))
 
     # eligible 已排除正在占用号码的账号，因此只需扣除未分配号码，不能再次扣 active。
     gap = max(0, eligible_count - unclaimed)
-    target = min(gap, prewarm, per_tick)
+    # 在途 = 已买到但还没结束的号码。并发是硬上限：在途永远不超过 workers，
+    # 只有某个并发真正空闲（任务结束）才会补号；预热也只能占用并发额度，
+    # 不允许在 workers 之外多囤号码。
+    in_flight = unclaimed + active
+    free_slots = max(0, workers - active)
+    room = max(0, workers - in_flight)
+    target = min(gap, room, per_tick)
     return {
         "eligible": eligible_count,
         "unclaimed": unclaimed,
         "active": active,
+        "in_flight": in_flight,
+        "free_slots": free_slots,
+        "room": room,
+        "workers": workers,
         "gap": gap,
         "prewarm": prewarm,
         "per_tick": per_tick,
@@ -550,7 +640,7 @@ def pool_status() -> dict:
             "interval": _live_check_interval(),
             "batch": max(1, int(getattr(cfg, "SMS_POOL_LIVE_CHECK_BATCH", 20) or 20)),
         },
-        "poll": store.get_poll_state(),
+        "poll": _poll_state_with_staleness(),
         "capacity": capacity,
         "stats": store.stats(),
     }

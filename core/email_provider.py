@@ -24,7 +24,7 @@ from core.stop_control import check_stop_requested as _check_stop_requested
 
 logger = logging.getLogger(__name__)
 
-EMAIL_SOURCE_TYPES = ("outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail")
+EMAIL_SOURCE_TYPES = ("outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail", "mailcode")
 _VALID_SOURCES = EMAIL_SOURCE_TYPES
 _EMAIL_SOURCE_OVERRIDE: ContextVar[str | None] = ContextVar("email_source_override", default=None)
 
@@ -115,6 +115,9 @@ def _pick_from_source(source: str, exclude_emails: set[str] | None = None) -> st
         return pick_account().email
     if source == "remail":
         from core.remail_client import pick_account
+        return pick_account().email
+    if source == "mailcode":
+        from core.mailcode_client import pick_account
         return pick_account().email
     from core.outlook_client import pick_account
     return pick_account(exclude_emails=exclude_emails).email
@@ -216,6 +219,9 @@ def resolve_email_source(email: str) -> str:
     from core.remail_client import get_account_context as get_remail_context
     if get_remail_context(email):
         return "remail"
+    from core.mailcode_client import get_account_context as get_mailcode_context
+    if get_mailcode_context(email):
+        return "mailcode"
 
     from core import db
     if db.get_imap_email_by_email(email):
@@ -360,6 +366,9 @@ def wait_for_otp(
     if source == "remail":
         from core.remail_client import fetch_latest_otp
         return _fetch(fetch_latest_otp)
+    if source == "mailcode":
+        from core.mailcode_client import fetch_latest_otp
+        return _fetch(fetch_latest_otp)
     from core.outlook_client import fetch_latest_otp
     return _fetch(fetch_latest_otp)
 
@@ -406,6 +415,9 @@ def release_email(email: str, status: str = "available", note: str | None = None
         release_account(email, status=status, note=note)
     elif source == "remail":
         from core.remail_client import release_account
+        release_account(email, status=status, note=note)
+    elif source == "mailcode":
+        from core.mailcode_client import release_account
         release_account(email, status=status, note=note)
     else:
         from core.outlook_client import release_account

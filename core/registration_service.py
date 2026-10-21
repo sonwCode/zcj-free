@@ -766,7 +766,12 @@ def get_retry_info(job: dict) -> dict:
 
     account = _account_for_job(job)
     if account and job.get("account_id") is not None and status in ("failed", "stopped"):
-        info["display_status"] = "success" if (account.get("codex_status") or "") == "success" else "partial_success"
+        # 主动跳过 Codex（codex_status=skipped）不是失败，展示层同样判成功。
+        info["display_status"] = (
+            "success"
+            if (account.get("codex_status") or "") in {"success", "skipped"}
+            else "partial_success"
+        )
 
     stored_retryable = job.get("retryable")
     if isinstance(stored_retryable, str):

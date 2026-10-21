@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>号码池 | GPT Registrator</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #f8f9fa; --surface: #fff; --soft: #f7f9fc; --text: #172033;
+      --muted: #667085; --line: #d9e2ec; --blue: #2563eb; --green: #16803c;
+      --red: #c2413a; --amber: #b7791f; --sidebar-width: 232px;
+      --sidebar-accent: #3b66f5; --sidebar-accent-soft: #eef2ff;
+    }
+    html { max-width: 100%; overflow-x: clip; }
+    body {
+      margin: 0; max-width: 100%; overflow-x: clip; padding-left: var(--sidebar-width);
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 14px; line-height: 1.45;
+    }
+    h1, h2, h3, p { margin: 0; }
+    button, input, select { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #8bb4ff; outline-offset: 2px; }
+    .app-sidebar {
+      position: fixed; inset: 0 auto 0 0; z-index: 20; width: var(--sidebar-width);
+      display: flex; flex-direction: column; background: #fff; border-right: 1px solid #eef0f4;
+      box-shadow: 1px 0 0 rgba(15, 23, 42, .02);
+    }
+    .sidebar-brand { height: 64px; flex: 0 0 64px; display: flex; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid #f1f5f9; }
+    .sidebar-brand-icon { width: 28px; height: 30px; flex: 0 0 28px; }
+    .sidebar-brand-title { overflow: hidden; color: #0f172a; font-size: 15px; font-weight: 800; white-space: nowrap; text-overflow: ellipsis; }
+    .sidebar-nav { flex: 1; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 2px; padding: 12px 10px 20px; }
+    .sidebar-item {
+      min-height: 40px; display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+      border: 0; border-radius: 10px; color: #475569; background: transparent; text-decoration: none;
+      font-size: 14px; font-weight: 600; text-align: left; cursor: pointer;
+    }
+    .sidebar-item:hover { color: #0f172a; background: #f8fafc; }
+    .sidebar-item.active { color: var(--sidebar-accent); background: var(--sidebar-accent-soft); }
+    .sidebar-item-icon { width: 18px; height: 18px; flex: 0 0 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .sidebar-item-label { min-width: 0; line-height: 1.2; }
+    .sidebar-footer { display: flex; flex-direction: column; gap: 2px; padding: 10px; border-top: 1px solid #f1f5f9; }
+    .sidebar-footer a, .sidebar-footer button {
+      min-height: 38px; display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+      border: 0; border-radius: 10px; color: #64748b; background: transparent; text-decoration: none;
+      font-size: 13px; font-weight: 600; text-align: left; cursor: pointer;
+    }
+    .sidebar-footer a:hover, .sidebar-footer button:hover { color: var(--sidebar-accent); background: var(--sidebar-accent-soft); }
+    .sidebar-footer-icon { width: 16px; height: 16px; flex: 0 0 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .logout-form { margin: 0; }
+    .logout-form button { width: 100%; }
+    main { width: calc(100% - 48px); max-width: none; min-width: 0; margin: 18px 24px 44px; display: grid; gap: 12px; }
+    .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    h1 { color: #303133; font-size: 22px; font-weight: 600; line-height: 1.3; }
+    .page-caption { margin-top: 5px; color: #909399; font-size: 13px; line-height: 1.55; }
+    .heading-state { display: flex; align-items: center; gap: 7px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .state-dot { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #98a2b3; }
+    .state-dot.on { background: #22a06b; }
+    .state-dot.paused { background: #d99a28; }
+    .overview { display: grid; gap: 10px; }
+    .overview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .overview-head h2 { color: #303133; font-size: 15px; font-weight: 700; }
+    .overview-head p { margin-top: 3px; color: #909399; font-size: 12px; }
+    .heading-actions, .buttons { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 0 14px; border: 1px solid var(--line); border-radius: 7px; color: #344054;
+      background: #fff; font-size: 13px; font-weight: 700; white-space: nowrap; cursor: pointer;
+    }
+    .btn:hover:not(:disabled) { background: var(--soft); }
+    .btn.primary { border-color: var(--blue); color: #fff; background: var(--blue); }
+    .btn.primary:hover:not(:disabled) { border-color: #1d4ed8; background: #1d4ed8; }
+    .btn.good { border-color: #b9dfc9; color: #166534; background: #edf8f1; }
+    .btn.danger { border-color: #e7a3a0; color: #b3261e; background: #fff; }
+    .btn:disabled { color: #98a2b3; border-color: var(--line); background: #f2f4f7; cursor: not-allowed; }
+    .btn svg { width: 16px; height: 16px; flex: 0 0 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    section.card { min-width: 0; max-width: 100%; overflow: hidden; border: 1px solid #ebeef5; border-radius: 8px; background: var(--surface); box-shadow: 0 8px 22px rgba(15, 23, 42, .04); }
+    .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid #ebeef5; background: #fbfcfe; }
+    .head h2 { color: #303133; font-size: 15px; font-weight: 700; }
+    .head p { margin-top: 3px; color: #909399; font-size: 12px; line-height: 1.5; }
+    .body { padding: 16px; }
+    .notice { padding: 10px 13px; border: 1px solid #c9d8fb; border-radius: 6px; color: #1d4ed8; background: #eef4ff; font-size: 13px; line-height: 1.55; }
+    .notice.warn { border-color: #f3d99b; color: #92600a; background: #fff7e6; }
+    .notice.err { border-color: #f3c7c4; color: #b3261e; background: #fff0ef; }
+    .notice[hidden] { display: none; }
+    .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+    .stat { min-width: 0; min-height: 76px; padding: 12px 14px; border: 1px solid #ebeef5; border-radius: 7px; background: #fff; }
+    .stat-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #909399; font-size: 12px; }
+    .stat strong { display: block; margin-top: 9px; overflow: hidden; color: #303133; font-size: 20px; font-weight: 600; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+    .summary-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 9px 0; border-top: 1px solid #ebeef5; border-bottom: 1px solid #ebeef5; }
+    .summary-item { min-width: 0; padding: 2px 12px; border-right: 1px solid #edf1f5; }
+    .summary-item:last-child { border-right: 0; }
+    .summary-label { display: block; color: #909399; font-size: 11px; }
+    .summary-value { display: block; margin-top: 3px; overflow-wrap: anywhere; color: #475467; font-size: 13px; font-weight: 700; }
+    .section-tools { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+    .search { position: relative; width: min(320px, 100%); }
+    .search svg { position: absolute; left: 10px; top: 11px; width: 16px; height: 16px; fill: none; stroke: #98a2b3; stroke-width: 1.8; stroke-linecap: round; }
+    .search input, .compact-select { min-height: 38px; width: 100%; margin: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; color: #344054; background: #fff; font-size: 13px; }
+    .search input { padding-left: 34px; }
+    .compact-select { width: auto; min-width: 125px; }
+    .switch-wrap { position: relative; display: inline-flex; align-items: center; gap: 8px; color: #475467; font-size: 13px; font-weight: 700; white-space: nowrap; cursor: pointer; }
+    .switch-wrap input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    .switch { position: relative; width: 38px; height: 22px; border-radius: 999px; background: #c4cbd5; transition: background .15s ease; }
+    .switch::after { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; content: ""; transition: transform .15s ease; }
+    .switch-wrap input:checked + .switch { background: #3b7cff; }
+    .switch-wrap input:checked + .switch::after { transform: translateX(16px); }
+    .switch-wrap input:focus-visible + .switch { outline: 2px solid #8bb4ff; outline-offset: 2px; }
+    .table-wrap { width: 100%; overflow: auto; border-top: 1px solid #edf1f5; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; text-align: left; }
+    th, td { height: 44px; padding: 9px 12px; overflow: hidden; border-bottom: 1px solid #edf1f5; color: #475467; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+    th { position: sticky; top: 0; z-index: 1; height: 38px; color: #667085; background: #fbfcfe; font-size: 12px; font-weight: 600; }
+    tbody tr:hover td { background: #fbfdff; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .col-id { width: 72px; }
+    .col-email { width: 30%; }
+    .col-plan { width: 100px; }
+    .col-status { width: 140px; }
+    .col-time { width: 190px; }
+    .email-cell { color: #303133; font-weight: 700; }
+    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .pill { display: inline-flex; align-items: center; justify-content: center; min-height: 23px; padding: 2px 9px; border-radius: 999px; color: #475467; background: #f2f4f7; font-size: 11px; font-weight: 700; }
+    .pill.success { color: #166534; background: #e9f7ef; }
+    .pill.pending { color: #9a6700; background: #fff7d6; }
+    .pill.error { color: #b3261e; background: #fff0ef; }
+    .empty, .loading, .error-line { padding: 22px 14px; color: #909399; font-size: 13px; text-align: center; }
+    .error-line { color: var(--red); }
+    .table-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0 0; color: #909399; font-size: 12px; }
+    .pager { display: inline-flex; align-items: center; gap: 7px; }
+    .pager button { min-width: 32px; min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; color: #344054; background: #fff; cursor: pointer; }
+    .pager button:disabled { color: #98a2b3; background: #f2f4f7; cursor: not-allowed; }
+    .last-updated { color: #909399; font-size: 12px; white-space: nowrap; }
+    .events-list { display: grid; }
+    .event-row { display: grid; grid-template-columns: 180px 80px 125px minmax(0, 1fr); gap: 12px; padding: 10px 12px; border-bottom: 1px solid #edf1f5; color: #475467; font-size: 12px; }
+    .event-row:last-child { border-bottom: 0; }
+    .event-detail { min-width: 0; overflow-wrap: anywhere; color: #667085; }
+    dialog { width: min(480px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--line); border-radius: 8px; color: var(--text); box-shadow: 0 20px 60px rgba(16, 24, 40, .2); }
+    dialog::backdrop { background: rgba(16, 24, 40, .38); }
+    .dialog-head { padding: 18px 20px 0; }
+    .dialog-head h2 { color: #303133; font-size: 16px; }
+    .dialog-body { padding: 12px 20px 18px; color: #475467; font-size: 13px; line-height: 1.6; }
+    .dialog-body ul { margin: 10px 0 0; padding-left: 18px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px 18px; border-top: 1px solid #edf1f5; }
+    @media (max-width: 1100px) { .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (max-width: 900px) {
+      :root { --sidebar-width: 76px; }
+      .sidebar-brand { justify-content: center; padding: 0; }
+      .sidebar-brand-title, .sidebar-item-label, .sidebar-footer span { display: none; }
+      .sidebar-item, .sidebar-footer a, .sidebar-footer button { justify-content: center; padding-left: 8px; padding-right: 8px; }
+      .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary-item:nth-child(2) { border-right: 0; }
+      .summary-item:nth-child(-n+2) { border-bottom: 1px solid #edf1f5; }
+    }
+    @media (max-width: 700px) {
+      body { padding-left: 0; }
+      .app-sidebar { position: sticky; inset: auto; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .sidebar-brand { height: 48px; flex-basis: 48px; justify-content: flex-start; padding: 0 14px; }
+      .sidebar-brand-icon { width: 23px; height: 25px; flex-basis: 23px; }
+      .sidebar-brand-title { display: block; }
+      .sidebar-nav { flex: 0 0 auto; flex-direction: row; gap: 4px; overflow-x: auto; overflow-y: hidden; padding: 6px 8px; }
+      .sidebar-item { min-width: 42px; min-height: 36px; justify-content: center; padding: 7px 10px; white-space: nowrap; }
+      .sidebar-item-label { display: block; font-size: 12px; }
+      .sidebar-footer { display: none; }
+      main { width: calc(100% - 28px); margin: 16px 14px 32px; }
+      .page-heading { flex-direction: column; gap: 12px; }
+      .heading-actions { width: 100%; justify-content: flex-start; }
+      .head { align-items: flex-start; flex-direction: column; }
+      .head .section-tools { width: 100%; justify-content: flex-start; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .stat { min-height: 70px; padding: 10px; }
+      .stat strong { font-size: 18px; }
+      .body { padding: 12px; }
+      .search { width: 100%; }
+      .section-tools { justify-content: flex-start; }
+      .event-row { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; }
+      .event-detail { grid-column: 1 / -1; }
+      .table-footer { align-items: flex-start; flex-wrap: wrap; }
+      .last-updated { white-space: normal; }
+    }
+    body.embed-mode { padding-left: 0; }
+    body.embed-mode .app-sidebar { display: none; }
+    body.embed-mode main { width: 100%; margin: 0; padding: 16px 18px 24px; }
+    @media (max-width: 700px) {
+      body.embed-mode main { width: 100%; margin: 0; padding: 12px 10px 18px; }
+    }
+  </style>
+</head>
+<body class="{{ 'embed-mode' if request.args.get('embed') == '1' else '' }}">
+<aside class="app-sidebar" aria-label="主导航">
+  <div class="sidebar-brand">
+    <svg class="sidebar-brand-icon" viewBox="0 0 44 48" fill="none" aria-hidden="true"><defs><linearGradient id="sidebarLogoGrad" x1="10" y1="4" x2="34" y2="44" gradientUnits="userSpaceOnUse"><stop stop-color="#3b66f5"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs><path d="M22 3L38.928 12.75V35.25L22 45L5.072 35.25V12.75L22 3Z" fill="url(#sidebarLogoGrad)"/><path d="M22 13L30.928 18.25V29.75L22 35L13.072 29.75V18.25L22 13Z" fill="white" fill-opacity=".92"/></svg>
+    <span class="sidebar-brand-title">GPT Registrator</span>
+  </div>
+  <nav class="sidebar-nav">
+    <a class="sidebar-item" href="/" data-main-tab="register"><svg class="sidebar-item-icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span class="sidebar-item-label">注册</span></a>
+    <a class="sidebar-item" href="/" data-main-tab="accounts"><svg class="sidebar-item-icon" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.2a4 4 0 0 1 0 7.6"/></svg><span class="sidebar-item-label">账号</span></a>
+    <a class="sidebar-item" href="/" data-main-tab="codex"><svg class="sidebar-item-icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span class="sidebar-item-label">Codex 授权</span></a>
+    <a class="sidebar-item" href="/" data-main-tab="outlook"><svg class="sidebar-item-icon" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m3 6 9 7 9-7"/></svg><span class="sidebar-item-label">邮箱池</span></a>
+    <a class="sidebar-item active" href="/sms-pool" aria-current="page"><svg class="sidebar-item-icon" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg><span class="sidebar-item-label">号码池</span></a>
+    <a class="sidebar-item" href="/" data-main-tab="config"><svg class="sidebar-item-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5v.1a2 2 0 1 1-4 0V19a1.7 1.7 0 0 1-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1A2 2 0 1 1 7 3.5l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1-1.5 1.7 1.7 0 0 0 1.8-.3l-.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3-1.8 1.7 1.7 0 0 0-1.5 1h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1 1.7 1.7 0 0 0 .2 1.6z"/></svg><span class="sidebar-item-label">配置</span></a>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="/?ui=legacy"><svg class="sidebar-footer-icon" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg><span>切换老 UI</span></a>
+    <form class="logout-form" method="post" action="/logout"><button type="submit"><svg class="sidebar-footer-icon" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg><span>退出登录</span></button></form>
+  </div>
+</aside>
+
+<main>
+  <header class="page-heading">
+    <div>
+      <h1>低价号码池</h1>
+      <p class="page-caption">自动轮询低价号码；号码到手后，先测活账号，再并发执行 Codex 补跑。失效账号仅从候选中剔除。</p>
+      <div class="heading-state" aria-live="polite"><span class="state-dot" id="stateDot"></span><span id="stateText">读取状态中</span><span aria-hidden="true">·</span><span id="updatedAt">尚未刷新</span></div>
+    </div>
+    <div class="heading-actions">
+      <button class="btn" id="btnRefresh" type="button"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.5 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 12.5-3"/></svg><span>刷新</span></button>
+      <button class="btn" id="btnPause" type="button" disabled><svg viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></svg><span>暂停采购</span></button>
+      <button class="btn primary" id="btnToggle" type="button" disabled><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>启用号码池</span></button>
+    </div>
+  </header>
+
+  <div class="notice" id="stateNotice" role="status" aria-live="polite"></div>
+
+  <section class="overview" aria-labelledby="overviewTitle">
+    <div class="overview-head"><div><h2 id="overviewTitle">运行概览</h2><p>通过测活后自动分配号码；有号即并发执行补跑。</p></div><span class="last-updated" id="statusUpdated"></span></div>
+    <div class="stats">
+      <div class="stat"><div class="stat-top"><span>可补跑候选</span></div><strong id="metricEligible">—</strong></div>
+      <div class="stat"><div class="stat-top"><span>测活正常</span></div><strong id="metricLiveReady">—</strong></div>
+      <div class="stat"><div class="stat-top"><span>待测活</span></div><strong id="metricLiveWaiting">—</strong></div>
+      <div class="stat"><div class="stat-top"><span>测活中</span></div><strong id="metricLiveChecking">—</strong></div>
+      <div class="stat"><div class="stat-top"><span>号码待分配</span></div><strong id="metricUnclaimed">—</strong></div>
+      <div class="stat"><div class="stat-top"><span>并发任务</span></div><strong id="metricRunning">—</strong></div>
+    </div>
+    <div class="summary-strip">
+      <div class="summary-item"><span class="summary-label">启用平台</span><strong class="summary-value" id="cfgProviders">—</strong></div>
+      <div class="summary-item"><span class="summary-label">人民币单号上限</span><strong class="summary-value" id="cfgPrice">—</strong></div>
+      <div class="summary-item"><span class="summary-label">轮询间隔 / 并发</span><strong class="summary-value" id="cfgCapacity">—</strong></div>
+      <div class="summary-item"><span class="summary-label">已失效并排除</span><strong class="summary-value" id="metricDeactivated">—</strong></div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="accountsTitle">
+    <div class="head">
+      <div><h2 id="accountsTitle">自动补跑账号</h2><p>free、未接码且 Codex 未成功的账号；测活失败的网络异常会冷却后重试。</p></div>
+      <div class="section-tools">
+        <label class="switch-wrap" for="liveCheckToggle"><input id="liveCheckToggle" type="checkbox"><span class="switch" aria-hidden="true"></span><span id="liveCheckToggleLabel">定时测活</span></label>
+        <select class="compact-select" id="liveCheckInterval" aria-label="定时测活间隔">
+          <option value="1800">30 分钟</option><option value="3600">1 小时</option><option value="21600">6 小时</option><option value="43200">12 小时</option><option value="86400">24 小时</option>
+        </select>
+        <button class="btn" id="btnLiveCheck" type="button"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.5 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 12.5-3"/></svg><span>立即测活</span></button>
+      </div>
+    </div>
+    <div class="body">
+      <div class="section-tools" style="justify-content:space-between;margin-bottom:10px">
+        <label class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="accountSearch" type="search" placeholder="搜索邮箱或账号 ID" autocomplete="off" aria-label="搜索候选账号"></label>
+        <div class="section-tools"><span class="last-updated" id="eligibleCount">—</span><select class="compact-select" id="pageSize" aria-label="每页数量"><option value="10">每页 10 条</option><option value="20" selected>每页 20 条</option><option value="50">每页 50 条</option></select></div>
+      </div>
+      <div class="table-wrap" id="eligibleBox"><div class="loading">正在加载账号…</div></div>
+      <div class="table-footer"><span id="eligibleSummary">—</span><div class="pager"><button id="pagePrev" type="button" aria-label="上一页" disabled>‹</button><span id="pageInfo">—</span><button id="pageNext" type="button" aria-label="下一页" disabled>›</button></div></div>
+      <div id="liveCheckFeedback" class="last-updated" role="status" aria-live="polite" style="margin-top:8px"></div>
+      <details id="reviewDetails" hidden style="margin-top:12px"><summary id="reviewSummary" style="padding:10px 0;color:#667085;font-weight:700;cursor:pointer">其他账号</summary><div class="table-wrap" id="reviewBox"></div></details>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="reservationsTitle">
+    <div class="head"><div><h2 id="reservationsTitle">号码记录</h2><p>号码脱敏显示；已锁定号码会自动分配给通过测活的账号。</p></div><span class="last-updated">最近 100 条</span></div>
+    <div class="table-wrap" id="reservationsBox"><div class="loading">正在加载号码记录…</div></div>
+  </section>
+
+  <section class="card" aria-labelledby="logsTitle">
+    <div class="head"><div><h2 id="logsTitle">运行日志</h2><p>每轮采购/分配记录在 sms-pool-worker.log；每个补跑任务单独一份文件。</p></div><span class="last-updated" id="logUpdated"></span></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 10px;">
+      <select id="logSelect" style="flex:1 1 320px;min-height:34px;padding:6px 8px;border:1px solid #dcdfe6;border-radius:6px;background:#fff;"></select>
+      <button class="btn" id="btnLogRefresh" type="button">刷新日志</button>
+      <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:#606266;"><input type="checkbox" id="logAuto" checked> 自动刷新</label>
+    </div>
+    <pre id="logView" style="margin:0;padding:12px;background:#0f172a;color:#e2e8f0;border-radius:8px;max-height:420px;overflow:auto;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-all;">正在加载…</pre>
+  </section>
+
+  <section class="card" aria-labelledby="eventsTitle">
+    <div class="head"><div><h2 id="eventsTitle">运行事件</h2><p>号码采购、分配、短信验证和终态记录。</p></div><span class="last-updated" id="eventCount"></span></div>
+    <div class="events-list" id="eventsBox"><div class="loading">正在加载事件…</div></div>
+  </section>
+</main>
+
+<dialog id="enableDialog" aria-labelledby="enableDialogTitle">
+  <div class="dialog-head"><h2 id="enableDialogTitle">启用低价号码池</h2></div>
+  <div class="dialog-body">启用后会开始轮询并按当前人民币单号上限采购号码。号码到手后，系统会先测活候选账号；测活正常且仍符合条件时自动启动 Codex 补跑。采购会产生实际费用。<ul><li>平台：<strong id="dialogProviders">—</strong></li><li>人民币单号上限：<strong id="dialogPrice">—</strong></li><li>本轮最多采购：<strong id="dialogCapacity">—</strong></li></ul></div>
+  <div class="dialog-actions"><button class="btn" id="btnEnableCancel" type="button">取消</button><button class="btn primary" id="btnEnableConfirm" type="button">启用并开始轮询</button></div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value == null ? "" : value).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const statusNames = {reserved:"待分配",claimed:"已领取",running:"运行中",waiting_sms:"等待短信",completed:"已完成",released:"已释放",expired:"已过期",failed:"失败",orphaned:"待核对"};
+const state = {status:null,eligible:[],pending:[],reservations:[],page:1,pageSize:20,busy:false};
+
+function notice(message, tone="") { const el=$("stateNotice"); el.className="notice"+(tone?" "+tone:""); el.textContent=message; el.hidden=!message; }
+function money(value) { if(value==null||value==="") return "—"; const n=Number(value); return Number.isFinite(n)?"¥"+n.toFixed(2):"¥"+String(value); }
+function pill(label,tone="") { return '<span class="pill '+tone+'">'+esc(label||"—")+'</span>'; }
+function tag(status) { const raw=String(status||""); const tone=raw==="completed"?"success":["reserved","claimed","running","waiting_sms"].includes(raw)?"pending":["failed","orphaned"].includes(raw)?"error":""; return pill(statusNames[raw]||raw||"—",tone); }
+async function requestJson(url,options={}) { const response=await fetch(url,{credentials:"same-origin",...options}); const data=await response.json().catch(()=>({})); if(!response.ok||data.ok===false) throw new Error(data.error||("HTTP "+response.status)); return data; }
+function fmtTime(value) { if(!value) return "—"; const date=new Date(value); return Number.isNaN(date.getTime())?String(value):date.toLocaleString("zh-CN",{hour12:false}); }
+function setMainTab(tab) { localStorage.setItem("gpt_console_active_tab",tab); }
+
+async function loadStatus() {
+  try {
+    const data=await requestJson("/api/sms-pool/status"); state.status=data.status||{}; const s=state.status; const cap=s.capacity||{}; const stats=s.stats||{}; const live=s.live_check||{}; const summary=cap.live_summary||{}; const providers=s.configured_providers||[]; const ready=providers.length>0&&Boolean(s.max_price_cny);
+    $("stateDot").className="state-dot"+(s.enabled?(s.paused?" paused":" on"):"");
+    $("stateText").textContent=s.enabled?(s.paused?"已启用 · 暂停新采购":"已启用 · 自动轮询与补跑"):"已关闭 · 不会轮询或采购";
+    $("updatedAt").textContent="刷新于 "+new Date().toLocaleTimeString("zh-CN",{hour12:false});
+    $("statusUpdated").textContent="累计花费 "+money(stats.spent_cny_total||0);
+    $("metricEligible").textContent=cap.eligible??0; $("metricLiveReady").textContent=summary.ready??0; $("metricLiveWaiting").textContent=summary.waiting??0; $("metricLiveChecking").textContent=summary.checking??0;
+    $("metricUnclaimed").textContent=stats.unclaimed??0; $("metricRunning").textContent=(stats.running??0)+" / "+(s.workers||2);
+    $("metricDeactivated").textContent=summary.deactivated??0;
+    $("cfgProviders").textContent=providers.length?providers.join(" · "):"未配置可用平台";
+    $("cfgPrice").textContent=s.max_price_cny?money(s.max_price_cny):"未设置 · 禁止采购";
+    $("cfgCapacity").textContent=(s.poll_interval||120)+" 秒 · "+(s.workers||2)+" 并发";
+    $("btnPause").disabled=!s.enabled; $("btnPause").innerHTML=s.paused?'<svg viewBox="0 0 24 24"><path d="m5 3 14 9-14 9z"/></svg><span>恢复采购</span>':'<svg viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></svg><span>暂停采购</span>';
+    $("btnToggle").disabled=!s.enabled&&!ready; $("btnToggle").classList.toggle("danger",Boolean(s.enabled)); $("btnToggle").classList.toggle("primary",!s.enabled);
+    $("btnToggle").innerHTML=s.enabled?'<svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg><span>关闭号码池</span>':'<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>启用号码池</span>';
+    $("liveCheckToggle").checked=Boolean(live.enabled); $("liveCheckToggleLabel").textContent=live.enabled?"定时测活已开启":"定时测活";
+    const interval=$("liveCheckInterval"); const supported=["1800","3600","21600","43200","86400"]; interval.value=supported.includes(String(live.interval))?String(live.interval):"21600"; interval.disabled=state.busy;
+    if(!ready) notice("号码池缺少可用平台/API Key 或人民币单号上限，当前不会采购。请先在配置页补齐配置。","warn");
+    else if(!s.enabled) notice("号码池当前关闭。启用后将自动抢号、筛查账号活性，并在号码和账号均就绪时自动补跑。");
+    else if(s.paused) notice("号码池已暂停新采购；已锁定号码仍会自动分配，已开始的补跑不受影响。","warn");
+    else notice("号码池正在运行：新号码将自动分配给通过测活的账号；失效账号会从候选列表排除，账号记录保留。");
+    if(!s.enabled&&ready){$("dialogProviders").textContent=providers.join(" · ");$("dialogPrice").textContent=money(s.max_price_cny);$("dialogCapacity").textContent=String(cap.capacity||0)+" 个";}
+    renderEvents(data.events||[]);
+  } catch(error) { notice("读取号码池状态失败："+error.message,"err"); }
+}
+
+async function loadEligible() {
+  $("eligibleBox").innerHTML='<div class="loading">正在加载账号…</div>';
+  try { const data=await requestJson("/api/sms-pool/eligible"); state.eligible=data.eligible||[]; state.pending=data.pending_review||[]; state.liveSummary=data.live_summary||{}; renderEligible(); renderPending(); }
+  catch(error){$("eligibleBox").innerHTML='<div class="error-line">账号列表读取失败：'+esc(error.message)+'</div>';$("eligibleCount").textContent="读取失败";}
+}
+function filteredAccounts(){const q=$("accountSearch").value.trim().toLocaleLowerCase();return q?state.eligible.filter(x=>String(x.email||"").toLocaleLowerCase().includes(q)||String(x.id||"").includes(q)):state.eligible;}
+function livePill(item){const s=String(item.live_check_status||"").toLowerCase();if(s==="live"&&item.live_check_ok)return pill("正常","success");if(s==="queued"||s==="running")return pill("测活中","pending");if(s==="failed")return pill("待重试","error");return pill("待测活","pending");}
+function renderEligible(){
+  const list=filteredAccounts(); state.pageSize=Number($("pageSize").value)||20; const pages=Math.max(1,Math.ceil(list.length/state.pageSize)); state.page=Math.min(state.page,pages); const start=(state.page-1)*state.pageSize; const pageItems=list.slice(start,start+state.pageSize);
+  $("eligibleCount").textContent=list.length+" 个候选"; $("eligibleSummary").textContent=list.length?"显示 "+(start+1)+"–"+Math.min(start+state.pageSize,list.length)+" 条，共 "+list.length+" 条":"暂无候选账号"; $("pageInfo").textContent=state.page+" / "+pages; $("pagePrev").disabled=state.page<=1; $("pageNext").disabled=state.page>=pages;
+  if(!pageItems.length){$("eligibleBox").innerHTML='<div class="empty">'+(state.eligible.length?"没有匹配账号":"暂无符合条件的 free 未接码账号")+'</div>';return;}
+  const rows=pageItems.map(item=>'<tr><td class="mono">#'+esc(item.id)+'</td><td class="email-cell">'+esc(item.email||"—")+'</td><td>'+esc(item.plan_type||"free")+'</td><td>'+pill(item.codex_status||"未开始",item.codex_status==="success"?"success":"")+'</td><td>'+livePill(item)+'</td><td class="mono">'+esc(fmtTime(item.live_checked_at))+'</td></tr>').join("");
+  $("eligibleBox").innerHTML='<table><thead><tr><th class="col-id">ID</th><th class="col-email">邮箱</th><th class="col-plan">套餐</th><th class="col-status">Codex</th><th class="col-status">账号测活</th><th class="col-time">最近测活</th></tr></thead><tbody>'+rows+'</tbody></table>';
+}
+function renderPending(){const detail=$("reviewDetails");if(!state.pending.length){detail.hidden=true;return;}detail.hidden=false;$("reviewSummary").textContent="待核验账号 · "+state.pending.length;$("reviewBox").innerHTML='<table><thead><tr><th class="col-id">ID</th><th class="col-email">邮箱</th><th>原因</th></tr></thead><tbody>'+state.pending.map(x=>'<tr><td class="mono">#'+esc(x.id||"—")+'</td><td class="email-cell">'+esc(x.email||"—")+'</td><td>'+esc(x.reason||"需核验")+'</td></tr>').join("")+'</tbody></table>';}
+async function loadReservations(){
+  $("reservationsBox").innerHTML='<div class="loading">正在加载号码记录…</div>';
+  try{const data=await requestJson("/api/sms-pool/reservations");state.reservations=data.items||[];renderReservations();}
+  catch(error){$("reservationsBox").innerHTML='<div class="error-line">号码记录读取失败：'+esc(error.message)+'</div>';}
+}
+function renderReservations(){
+  const items=state.reservations;if(!items.length){$("reservationsBox").innerHTML='<div class="empty">暂无号码记录</div>';return;}
+  const rows=items.map(x=>'<tr><td class="mono">#'+esc(x.id)+'</td><td>'+tag(x.status)+'</td><td>'+esc(x.provider||"—")+'</td><td class="mono">'+esc(x.phone_mask||"—")+'</td><td>'+esc(x.country||"—")+'</td><td class="mono">'+esc(x.account_id||"—")+'</td><td>'+esc(x.price_cny?money(x.price_cny):"—")+'</td><td>'+esc(x.failure_code||"—")+'</td><td class="mono">'+esc(fmtTime(x.expires_at))+'</td></tr>').join("");
+  $("reservationsBox").innerHTML='<table><thead><tr><th class="col-id">ID</th><th class="col-status">状态</th><th>平台</th><th>号码</th><th>地区</th><th>账号 ID</th><th>费用</th><th>失败分类</th><th class="col-time">有效期至</th></tr></thead><tbody>'+rows+'</tbody></table>';
+}
+function renderEvents(events){$("eventCount").textContent=events.length?"最近 "+events.length+" 条":"";if(!events.length){$("eventsBox").innerHTML='<div class="empty">暂无运行事件</div>';return;}$("eventsBox").innerHTML=events.map(x=>'<div class="event-row"><span class="mono">'+esc(fmtTime(x.created_at))+'</span><span class="mono">#'+esc(x.reservation_id||"—")+'</span><span>'+tag(x.event)+'</span><span class="event-detail">'+esc(x.detail||"—")+'</span></div>').join("");}
+
+async function saveConfig(key,value){state.busy=true;$("btnToggle").disabled=true;$("btnPause").disabled=true;$("liveCheckToggle").disabled=true;$("liveCheckInterval").disabled=true;try{const result=await requestJson("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({updates:{[key]:value}})});notice(result.note||"配置已更新。");await loadStatus();}catch(error){notice("保存配置失败："+error.message,"err");}finally{state.busy=false;$("liveCheckToggle").disabled=false;$("liveCheckInterval").disabled=false;if(state.status){$("btnToggle").disabled=!state.status.enabled&&!((state.status.configured_providers||[]).length&&state.status.max_price_cny);$("btnPause").disabled=!state.status.enabled;}}}
+async function triggerLiveCheck(){const button=$("btnLiveCheck");button.disabled=true;$("liveCheckFeedback").textContent="正在加入后台查活队列…";try{const result=await requestJson("/api/sms-pool/live-check",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({limit:100})});$("liveCheckFeedback").textContent="已提交 "+(result.queued||0)+" 个查活任务；失效账号会自动从候选中排除。";await loadEligible();}catch(error){$("liveCheckFeedback").textContent="提交查活失败："+error.message;$("liveCheckFeedback").style.color="#b3261e";}finally{button.disabled=false;setTimeout(()=>{$("liveCheckFeedback").style.color="";},5000);}}
+async function refreshAll(){if(state.busy)return;await Promise.all([loadStatus(),loadEligible(),loadReservations()]);}
+
+function reportEmbeddedHeight(){
+  if(window.parent===window)return;
+  const height=Math.max(document.documentElement.scrollHeight,document.body.scrollHeight);
+  window.parent.postMessage({type:"sms-pool-embed-height",height},window.location.origin);
+}
+if(window.parent!==window){
+  if(typeof ResizeObserver==="function"){
+    const embedResizeObserver=new ResizeObserver(()=>requestAnimationFrame(reportEmbeddedHeight));
+    embedResizeObserver.observe(document.documentElement);
+    embedResizeObserver.observe(document.body);
+  }
+  window.addEventListener("load",reportEmbeddedHeight);
+  window.addEventListener("resize",reportEmbeddedHeight);
+  setTimeout(reportEmbeddedHeight,0);
+}
+
+$("btnRefresh").addEventListener("click",refreshAll);
+$("btnPause").addEventListener("click",()=>{if(state.status)saveConfig("SMS_POOL_PAUSED",!state.status.paused);});
+$("btnToggle").addEventListener("click",()=>{if(!state.status)return;if(state.status.enabled){if(window.confirm("关闭后将停止后续轮询和采购；已经锁定号码的补跑会继续执行。确定关闭吗？"))saveConfig("SMS_POOL_ENABLED",false);return;}$("enableDialog").showModal();});
+$("btnEnableCancel").addEventListener("click",()=>$("enableDialog").close());$("btnEnableConfirm").addEventListener("click",()=>{$("enableDialog").close();saveConfig("SMS_POOL_ENABLED",true);});
+$("liveCheckToggle").addEventListener("change",event=>saveConfig("SMS_POOL_LIVE_CHECK_ENABLED",event.target.checked));
+$("liveCheckInterval").addEventListener("change",event=>saveConfig("SMS_POOL_LIVE_CHECK_INTERVAL",Number(event.target.value)));
+$("btnLiveCheck").addEventListener("click",triggerLiveCheck);
+$("accountSearch").addEventListener("input",()=>{state.page=1;renderEligible();});$("pageSize").addEventListener("change",()=>{state.page=1;renderEligible();});
+$("pagePrev").addEventListener("click",()=>{state.page=Math.max(1,state.page-1);renderEligible();});$("pageNext").addEventListener("click",()=>{state.page+=1;renderEligible();});
+document.querySelectorAll("[data-main-tab]").forEach(link=>link.addEventListener("click",()=>setMainTab(link.dataset.mainTab)));
+async function loadLogList(){
+  try{
+    const data=await requestJson("/api/sms-pool/logs?limit=50");
+    const sel=$("logSelect");
+    const current=sel.value;
+    const items=data.items||[];
+    sel.innerHTML=items.map(x=>'<option value="'+esc(x.name)+'">'+esc(x.name)+' · '+Math.max(1,Math.round((x.size||0)/1024))+'KB</option>').join("");
+    if(current && items.some(x=>x.name===current)) sel.value=current;
+    else if(items.length) sel.selectedIndex=0;
+  }catch(error){ $("logView").textContent="日志列表读取失败："+error.message; }
+}
+async function loadLogText(){
+  const name=$("logSelect").value;
+  if(!name) return;
+  try{
+    const data=await requestJson("/api/sms-pool/log?name="+encodeURIComponent(name)+"&tail=400");
+    const view=$("logView");
+    view.textContent=data.text||"(暂无内容)";
+    view.scrollTop=view.scrollHeight;
+    $("logUpdated").textContent="更新于 "+new Date().toLocaleTimeString("zh-CN",{hour12:false});
+  }catch(error){ $("logView").textContent="日志读取失败："+error.message; }
+}
+$("btnLogRefresh").addEventListener("click",async()=>{await loadLogList();await loadLogText();});
+$("logSelect").addEventListener("change",loadLogText);
+setInterval(()=>{ if($("logAuto").checked){ loadLogList(); loadLogText(); } },10000);
+loadLogList().then(loadLogText);
+
+refreshAll();setInterval(loadStatus,15000);setInterval(loadReservations,30000);setInterval(loadEligible,60000);
+</script>
+</body>
+</html>

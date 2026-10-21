@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import socket
 import threading
 import time
@@ -26,6 +27,7 @@ from typing import Any
 from core import db
 from core import sms_pool_service as service
 from core import sms_pool_store as store
+from core import sms_pool_log as pool_log
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ _THREAD: threading.Thread | None = None
 _THREAD_LOCK = threading.RLock()
 _ACTIVE_TASKS: dict[int, threading.Thread] = {}
 _ACTIVE_LOCK = threading.RLock()
+_ACCOUNT_RANDOM = random.SystemRandom()
 
 
 def _utcnow() -> str:
@@ -166,9 +169,20 @@ def run_once() -> dict:
     """执行一轮：对账 → 回收 → 采购 → 并发分配。"""
     cfg = service._pool_cfg()
     configured = service.configured_pool_providers()
+    # 有足够历史样本时优先成功率更高的平台；样本不足时保留配置链顺序。
+    # 价格/库存仍由各平台自己的 acquire_one 决定，不会绕过人民币上限。
+    try:
+        from core import sms_provider
+
+        service_code = str(getattr(cfg, "SMS_POOL_SERVICE", "") or "").strip()
+        if not service_code:
+            service_code = str(getattr(sms_provider._cfg, "SMS_SERVICE", "") or "").strip()
+        configured = sms_provider._quality_rank_providers(configured, service_code)
+    except Exception:
+        logger.debug("[号码池] 质量排序不可用，保留平台配置顺序", exc_info=True)
     provider_state = {provider: {"status": "waiting", "last_result": ""} for provider in configured}
     _write_poll_state(status="polling", providers=configured, provider_state=provider_state, last_result="开始轮询")
-    live_checks = service.enqueue_scheduled_live_checks()
+    live_checks = 0
     if not bool(getattr(cfg, "SMS_POOL_ENABLED", False)):
         _write_poll_state(status="disabled", providers=configured, provider_state=provider_state, last_result="号码池未启用")
         return {"skipped": "disabled", "live_checks": live_checks}
@@ -176,7 +190,42 @@ def run_once() -> dict:
     # 1) 对账：过期释放 + orphaned
     reconcile_result = service.reconcile()
 
-    # 2) 采购（暂停时只停止新抢号，不中断等待短信的激活）
+    # 2) 代理/网络故障时暂停新查活、采购和分配。已有任务仍按原流程收口，
+    # 网络失败会把号码放回 reserved，不会调用供应商取消接口。
+    from core import sms_pool_task
+    circuit = sms_pool_task.network_circuit_state()
+    if circuit.get("open"):
+        remaining = int(circuit.get("remaining") or 0)
+        last_error = str(circuit.get("last_error") or "网络连接失败")
+        provider_state = {
+            provider: {
+                "status": "circuit_open",
+                "last_result": f"网络熔断，约 {remaining}s 后重试",
+            }
+            for provider in configured
+        }
+        logger.warning(
+            "[号码池] 网络熔断中，跳过查活、采购和分配：remaining=%ss streak=%s error=%s",
+            remaining, circuit.get("failure_streak"), last_error,
+        )
+        _write_poll_state(
+            status="paused",
+            providers=configured,
+            provider_state=provider_state,
+            last_result=f"代理/网络异常，暂停采购和分配（约 {remaining}s）",
+            error=last_error,
+        )
+        return {
+            "reconcile": reconcile_result,
+            "purchased": 0,
+            "dispatched": 0,
+            "live_checks": 0,
+            "network_circuit": circuit,
+        }
+
+    live_checks = service.enqueue_scheduled_live_checks()
+
+    # 3) 采购（暂停时只停止新抢号，不中断等待短信的激活）
     purchased = 0
     paused = bool(getattr(cfg, "SMS_POOL_PAUSED", False))
     providers = configured
@@ -188,8 +237,12 @@ def run_once() -> dict:
                 "[号码池] 采购需求：capacity=%s eligible=%s unclaimed=%s active=%s",
                 need, capacity.get("eligible"), capacity.get("unclaimed"), capacity.get("active"),
             )
-            for index in range(need):
-                provider = providers[index % len(providers)]
+            # Try each configured provider until the prewarm capacity is met.
+            # A provider with no stock must not prevent later providers from
+            # being queried in the same polling round.
+            for provider in providers:
+                if purchased >= need:
+                    break
                 provider_state[provider] = {"status": "requesting", "last_result": "请求库存/低价号码"}
                 _write_poll_state(status="polling", providers=providers, current_provider=provider, provider_state=provider_state, last_result=f"正在请求 {provider}")
                 try:
@@ -204,7 +257,7 @@ def run_once() -> dict:
                     provider_state[provider] = {"status": "no_match", "last_result": "本轮未锁定号码"}
                 _write_poll_state(status="polling", providers=providers, current_provider=provider, provider_state=provider_state, last_result=f"{provider} 本轮完成")
                 if reservation is None:
-                    break
+                    continue
                 purchased += 1
         elif int(capacity.get("eligible") or 0) <= 0:
             logger.info("[号码池] 无合格账号，跳过采购")
@@ -218,7 +271,7 @@ def run_once() -> dict:
     elif not providers:
         _write_poll_state(status="error", providers=[], provider_state={}, last_result="没有已配置平台", error="no_configured_provider")
 
-    # 3) 并发分配
+    # 4) 并发分配
     dispatched = _dispatch_available()
 
     return {
@@ -274,10 +327,30 @@ def _dispatch_available() -> int:
             request_by_account[account_id] = int(req["id"])
             ordered.append(eligible_by_id[account_id])
     selected = set(request_by_account)
+    candidates = [
+        item for account_id, item in eligible_by_id.items()
+        if account_id not in selected
+    ]
+
+    # 不再按账号 ID 固定从前往后取。没有号码池历史的账号优先；有历史的
+    # 按最近一次分配时间从旧到新轮转，同一层再用系统随机打散，避免补跑
+    # 失败后总是回到同几个低 ID free 账号。
+    recent_rank: dict[int, int] = {}
+    try:
+        for rank, reservation in enumerate(store.list_reservations(limit=500)):
+            account_id = int(reservation.get("account_id") or 0)
+            if account_id and account_id not in recent_rank:
+                recent_rank[account_id] = rank
+    except Exception:
+        logger.debug("[号码池] 读取账号分配历史失败，使用随机顺序", exc_info=True)
+    _ACCOUNT_RANDOM.shuffle(candidates)
     ordered.extend(
         sorted(
-            (item for account_id, item in eligible_by_id.items() if account_id not in selected),
-            key=lambda item: int(item["id"]),
+            candidates,
+            key=lambda item: (
+                0 if int(item["id"]) not in recent_rank else 1,
+                -recent_rank.get(int(item["id"]), 0),
+            ),
         )
     )
 
@@ -307,6 +380,48 @@ def _dispatch_available() -> int:
     return dispatched
 
 
+def _release_active_on_shutdown() -> int:
+    """进程退出前把本进程持有的号码收口。
+
+    不做这一步，心跳随进程消失，15 分钟后对账会把这批号码判成 orphaned
+    （failure_code=lease_expired），既看不出原因又占着已付费号码。
+    """
+    released = 0
+    try:
+        active = store.list_reservations(statuses=list(store.ACTIVE_STATUSES), limit=200)
+    except Exception:
+        logger.debug("[号码池] 停机收口读取活跃记录失败", exc_info=True)
+        return 0
+    if not active:
+        return 0
+    from core import sms_provider
+
+    for row in active:
+        reservation_id = int(row.get("id") or 0)
+        activation_id = str(row.get("activation_id") or "").strip()
+        email = str(row.get("email") or "")
+        if activation_id:
+            try:
+                # 号码还没被手机验证消耗，停机时直接释放，避免继续占额度。
+                sms_provider.cancel(activation_id, background=False)
+            except Exception:
+                logger.debug("[号码池] 停机释放号码失败：%s", activation_id, exc_info=True)
+        try:
+            store.update_status(
+                reservation_id,
+                store.STATUS_RELEASED,
+                failure_code="worker_shutdown",
+                failure_reason="worker 进程停止，号码已释放",
+                terminal=True,
+            )
+            pool_log.append_task(reservation_id, email, "[停止] worker 退出，号码已释放")
+            released += 1
+        except Exception:
+            logger.debug("[号码池] 停机收口写状态失败：%s", reservation_id, exc_info=True)
+    logger.warning("[号码池] 停机收口完成：释放 %s 个在途号码", released)
+    return released
+
+
 def loop() -> None:
     """worker 主循环。"""
     logger.info("[号码池] worker 启动：owner=%s", _owner_id())
@@ -334,9 +449,17 @@ def loop() -> None:
                 result = run_once()
                 if result.get("skipped") != "disabled":
                     logger.debug("[号码池] 本轮结果：%s", result)
+                    try:
+                        pool_log.append_worker("[轮询] " + str(result)[:400])
+                    except Exception:
+                        logger.debug("号码池轮询日志写入失败", exc_info=True)
         except Exception:
             logger.exception("[号码池] worker 轮询异常")
         _STOP_EVENT.wait(interval)
+    try:
+        _release_active_on_shutdown()
+    except Exception:
+        logger.exception("[号码池] 停机收口异常")
     _release_leadership()
     logger.info("[号码池] worker 已停止")
 

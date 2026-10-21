@@ -28,6 +28,7 @@ from core.account_export import (
     follow_oauth_callback,
 )
 from core.email_provider import wait_for_otp
+from core.http_diagnostics import is_cloudflare_challenge, response_summary
 
 logger = logging.getLogger(__name__)
 _LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
@@ -53,6 +54,24 @@ _SESSION_FINGERPRINT_KEYS = {
     "react_container_key",
     "react_resources_key",
 }
+
+
+class CloudflareChallengeError(RuntimeError):
+    """An upstream Cloudflare challenge, not evidence that the account is dead."""
+
+    error_code = "cloudflare_challenge"
+    retryable = True
+
+    def __init__(self, response):
+        self.response = response
+        super().__init__(f"Cloudflare challenge: {response_summary(response)}")
+
+
+def _challenge_error_from_exception(exc: BaseException) -> CloudflareChallengeError | None:
+    response = getattr(exc, "response", None)
+    if response is None or not is_cloudflare_challenge(response):
+        return None
+    return CloudflareChallengeError(response)
 
 
 def _is_retryable_network_error(exc: BaseException) -> bool:
@@ -136,7 +155,14 @@ def _warm_login_fingerprint_context(session: BrowserSession) -> None:
         # 代理端口可连接不代表其上游 TLS 可用，避免坏节点长期占住 worker。
         timeout=12,
     )
-    nav.raise_for_status()
+    try:
+        nav.raise_for_status()
+    except Exception as exc:
+        challenge = _challenge_error_from_exception(exc)
+        if challenge is not None:
+            logger.warning("[查活] 登录页被 Cloudflare challenge 拦截：%s", challenge)
+            raise challenge from exc
+        raise
     observe = getattr(session, "observe_chatgpt_document", None)
     if callable(observe):
         observe(nav)
@@ -187,6 +213,31 @@ def _network_preflight_with_retry(
             return session, authorize_url
         except Exception as exc:
             last_exc = exc
+            challenge = _challenge_error_from_exception(exc)
+            if challenge is not None:
+                try:
+                    close_browser_session(session)
+                except Exception:
+                    pass
+                logger.warning(
+                    "[查活] 当前出口收到 Cloudflare challenge，停止同会话重试并切换出口：%s",
+                    challenge,
+                )
+                raise challenge from exc
+            # A 403 from the ChatGPT/Cloudflare preflight is an exit-level
+            # block for this proxy session. Retrying the same BrowserSession
+            # only replays the blocked request and delays the outer route
+            # switch, which made a batch look like every account had failed.
+            if "403" in str(exc or ""):
+                try:
+                    close_browser_session(session)
+                except Exception:
+                    pass
+                logger.warning(
+                    "[查活] 网络预检收到 HTTP 403，立即交给上层切换代理：%s",
+                    str(exc)[:200],
+                )
+                raise
             if attempt >= max_attempts or not _is_retryable_network_error(exc):
                 try:
                     close_browser_session(session)
@@ -359,6 +410,69 @@ def _stored_access_token(email: str) -> str:
         return ""
 
 
+def _probe_existing_access_token(email: str, access_token: str) -> dict | None:
+    """通过只读 usage 接口快速确认现有 AT，避免页面 403 误判账号失败。"""
+    token = str(access_token or "").strip()
+    if not token:
+        return None
+    try:
+        from curl_cffi.requests import Session as CurlSession
+        from config import IMPERSONATE, USER_AGENT
+
+        http = CurlSession(impersonate=IMPERSONATE)
+        try:
+            response = http.get(
+                "https://chatgpt.com/backend-api/wham/usage",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "User-Agent": USER_AGENT,
+                    "Origin": "https://chatgpt.com",
+                    "Referer": "https://chatgpt.com/",
+                },
+                timeout=15,
+            )
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status != 200:
+                logger.info("[查活] 现有 AT 快速校验未通过 HTTP %s，继续完整查活：%s", status, email)
+                return None
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {}
+            payload = payload if isinstance(payload, dict) else {}
+            user_id = str(payload.get("user_id") or "").strip()
+            plan_type = str(payload.get("plan_type") or "").strip()
+            logger.info(
+                "[查活] 现有 AT 快速校验成功，跳过页面登录/OTP：%s user_id=%s plan=%s",
+                email,
+                user_id or "-",
+                plan_type or "-",
+            )
+            return {
+                "ok": True,
+                "status": "live",
+                "checked_at": _now(),
+                "access_token": token,
+                "session": {
+                    "accessToken": token,
+                    "user": {"id": user_id, "email": str(payload.get("email") or email)},
+                    "account": {"planType": plan_type} if plan_type else {},
+                },
+                "token_probe": "backend-api/wham/usage",
+            }
+        finally:
+            http.close()
+    except Exception as exc:
+        logger.info(
+            "[查活] 现有 AT 快速校验异常，继续完整查活：%s %s: %s",
+            email,
+            type(exc).__name__,
+            str(exc)[:180],
+        )
+        return None
+
+
 def _clear_optional_bootstrap_circuit(session: BrowserSession) -> None:
     """清理可选登录态预热造成的本地熔断，不影响后续正式认证请求。
 
@@ -406,6 +520,18 @@ def _exception_status_code(exc: BaseException) -> int | None:
     return status or None
 
 
+def _is_otp_wait_timeout(exc: BaseException) -> bool:
+    """取码阶段"等待验证码超时"（没有 HTTP 响应）属于可重试的瞬时问题。
+
+    取码源在投递抖动时往往先超时、几十秒后验证码才到；此前只把 400/401/422
+    视为可重试，导致日志写着"第 1/3 次"却第一次就放弃。
+    """
+    if _exception_status_code(exc) is not None:
+        return False
+    text = str(exc or "").lower()
+    return ("超时" in str(exc or "")) or ("timeout" in text) or ("timed out" in text)
+
+
 def _validate_reauth_with_retry(
     session: BrowserSession,
     email: str,
@@ -445,7 +571,7 @@ def _validate_reauth_with_retry(
             status = _exception_status_code(exc)
             # reauth validate 的 403 可能是 Cloudflare/出口拦截；不要在同一已熔断
             # 会话上反复发送 OTP，交给上层的直连兜底处理。
-            retryable_otp = status in (400, 401, 422)
+            retryable_otp = status in (400, 401, 422) or _is_otp_wait_timeout(exc)
             if attempt >= max_otp_attempts or not retryable_otp:
                 raise
             logger.warning(
@@ -472,9 +598,27 @@ def _login_via_reauth(
     logger.info("[查活] reauth authorize URL 已获取")
     human_delay("api")
     final_url = _follow_reauth_with_retry(session, auth_url)
+    logger.info("[查活] reauth 落点页面：%s", str(final_url or "")[:200])
     dead_code = detect_account_unusable_text(final_url)
     if dead_code:
         raise AccountUnusableError(f"账号已废弃（{dead_code}）", error_code=dead_code)
+    # 只有真正落到邮箱验证码页才会发新邮件。此前不校验落点，落到密码/TOTP/
+    # 错误页时仍死等 90 秒，最终把"根本没发信"误报成"收件箱为空"。
+    lowered = str(final_url or "").lower()
+    if not any(k in lowered for k in ("email-verification", "email_verification")):
+        stage = next(
+            (label for key, label in (
+                ("totp", "TOTP 动态码"), ("authenticator", "TOTP 动态码"),
+                ("/mfa", "多因素认证"), ("/add-phone", "绑定手机号"),
+                ("/log-in/password", "密码登录"), ("/about-you", "资料填写"),
+                ("deactivated", "账号已停用"), ("error=", "错误页"),
+            ) if key in lowered),
+            "未知页面",
+        )
+        raise RuntimeError(
+            f"重认证未进入邮箱验证页（落点={stage}，url={str(final_url or '')[:160]}），"
+            "服务端不会发送新的邮箱验证码"
+        )
     human_delay("navigate")
     logger.info("[查活] 已跟随 reauth authorize URL，开始等待邮箱 OTP")
     continue_url = _validate_reauth_with_retry(
@@ -652,7 +796,9 @@ def _validate_with_retry(
             time.sleep(1)
         except Exception as exc:
             # 提交 OTP 后的网络抖动（连接断开/超时/代理波动）：同一会话重发验证码再验证一次。
-            if attempt >= max_otp_attempts or not _is_retryable_network_error(exc):
+            if attempt >= max_otp_attempts or not (
+                _is_retryable_network_error(exc) or _is_otp_wait_timeout(exc)
+            ):
                 raise
             last_exc = exc
             logger.warning("[查活] OTP 验证网络抖动，重新发送后再取（%s/%s）：%s", attempt, max_otp_attempts, str(exc)[:180])
@@ -718,6 +864,9 @@ def check_account_liveness(
         logger.info("[查活] 日志文件：%s", path)
         logger.info("[查活] 开始重新登录：%s", email)
         existing_access_token = _stored_access_token(email)
+        fast_result = _probe_existing_access_token(email, existing_access_token)
+        if fast_result is not None:
+            return fast_result
         has_totp = bool(_account_totp_secret(email))
         if existing_access_token and not has_totp:
             # 2FA 设置流程已经验证：先用已有 AT 预热 ChatGPT 登录态，再走
@@ -746,7 +895,12 @@ def check_account_liveness(
                     email_source=email_source,
                 )
             except Exception as reauth_exc:
-                if not _is_retryable_network_error(reauth_exc):
+                # 取码超时（邮箱里没有新验证码）不能直接判失败：账号已停用时
+                # 服务端根本不会发新验证码，继续等只会把真实状态藏起来。
+                # 这类情况同样回退到完整登录，由服务端给出确定结论。
+                if not (
+                    _is_retryable_network_error(reauth_exc) or _is_otp_wait_timeout(reauth_exc)
+                ):
                     raise
                 # reauth/callback 的同会话阶段重试已经耗尽。继续复用熔断的
                 # Cookie Jar 没有意义；参考 plus 纯协议注册，建立干净会话并按
