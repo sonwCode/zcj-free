@@ -540,10 +540,12 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/api/sms-pool/reservations/<int:reservation_id>/log")
     def api_sms_pool_reservation_log(reservation_id: int):
         from core import sms_pool_log as pool_log
+        raw_tail = request.args.get("tail")
         try:
-            tail = _sms_pool_page_arg("tail", 600, 20, 2000)
-        except ValueError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
+            tail = int(raw_tail) if raw_tail not in (None, "") else 600
+        except (TypeError, ValueError):
+            tail = 600
+        tail = max(20, min(2000, tail))
         try:
             text = pool_log.read_task_tail(reservation_id, tail=tail)
         except Exception as exc:
