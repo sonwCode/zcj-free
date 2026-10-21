@@ -777,6 +777,31 @@ def _record_region_blocked_country(provider: str, country: str, region: str) -> 
     )
 
 
+def region_cooldown_snapshot() -> list:
+    """返回当前仍在冷却的 (平台, 国家) 明细，供页面展示剩余时间。"""
+    now = int(time.time())
+    out = []
+    with _QUALITY_LOCK:
+        data = _quality_data_locked()
+        table = (data or {}).get("region_blocked_countries", {})
+        for key, item in table.items():
+            until = int(item.get("until") or 0)
+            if until <= now:
+                continue
+            provider, _, country = str(key).partition("|")
+            out.append({
+                "provider": provider,
+                "country": country,
+                "region": str(item.get("region") or ""),
+                "streak": int(item.get("streak") or 0),
+                "count": int(item.get("count") or 0),
+                "remaining": until - now,
+                "until": until,
+            })
+    out.sort(key=lambda row: (-row["remaining"], row["provider"]))
+    return out
+
+
 def clear_region_blocked_country(provider: str, country: str) -> None:
     """该国家拿到可用号码时立刻解除冷却：说明排除不是整国失效。"""
     provider_name = str(provider or "").strip().lower()

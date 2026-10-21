@@ -2369,6 +2369,14 @@
     .sms-pool-provider-status { font-weight:600; }
     @media (max-width:1100px) { .sms-pool-stats { grid-template-columns:repeat(3,minmax(0,1fr)); }
       .sms-pool-summary-strip { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+
+    .sms-pool-cooldown { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding-top:10px; border-top:1px dashed #e6ebf2; }
+    .sms-pool-cooldown-label { color:#8a94a6; font-size:11.5px; font-weight:600; }
+    .sms-pool-cooldown-chip { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border:1px solid #fde7c7;
+      border-radius:999px; background:#fffbf2; color:#b26a00; font-size:12px; font-weight:600; }
+    .sms-pool-cooldown-chip .dot { width:6px; height:6px; border-radius:50%; background:#f79009; }
+    .sms-pool-cooldown-chip small { color:#b26a00; opacity:.75; font-weight:500; }
+    .sms-pool-cooldown-more { color:#98a2b3; font-size:12px; }
 </style>
 </head>
 <body>
@@ -2869,6 +2877,7 @@
           <div><span>已失效并排除</span><strong id="smsPoolMetricDeactivated">—</strong></div>
         </div>
         <div class="sms-pool-poll-box" id="smsPoolPollBox" aria-live="polite"><div class="sms-pool-loading">等待 worker 状态…</div></div>
+        <div class="sms-pool-cooldown" id="smsPoolCooldownBox" hidden></div>
       </section>
 
       <section class="sms-pool-card" aria-labelledby="smsPoolAccountsTitle">
@@ -3341,6 +3350,7 @@ async function loadSmsPoolStatus() {
     smsPoolEl('smsPoolMetricUnclaimed').textContent = stats.unclaimed ?? 0; smsPoolEl('smsPoolMetricRunning').textContent = (stats.running ?? 0) + ' / ' + (s.workers || 2); const __spBar = smsPoolEl('smsPoolMetricRunningBar'); if (__spBar) { const __spRun = Number(stats.running || 0), __spTot = Math.max(1, Number(s.workers || 2)); __spBar.style.width = Math.min(100, Math.round(__spRun / __spTot * 100)) + '%'; } smsPoolEl('smsPoolMetricDeactivated').textContent = summary.deactivated ?? 0;
     smsPoolEl('smsPoolCfgProviders').textContent = providers.length ? providers.join(' · ') : '未配置可用平台'; smsPoolEl('smsPoolCfgPrice').textContent = s.max_price_cny ? smsPoolMoney(s.max_price_cny) : '未设置 · 禁止采购'; smsPoolEl('smsPoolCfgCapacity').textContent = (s.poll_interval || 120) + ' 秒 · ' + (s.workers || 2) + ' 并发';
     renderSmsPoolPoll(s.poll || {});
+    renderSmsPoolCooldowns(s.cooldowns || []);
     const pause = smsPoolEl('smsPoolBtnPause'); pause.disabled = !s.enabled; pause.innerHTML = s.paused ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 3 14 9-14 9z"/></svg><span>恢复采购</span>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg><span>暂停采购</span>';
     const toggle = smsPoolEl('smsPoolBtnToggle'); toggle.disabled = !s.enabled && !ready; toggle.classList.toggle('danger', Boolean(s.enabled)); toggle.classList.toggle('primary', !s.enabled); toggle.innerHTML = s.enabled ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg><span>关闭号码池</span>' : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>启用号码池</span>';
     const interval = smsPoolEl('smsPoolLiveCheckInterval'), supported = ['1800','3600','21600','43200','86400']; smsPoolEl('smsPoolLiveCheckToggle').checked = Boolean(live.enabled); smsPoolEl('smsPoolLiveCheckToggleLabel').textContent = live.enabled ? '定时测活已开启' : '定时测活'; interval.value = supported.includes(String(live.interval)) ? String(live.interval) : '21600'; interval.disabled = smsPoolState.busy;
@@ -3365,6 +3375,31 @@ function renderSmsPoolEvents(events) { smsPoolEl('smsPoolEventCount').textConten
 async function loadSmsPoolReservations() { const box = smsPoolEl('smsPoolReservationsBox'); if (!smsPoolState.reservationsLoaded) box.innerHTML = '<div class="sms-pool-loading">正在加载号码记录…</div>'; const rawSize = Number(smsPoolEl('smsPoolReservationsPageSize').value); const size = Number.isFinite(rawSize) && rawSize > 0 ? Math.floor(rawSize) : 20; const rawPage = Number(smsPoolState.reservationPage); smsPoolState.reservationPage = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1; const offset = (smsPoolState.reservationPage - 1) * size; try { const data = await api('/api/sms-pool/reservations?limit=' + size + '&offset=' + offset); const items = data.items || []; const total = Number(data.total || 0); const pages = Math.max(1, Math.ceil((Number.isFinite(total) ? total : 0) / size)); if (!items.length && smsPoolState.reservationPage > 1) { smsPoolState.reservationPage = Math.min(smsPoolState.reservationPage - 1, pages); return loadSmsPoolReservations(); } smsPoolState.reservationPage = Math.min(smsPoolState.reservationPage, pages); if (!items.length) { box.innerHTML = '<div class="sms-pool-empty">暂无号码记录</div>'; } else { const rows = items.map(x => '<tr><td class="sms-pool-mono">#' + esc(x.id) + '</td><td>' + smsPoolTag(x.status) + '</td><td>' + esc(x.provider || '—') + '</td><td class="sms-pool-mono">' + esc(x.phone || '—') + '</td><td>' + esc(x.country_display || x.country || '—') + '</td><td class="sms-pool-mono">' + esc(x.account_id || '—') + '</td><td>' + esc(x.price_cny ? smsPoolMoney(x.price_cny) : '—') + '</td><td><button type="button" class="sms-pool-log-btn" data-sms-pool-reslog="' + esc(x.id) + '">查看日志</button></td><td>' + esc(x.failure_code || '—') + '</td><td class="sms-pool-col-time">' + esc(smsPoolFmtTime(x.created_at)) + '</td><td class="sms-pool-col-time">' + esc(smsPoolFmtTime(x.expires_at)) + '</td></tr>').join(''); box.innerHTML = '<table><thead><tr><th class="sms-pool-col-id">ID</th><th class="sms-pool-col-status">状态</th><th>平台</th><th>号码</th><th>地区</th><th>账号 ID</th><th>费用</th><th>失败分类</th><th class="sms-pool-col-time">获取日期</th><th class="sms-pool-col-time">有效期至</th></tr></thead><tbody>' + rows + '</tbody></table>'; } smsPoolState.reservationsLoaded = true; smsPoolEl('smsPoolReservationsSummary').textContent = total ? '显示 ' + (offset + 1) + '–' + Math.min(offset + items.length, total) + ' 条，共 ' + total + ' 条' : '暂无号码记录'; smsPoolEl('smsPoolReservationsPageInfo').textContent = smsPoolState.reservationPage + ' / ' + pages; smsPoolEl('smsPoolReservationsPrev').disabled = smsPoolState.reservationPage <= 1; smsPoolEl('smsPoolReservationsNext').disabled = smsPoolState.reservationPage >= pages; } catch (error) { if (!smsPoolState.reservationsLoaded) box.innerHTML = '<div class="sms-pool-error">号码记录读取失败：' + esc(error.message) + '</div>'; else smsPoolNotice('号码记录刷新失败，保留上次数据：' + error.message, 'warn'); } }
 function renderSmsPoolEvents(events) { const rawSize = Number(smsPoolEl('smsPoolEventsPageSize').value); const size = Number.isFinite(rawSize) && rawSize > 0 ? Math.floor(rawSize) : 20; const grouped = {}; (events || []).forEach(x => { const key = String(x.reservation_id || '0'); if (!grouped[key] || Number(x.id || 0) > Number(grouped[key].id || 0)) grouped[key] = x; }); const all = Object.values(grouped).sort((a,b) => Number(b.id || 0) - Number(a.id || 0)); const pages = Math.max(1, Math.ceil(all.length / size)); const rawPage = Number(smsPoolState.eventPage); smsPoolState.eventPage = Number.isFinite(rawPage) && rawPage >= 1 ? Math.min(Math.floor(rawPage), pages) : 1; const items = all.slice((smsPoolState.eventPage - 1) * size, smsPoolState.eventPage * size); smsPoolEl('smsPoolEventsSummary').textContent = all.length ? '显示 ' + ((smsPoolState.eventPage - 1) * size + 1) + '–' + Math.min(smsPoolState.eventPage * size, all.length) + ' 条，共 ' + all.length + ' 条' : '暂无运行事件'; smsPoolEl('smsPoolEventsPageInfo').textContent = smsPoolState.eventPage + ' / ' + pages; smsPoolEl('smsPoolEventsPrev').disabled = smsPoolState.eventPage <= 1; smsPoolEl('smsPoolEventsNext').disabled = smsPoolState.eventPage >= pages; if (!items.length) { smsPoolEl('smsPoolEventsBox').innerHTML = '<div class="sms-pool-empty">暂无运行事件</div>'; return; } smsPoolEl('smsPoolEventsBox').innerHTML = items.map(x => '<div class="sms-pool-event-row"><span class="sms-pool-event-id">#' + esc(x.reservation_id || '—') + '</span><div class="sms-pool-event-meta">' + smsPoolTag(x.event) + '<span>' + esc(smsPoolFmtTime(x.created_at)) + '</span></div><span class="sms-pool-event-detail" title="' + esc(x.detail || '—') + '">' + esc(x.detail || '—') + '</span><button type="button" class="sms-pool-log-btn" data-sms-pool-log="' + esc(x.reservation_id || '') + '">查看日志</button></div>').join(''); smsPoolEl('smsPoolEventsBox').querySelectorAll('[data-sms-pool-log]').forEach(btn => btn.addEventListener('click', () => viewSmsPoolLog(btn.dataset.smsPoolLog))); }
 async function viewSmsPoolLog(reservationId) { try { const data = await api('/api/sms-pool/reservations/' + encodeURIComponent(reservationId) + '/events'); const lines = (data.items || []).map(x => smsPoolFmtTime(x.created_at) + '  ' + (smsPoolStatusNames[x.event] || x.event || '事件') + '  ' + (x.detail || '')); const modal = document.createElement('div'); modal.className = 'sms-pool-log-modal'; modal.innerHTML = '<div class="sms-pool-log-dialog" role="dialog" aria-modal="true"><div class="sms-pool-log-head"><strong>号码 #' + esc(reservationId) + ' 日志</strong><button type="button" class="sms-pool-log-close" aria-label="关闭">×</button></div><pre>' + esc(lines.join('\\n') || '暂无日志') + '</pre></div>'; document.body.appendChild(modal); const close = () => modal.remove(); modal.querySelector('.sms-pool-log-close').addEventListener('click', close); modal.addEventListener('click', e => { if (e.target === modal) close(); }); } catch (error) { showToast('日志读取失败'); } }
+function smsPoolDuration(seconds) {
+  const s = Math.max(0, Number(seconds || 0));
+  if (s >= 3600) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + ' 小时' + (m ? ' ' + m + ' 分' : ''); }
+  if (s >= 60) return Math.round(s / 60) + ' 分钟';
+  return s + ' 秒';
+}
+function renderSmsPoolCooldowns(items) {
+  const box = smsPoolEl('smsPoolCooldownBox');
+  if (!box) return;
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) { box.hidden = true; box.innerHTML = ''; return; }
+  const shown = list.slice(0, 8);
+  const chips = shown.map(x => {
+    const name = smsPoolProviderName(x.provider) + (x.region ? ' · ' + esc(x.region) : (x.country ? ' · #' + esc(x.country) : ''));
+    return '<span class="sms-pool-cooldown-chip" title="连续命中 ' + esc(x.streak || 0) + ' 次，共 ' + esc(x.count || 0) + ' 次">'
+      + '<i class="dot"></i>' + esc(name) + '<small>' + esc(smsPoolDuration(x.remaining)) + '后恢复</small></span>';
+  }).join('');
+  const more = list.length > shown.length ? '<span class="sms-pool-cooldown-more">另 ' + (list.length - shown.length) + ' 项</span>' : '';
+  box.hidden = false;
+  box.innerHTML = '<span class="sms-pool-cooldown-label">临时冷却</span>' + chips + more;
+}
+function smsPoolProviderName(name) {
+  const map = {smsbower:'SMSBower', tiger:'Tiger SMS', vaksms:'Vak SMS', herosms:'HeroSMS', smspool:'SMSPool'};
+  return map[String(name || '').toLowerCase()] || String(name || '—');
+}
 function renderSmsPoolPoll(poll) {
   const box = smsPoolEl('smsPoolPollBox'); if (!box) return;
   const state = String(poll.status || 'unknown');

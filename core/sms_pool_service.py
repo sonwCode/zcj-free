@@ -591,6 +591,17 @@ def _hour_demand_penalty(hours: int = 72):
                 pass
     return penalty
 
+def _cooldown_snapshot() -> list:
+    """当前冷却中的平台/国家，供页面展示"还有多久恢复"。"""
+    try:
+        from core import sms_provider
+
+        return sms_provider.region_cooldown_snapshot()
+    except Exception:
+        logger.debug("[号码池] 读取冷却快照失败", exc_info=True)
+        return []
+
+
 def probe_providers(providers: list[str]) -> list[dict]:
     """并行查询各平台价内库存（只调 getPrices，不下单）。
 
@@ -953,6 +964,7 @@ def pool_status() -> dict:
             "batch": max(1, int(getattr(cfg, "SMS_POOL_LIVE_CHECK_BATCH", 20) or 20)),
         },
         "poll": _poll_state_with_staleness(),
+        "cooldowns": _cooldown_snapshot(),
         "capacity": capacity,
         "stats": store.stats(),
     }
