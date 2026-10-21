@@ -23,6 +23,7 @@ from flask import Flask, Response, jsonify, make_response, render_template, requ
 import pyotp
 
 from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service, live_check_service, codex_oauth_check_service, exchange_rates
+from core.codex_agent import make_license_id
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
 from core.otp_utils import normalize_totp_secret
@@ -2435,7 +2436,22 @@ def create_app(auth_code: str | None = None) -> Flask:
             try:
                 content, real_fname = db.read_codex_credential(fname)
                 parsed = _json.loads(content)
-                bundle.append({"filename": real_fname, "data": parsed})
+                # 下游导入平台要求每个凭证带 license_id：凭证里没有就按
+                # account_id / email / 文件名派生一个稳定值，保证多次导出一致。
+                if isinstance(parsed, dict) and not str(parsed.get("license_id") or "").strip():
+                    from core.codex_agent import make_license_id as _mk_lic
+                    _lic = str(
+                        parsed.get("account_id")
+                        or parsed.get("chatgpt_account_id")
+                        or parsed.get("email")
+                        or real_fname
+                    )
+                    parsed["license_id"] = _mk_lic(_lic)
+                bundle.append({
+                    "filename": real_fname,
+                    "license_id": (parsed.get("license_id") if isinstance(parsed, dict) else None),
+                    "data": parsed,
+                })
                 db.mark_codex_exported(real_fname)
             except Exception as exc:
                 errors.append({"filename": fname, "error": f"{type(exc).__name__}: {exc}"})

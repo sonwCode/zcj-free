@@ -422,6 +422,18 @@ def build_sub2api_account_entry(
     if not agent_runtime_id or not agent_private_key:
         raise ValueError("agent_identity 缺少 agent_runtime_id/agent_private_key")
 
+def make_license_id(*parts: Any) -> str:
+    """生成稳定的 license_id（同账号多次导出保持一致）。
+
+    下游导入平台（sub2api 及二次分发面板）要求每个凭证带 license_id，
+    而 CPA 上传响应里只有 {"status": "ok"}，本项目与参考项目都没有该字段，
+    因此这里按 account_id / agent_runtime_id / email 派生一个确定性 UUID。
+    """
+    seed = "|".join(str(p or "").strip() for p in parts if str(p or "").strip())
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return f"{digest[0:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
+
+
     entry = {
         "name": display_name,
         "platform": "openai",
@@ -450,7 +462,10 @@ def build_sub2api_account_entry(
         "priority": 1,
         "rate_multiplier": 1,
         "auto_pause_on_expired": True,
+        "license_id": make_license_id(account_id, agent_runtime_id, email),
     }
+    entry["credentials"]["license_id"] = entry["license_id"]
+    entry["extra"]["license_id"] = entry["license_id"]
     if proxy_key:
         entry["proxy_key"] = str(proxy_key)
     return entry
