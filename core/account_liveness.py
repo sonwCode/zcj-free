@@ -520,6 +520,18 @@ def _exception_status_code(exc: BaseException) -> int | None:
     return status or None
 
 
+def _is_otp_not_sent(exc: BaseException) -> bool:
+    """"服务端没发验证码"：邮箱可读但无新邮件。
+
+    与 otp_timeout（我们取不到）区分开：这类重试只会再等一轮并且更容易触发风控，
+    所以直接判失败、不重试、不切换到干净会话。
+    """
+    code = str(getattr(exc, "error_code", "") or "").lower()
+    if code == "otp_not_sent":
+        return True
+    return "otp_not_sent" in str(exc or "").lower()
+
+
 def _is_otp_wait_timeout(exc: BaseException) -> bool:
     """取码阶段"等待验证码超时"（没有 HTTP 响应）属于可重试的瞬时问题。
 
@@ -568,6 +580,9 @@ def _validate_reauth_with_retry(
                     error_code=dead_code,
                 ) from exc
 
+            if _is_otp_not_sent(exc):
+                logger.warning("[查活] 服务端未发送验证码（otp_not_sent），不再重试：%s", email)
+                raise
             status = _exception_status_code(exc)
             # reauth validate 的 403 可能是 Cloudflare/出口拦截；不要在同一已熔断
             # 会话上反复发送 OTP，交给上层的直连兜底处理。
@@ -795,6 +810,9 @@ def _validate_with_retry(
             current_otp = None
             time.sleep(1)
         except Exception as exc:
+            if _is_otp_not_sent(exc):
+                logger.warning("[查活] 登录阶段服务端未发送验证码（otp_not_sent），不再重试：%s", email)
+                raise
             # 提交 OTP 后的网络抖动（连接断开/超时/代理波动）：同一会话重发验证码再验证一次。
             if attempt >= max_otp_attempts or not (
                 _is_retryable_network_error(exc) or _is_otp_wait_timeout(exc)
@@ -895,6 +913,11 @@ def check_account_liveness(
                     email_source=email_source,
                 )
             except Exception as reauth_exc:
+                if _is_otp_not_sent(reauth_exc):
+                    logger.warning(
+                        "[查活] 服务端未发送验证码（otp_not_sent），不再切换干净会话重试：%s", email,
+                    )
+                    raise
                 # 取码超时（邮箱里没有新验证码）不能直接判失败：账号已停用时
                 # 服务端根本不会发新验证码，继续等只会把真实状态藏起来。
                 # 这类情况同样回退到完整登录，由服务端给出确定结论。
@@ -961,7 +984,9 @@ def check_account_liveness(
             logger.warning("[查活] 已废号：%s %s", email, code)
             return {"ok": False, "status": "deactivated", "checked_at": checked_at, "error": code}
         logger.warning("[查活] 失败：%s %s: %s", email, type(exc).__name__, str(exc)[:260])
-        return {"ok": False, "status": "failed", "checked_at": checked_at, "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+        failure_status = "otp_not_sent" if _is_otp_not_sent(exc) else "failed"
+        return {"ok": False, "status": failure_status, "checked_at": checked_at,
+                "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
     finally:
         try:
             logger.info("[查活] 结束：%s", email)

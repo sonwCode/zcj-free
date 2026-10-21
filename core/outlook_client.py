@@ -58,6 +58,9 @@ _CONTEXT_CACHE: dict[str, "OutlookAccount"] = {}
 
 # 远端 mail.chatai.codes 被禁用时，本进程内直接跳过远端，走 Microsoft Graph 直连。
 _REMOTE_DISABLED = False
+# Cloudflare Workers 免费运行时不支持远端 IMAP；记住该能力状态，避免每次
+# OTP 轮询都重复请求一个确定返回 501 的接口并把无关错误刷进查活日志。
+_REMOTE_IMAP_UNAVAILABLE = False
 _MS_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 _MS_TOKEN_FATAL_CACHE: dict[str, tuple[str, float]] = {}
 
@@ -440,6 +443,13 @@ def _outlook_fetch_mode() -> str:
 def _is_remote_disabled_error(exc: Exception | str) -> bool:
     text = str(exc or "")
     return "DEPLOYMENT_DISABLED" in text or "HTTP 402" in text or "Payment required" in text
+
+
+def _is_remote_imap_unavailable_error(exc: Exception | str) -> bool:
+    text = str(exc or "")
+    return "IMAP_REQUIRES_CONTAINER" in text or (
+        "HTTP 501" in text and "fetch-imap" in text
+    )
 
 
 def _ms_http() -> CurlSession:
@@ -1011,8 +1021,11 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
     - direct: Microsoft Graph 直连
     - auto: 远端可用时用远端；远端 402/DEPLOYMENT_DISABLED 后自动直连 Graph
     """
-    global _REMOTE_DISABLED
+    global _REMOTE_DISABLED, _REMOTE_IMAP_UNAVAILABLE
     mode = _outlook_fetch_mode()
+
+    if mode == "auto" and protocol == "imap" and _REMOTE_IMAP_UNAVAILABLE:
+        return []
 
     if mode in ("direct", "graph", "graph_direct", "msgraph"):
         if protocol == "graph":
@@ -1040,6 +1053,13 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
     try:
         data = _secure_post(session, url, payload)
     except OutlookClientError as exc:
+        if mode == "auto" and protocol == "imap" and _is_remote_imap_unavailable_error(exc):
+            _REMOTE_IMAP_UNAVAILABLE = True
+            logger.info(
+                "[Outlook] 远端 IMAP 返回 501（IMAP_REQUIRES_CONTAINER），" 
+                "已禁用该回退路径，继续使用 Graph。"
+            )
+            return []
         logger.warning("[Outlook] %s 请求失败: %s: %s", protocol, exc.error_code, exc)
         if mode == "auto" and _is_remote_disabled_error(exc):
             _REMOTE_DISABLED = True
@@ -1059,6 +1079,13 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
 
     if not data.get("success"):
         error_text = str(data.get("error") or data)[:500]
+        if mode == "auto" and protocol == "imap" and _is_remote_imap_unavailable_error(error_text):
+            _REMOTE_IMAP_UNAVAILABLE = True
+            logger.info(
+                "[Outlook] 远端 IMAP 返回 IMAP_REQUIRES_CONTAINER，" 
+                "已禁用该回退路径，继续使用 Graph。"
+            )
+            return []
         logger.warning("[Outlook] %s success=False: %s", protocol, error_text)
         raise OutlookClientError(
             f"{protocol} 取件接口返回 success=False: {error_text}",
@@ -1160,18 +1187,9 @@ def fetch_latest_otp(
     last_fetch_error: OutlookClientError | None = None
 
     while time.time() < deadline:
-        # 每轮请求必须受总 deadline 约束。Graph/IMAP 单次请求默认 30s，
-        # 如果不按剩余时间收紧，两个协议的超时会把 max_wait=90s 拉长到数分钟。
-        remaining_before_round = deadline - time.time()
-        if remaining_before_round <= 0:
-            break
-        session.timeout = max(1, min(30, int(remaining_before_round)))
         # 每轮都重新拉，因为可能有新邮件，也可能旧邮件因延迟才出现
         all_candidates: list[tuple[str, dict, float, str]] = []
         for protocol in ("graph", "imap"):
-            if deadline - time.time() <= 0:
-                break
-            session.timeout = max(1, min(30, int(deadline - time.time())))
             try:
                 emails = _fetch_via(session, protocol, account)
             except OutlookClientError as exc:
@@ -1298,12 +1316,16 @@ def fetch_latest_otp(
         )
         raise last_fetch_error
 
+    # 走到这里说明邮箱全程可正常读取（没有 last_fetch_error），
+    # 只是没有收到新的 OpenAI 验证码 —— 这是"服务端没发"，不是"我们取不到"。
+    # 两者必须分开：没发时重试只是再等一轮并触发风控。
     raise OutlookClientError(
-        f"等待 {email} 的 OTP 超时（>{max_wait or _email_cfg.OTP_MAX_WAIT}s）。"
-        f"可能：refresh_token 失效 / 邮箱被 OpenAI 黑名单 / IP 风控未通过。",
-        error_code="otp_timeout",
+        f"等待 {email} 的 OTP 超时（>{max_wait or _email_cfg.OTP_MAX_WAIT}s）："
+        f"邮箱读取正常但没有新的 OpenAI 验证码（otp_not_sent）。"
+        f"可能：refresh_token 失效 / 账号被风控 / IP 被拒。",
+        error_code="otp_not_sent",
         stage="otp_poll",
-        retryable=True,
+        retryable=False,
     )
 
 

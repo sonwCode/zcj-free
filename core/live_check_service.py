@@ -74,9 +74,11 @@ def _live_proxy_route(proxy_url: str, proxy_cfg) -> dict:
 
 
 def _retryable_live_check_result(result: dict) -> bool:
-    if result.get("ok") or result.get("status") == "deactivated":
+    if result.get("ok") or result.get("status") in {"deactivated", "otp_not_sent"}:
         return False
     text = str(result.get("error") or "").lower()
+    if "otp_not_sent" in text:
+        return False
     return any(hint in text for hint in _NETWORK_RETRY_HINTS)
 
 
