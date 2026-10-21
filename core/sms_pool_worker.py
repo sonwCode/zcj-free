@@ -167,6 +167,9 @@ def _dispatch_task(reservation: dict, account: dict) -> bool:
 
 def run_once() -> dict:
     """执行一轮：对账 → 回收 → 采购 → 并发分配。"""
+    if _STOP_EVENT.is_set():
+        return {"skipped": "shutdown"}
+
     cfg = service._pool_cfg()
     configured = service.configured_pool_providers()
     # 有足够历史样本时优先成功率更高的平台；样本不足时保留配置链顺序。
@@ -412,6 +415,50 @@ def _dispatch_available() -> int:
     return dispatched
 
 
+def _drain_inflight(timeout=None) -> int:
+    """停机前等在途任务自然结束，避免把正在跑的好任务掐断。
+
+    旧行为：收到 SIGTERM 立刻释放全部在途号码——本来是正常跑的任务也被
+    作废（failure_code=worker_shutdown）。现在先排空，只有超时仍未结束的
+    才释放。
+    """
+    if timeout is None:
+        try:
+            timeout = float(getattr(service._pool_cfg(), "SMS_POOL_SHUTDOWN_DRAIN_SECONDS", 300) or 300)
+        except Exception:
+            timeout = 300.0
+    timeout = max(0.0, min(600.0, float(timeout)))
+    if timeout <= 0:
+        return len(_active_reservations())
+
+    deadline = time.time() + timeout
+    last_logged = 0.0
+    while time.time() < deadline:
+        active = _active_reservations()
+        if not active:
+            return 0
+        now = time.time()
+        if now - last_logged >= 30:
+            detail = ",".join(
+                "#%s:%s" % (row.get("id"), row.get("status")) for row in active[:6]
+            )
+            logger.info(
+                "[号码池] 停机排空等待中：在途 %s 个（%s），剩余等待 %.0fs",
+                len(active), detail, max(0.0, deadline - now),
+            )
+            last_logged = now
+        time.sleep(2)
+    return len(_active_reservations())
+
+
+def _active_reservations() -> list:
+    try:
+        return store.list_reservations(statuses=list(store.ACTIVE_STATUSES), limit=200) or []
+    except Exception:
+        logger.debug("[号码池] 读取在途记录失败", exc_info=True)
+        return []
+
+
 def _release_active_on_shutdown() -> int:
     """进程退出前把本进程持有的号码收口。
 
@@ -489,7 +536,12 @@ def loop() -> None:
             logger.exception("[号码池] worker 轮询异常")
         _STOP_EVENT.wait(interval)
     try:
-        _release_active_on_shutdown()
+        remaining = _drain_inflight()
+        if remaining:
+            logger.warning("[号码池] 排空超时：仍有 %s 个在途号码，开始释放", remaining)
+            _release_active_on_shutdown()
+        else:
+            logger.info("[号码池] 停机排空完成：在途任务已全部自然结束，未作废任何号码")
     except Exception:
         logger.exception("[号码池] 停机收口异常")
     _release_leadership()
