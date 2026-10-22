@@ -1,27 +1,46 @@
 # -*- coding: utf-8 -*-
-"""号码池智能选号器 v3。
+"""号码池智能选号器。
 
-相比 v2 的三项改进（都有数据依据）：
+一句话：把每个 (平台, 国家, 地区) 当成一个赌臂，按"每个成功号码的期望成本"下注。
 
-1. 失败类型分离
-   不是所有失败都说明"号段不好"：
-     quality_failure（号段/号码质量被拒）：fraud_guard, phone_fraud_guard,
-         voip_phone_disallowed, phone_number_in_use, invalid_number, add_phone_rejected
-     flow_failure（我们自己的流程/网络问题）：code_timeout, transient_*,
-         worker_shutdown, session_circuit_open, lease_expired, cleanup_release,
-         unconfirmed_failure, activation_state_missing
-   只有 quality_failure 作为负面证据降低该号段成功率；flow_failure 单独统计，
-   否则我们自己的 bug 会把好号段一起打死（实测大量 transient 是通道/提交问题）。
+模型
+----
+1. 分层经验贝叶斯
+   p = 地区层/国家层/平台层/全局层 的后验按样本量加权混合；
+   各层用 Beta 后验，先验来自全局实测成功率（不是写死的 30%）。
+   样本少的层自动向上一层收缩，1/1 不会被当成 100%。
 
-2. Thompson 采样替代 UCB
-   从 Beta 后验采样 p，用 单价/p 排序。探索是自然的：样本少的号段后验方差大，
-   偶尔会被采样到高值而被尝试，不需要人为加奖励项。
+2. 失败类型分离
+   quality_failure（fraud_guard / voip / phone_number_in_use 等）计入成功率分母；
+   flow_failure（code_timeout / transient_* / worker_shutdown 等）单列，
+   避免我们自己的流程 bug 把好号段一起打死。
 
-3. 同号段连买降权
-   同一 (平台,国家) 最近连续买入过多时，按次数乘 1.0→1.5 的惩罚系数，
-   避免把一个还没验证的号段一次性烧完。
+3. 时间衰减 + 时段/周末修正
+   统计按 12 小时半衰期衰减；小时桶与工作日/周末各自算修正系数（0.75~1.25）。
 
-花费口径保持三分类：confirmed / refunded / unknown。
+4. 冷启动探索
+   自有样本为 0 的号段用 Beta 后验的乐观上界（均值 + z·σ）估值，
+   新号段因此有机会被试；样本积累后自然回归均值。
+
+5. 分散与熔断
+   同一 (平台,国家) 近 60 分钟买太多会按次数降权；
+   30 分钟内连续 3 次"质量型"失败则本轮排到最后（不做永久黑名单）。
+
+6. 花费三分类
+   confirmed（completed / failed / expired / orphaned / 未释放）计入预算；
+   refunded（cancelled 等）与 unknown（released 但无释放记录）单列，避免虚高。
+
+参数（config/sms_pool.py，可用 .env 覆盖）
+   SMS_POOL_MAX_EXPECTED_COST_USD   每成功号成本上限，0=不限制
+   SMS_POOL_STATS_HALF_LIFE_HOURS   统计半衰期
+   SMS_POOL_EXPLORE_Z               冷启动乐观系数
+   SMS_POOL_BURST_WINDOW_MIN / _LIMIT   熔断窗口与次数
+   SMS_POOL_DIVERSITY_FREE / _STEP  同号段免惩罚次数与步长
+   SMS_POOL_HOURLY_BUDGET_CNY / SMS_POOL_DAILY_BUDGET_CNY  预算闸门
+
+自检
+   python tests/selector_selfcheck.py   纯函数单测（不触网、不读库）
+   python tests/selector_backtest.py    真实数据回测（Brier 分数 + 分箱校准）
 """
 from __future__ import annotations
 
@@ -31,6 +50,45 @@ import random
 from datetime import datetime, timezone
 
 from core import db
+
+def _param(name: str, default):
+    """参数优先取配置（config.sms_pool → config.codex），缺失时用默认值。"""
+    for module_name in ("codex", "sms_pool"):
+        try:
+            mod = __import__("config." + module_name, fromlist=["x"])
+        except Exception:
+            continue
+        value = getattr(mod, name, None)
+        if value in (None, ""):
+            continue
+        try:
+            return type(default)(value) if not isinstance(value, type(default)) else value
+        except Exception:
+            continue
+    return default
+
+
+def half_life_hours() -> float:
+    return max(1.0, float(_param("SMS_POOL_STATS_HALF_LIFE_HOURS", 12.0)))
+
+
+def explore_z() -> float:
+    return max(0.0, min(4.0, float(_param("SMS_POOL_EXPLORE_Z", 2.0))))
+
+
+def burst_params() -> tuple:
+    return (
+        max(5, int(_param("SMS_POOL_BURST_WINDOW_MIN", 30))),
+        max(2, int(_param("SMS_POOL_BURST_FAIL_LIMIT", 3))),
+    )
+
+
+def diversity_params() -> tuple:
+    return (
+        max(1, int(_param("SMS_POOL_DIVERSITY_FREE", 2))),
+        max(0.0, min(1.0, float(_param("SMS_POOL_DIVERSITY_STEP", 0.15)))),
+    )
+
 
 HALF_LIFE_HOURS = 12.0
 PRIOR_STRENGTH = 4.0
@@ -56,7 +114,7 @@ FLOW_FAILURES = {
 
 
 def _decay(age_hours: float) -> float:
-    return 1.0 if age_hours <= 0 else 0.5 ** (age_hours / HALF_LIFE_HOURS)
+    return 1.0 if age_hours <= 0 else 0.5 ** (age_hours / half_life_hours())
 
 
 def _empty() -> dict:
@@ -88,10 +146,14 @@ def classify_failure(status: str, code: str) -> str:
     return "quality" if st in {"released", "orphaned"} else "flow"
 
 
-def build_stats(hours: int = 72) -> dict:
+def build_stats(hours: int = 72, older_than_hours: float = 0.0) -> dict:
+    """统计窗口：[now-hours, now-older_than_hours)。
+
+    older_than_hours > 0 用于回测：只用更早的数据训练，留出最近一段做评估。
+    """
     stats = {
         "region": {}, "country": {}, "provider": {},
-        "global": _empty(), "hour": {},
+        "global": _empty(), "hour": {}, "weekday": {},
         "spent_cny_1h": 0.0, "spent_cny_24h": 0.0,
         "refunded_cny_24h": 0.0, "unknown_cny_24h": 0.0, "inflight_cny_24h": 0.0,
     }
@@ -99,12 +161,16 @@ def build_stats(hours: int = 72) -> dict:
     now = datetime.now(timezone.utc)
     try:
         conn = db._sqlite_conn()
-        rows = conn.execute(
+        sql = (
             "select provider, country, status, failure_code, release_result, created_at, "
             "activation_metadata, price_cny from sms_pool_reservations "
-            "where created_at >= datetime('now', ?)",
-            ("-%d hour" % int(hours),),
-        ).fetchall()
+            "where created_at >= datetime('now', ?)"
+        )
+        params = ["-%d hour" % int(hours)]
+        if older_than_hours and float(older_than_hours) > 0:
+            sql += " and created_at < datetime('now', ?)"
+            params.append("-%d minute" % int(float(older_than_hours) * 60))
+        rows = conn.execute(sql, tuple(params)).fetchall()
     except Exception:
         return stats
     finally:
@@ -130,8 +196,9 @@ def build_stats(hours: int = 72) -> dict:
                 ts = ts.replace(tzinfo=timezone.utc)
             age_h = max(0.0, (now - ts).total_seconds() / 3600.0)
             hour = ts.astimezone(timezone.utc).hour
+            weekday = ts.astimezone(timezone.utc).weekday()
         except Exception:
-            age_h, hour = 0.0, now.hour
+            age_h, hour, weekday = 0.0, now.hour, now.weekday()
         w = _decay(age_h)
 
         _add(stats["region"], (provider, country, region or "#" + country), w, kind)
@@ -139,6 +206,7 @@ def build_stats(hours: int = 72) -> dict:
         _add(stats["provider"], provider, w, kind)
         _add(stats["global"], "__all__", w, kind)
         _add(stats["hour"], (provider, hour), w, kind)
+        _add(stats["weekday"], (provider, 1 if weekday >= 5 else 0), w, kind)
 
         rel = str(row["release_result"] or "").lower()
         try:
@@ -179,6 +247,27 @@ def prior_pair(stats: dict | None = None) -> tuple:
     return p * PRIOR_STRENGTH, (1.0 - p) * PRIOR_STRENGTH
 
 
+def provider_prior(stats: dict, provider: str) -> tuple:
+    """平台级先验：样本足够时用平台自身成功率，否则向全局收缩。
+
+    vaksms 27 次 0 成功，不该按全局 0.84% 估值——它更接近 0.3%。样本不足
+    （<6）时按 n/(n+6) 的比例混合，避免单次偶然定调。
+    """
+    a_g, b_g = prior_pair(stats)
+    item = stats["provider"].get(provider) if stats else None
+    if not item:
+        return a_g, b_g
+    n = float(item["w_ok"] + item["w_q"])
+    if n <= 0:
+        return a_g, b_g
+    p_prov = item["w_ok"] / n
+    w = n / (n + 6.0)
+    p_g = a_g / (a_g + b_g)
+    p = w * p_prov + (1.0 - w) * p_g
+    p = min(0.9, max(0.0005, p))
+    return p * PRIOR_STRENGTH, (1.0 - p) * PRIOR_STRENGTH
+
+
 def _beta_params(item: dict | None, prior: tuple) -> tuple:
     a0, b0 = prior
     if not item or item["n"] <= 0:
@@ -202,7 +291,7 @@ def sample_probability(item: dict | None, prior: tuple | None = None) -> float:
 
 def blended_probability(stats: dict, provider: str, country: str, region: str = "",
                         *, sample: bool = False) -> dict:
-    prior = prior_pair(stats)
+    prior = provider_prior(stats, provider)
     keys = [
         (stats["region"], (provider, country, region or "#" + country), 1.0),
         (stats["country"], (provider, country), 0.6),
@@ -234,6 +323,72 @@ def hour_factor(stats: dict, provider: str, hour: int | None = None) -> float:
     if p_prov <= 0:
         return 1.0
     return max(1.0 - HOUR_BUCKET_PENALTY, min(1.0 + HOUR_BUCKET_PENALTY, p_hour / p_prov))
+
+
+def health_multiplier(total: int, flow: int) -> float:
+    """平台健康度倍数：流程型失败过多说明是这个平台/链路有问题，不是号段。
+
+    样本 <5 不判断（避免误伤）；流程失败占比 >=80% 打 5 折，>=60% 打 7.5 折。
+    """
+    if total < 5:
+        return 1.0
+    ratio = float(flow) / float(total)
+    if ratio >= 0.8:
+        return 0.5
+    if ratio >= 0.6:
+        return 0.75
+    return 1.0
+
+
+def provider_health(provider: str, *, window_min: int = 60) -> dict:
+    """近 N 分钟该平台的真实表现（只统计已结算的记录）。"""
+    conn = None
+    try:
+        conn = db._sqlite_conn()
+        rows = conn.execute(
+            "select status, failure_code from sms_pool_reservations "
+            "where provider=? and created_at >= datetime('now', ?) "
+            "and status in ('completed','released','failed','expired','orphaned')",
+            (provider, "-%d minute" % int(window_min)),
+        ).fetchall()
+    except Exception:
+        return {"multiplier": 1.0, "total": 0, "flow": 0, "quality": 0, "ok": 0}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    ok = quality = flow = 0
+    for row in rows:
+        kind = classify_failure(row["status"], row["failure_code"])
+        if kind == "ok":
+            ok += 1
+        elif kind == "quality":
+            quality += 1
+        else:
+            flow += 1
+    total = ok + quality + flow
+    return {
+        "multiplier": health_multiplier(total, flow),
+        "total": total, "flow": flow, "quality": quality, "ok": ok,
+    }
+
+
+def weekday_factor(stats: dict, provider: str, weekend: bool | None = None) -> float:
+    """周末/工作日修正系数，样本 <6 时不修正。"""
+    if weekend is None:
+        weekend = datetime.now(timezone.utc).weekday() >= 5
+    item = stats["weekday"].get((provider, 1 if weekend else 0))
+    if not item or item["n"] < 6:
+        return 1.0
+    prior = provider_prior(stats, provider)
+    p_wd = _posterior(item, prior)
+    p_all = _posterior(stats["provider"].get(provider), prior)
+    if p_all <= 0:
+        return 1.0
+    factor = p_wd / p_all
+    return max(1.0 - HOUR_BUCKET_PENALTY, min(1.0 + HOUR_BUCKET_PENALTY, factor))
 
 
 def burst_failed(provider: str, country: str, *, window_min: int = BURST_WINDOW_MIN,
@@ -284,11 +439,51 @@ def country_streak(provider: str, country: str, *, window_min: int = DIVERSITY_W
                 pass
 
 
+def max_expected_cost_usd() -> float:
+    """每成功一个号的成本上限（0 表示不限制）。"""
+    try:
+        from config import codex as _cfg
+
+        return float(getattr(_cfg, "SMS_POOL_MAX_EXPECTED_COST_USD", 0) or 0)
+    except Exception:
+        return 0.0
+
+
+EXPLORE_NEW = 1.0        # 兼容旧字段：成本不再打折，改为对 p 做乐观估计
+EXPLORE_FEW = 1.0
+EXPLORE_Z = 2.0          # 乐观系数：mean + Z*std
+
+
+def optimistic_probability(item: dict | None, prior: tuple, z: float | None = None) -> float:
+    """冷启动的乐观估计：Beta(α,β) 的 均值 + z×标准差。
+
+    样本为 0 时用先验的乐观上界，让新号段有机会被试；样本足够后自然回归均值，
+    探索强度由数据本身（方差）决定，不用人为设折扣。
+    """
+    z = explore_z() if z is None else float(z)
+    a, b = _beta_params(item, prior)
+    a, b = max(a, 1e-3), max(b, 1e-3)
+    mean = a / (a + b)
+    var = (a * b) / ((a + b) ** 2 * (a + b + 1.0))
+    return min(0.95, mean + z * math.sqrt(max(0.0, var)))
+
+
+def explore_bonus(samples: int) -> float:
+    """保留字段用于展示；排序已改为对 p 做乐观估计，不再对成本打折。"""
+    return 1.0
+
+
 def rank_candidates(provider: str, rows, max_usd: float, stats: dict | None = None,
-                    *, need: int = 1, sample: bool = True) -> list:
-    """打分排序：期望成本 = 单价 / p（p 可用 Thompson 采样）。"""
+                    *, need: int = 1, sample: bool = True,
+                    max_expected_cost: float | None = None) -> list:
+    """打分排序：期望成本 = 单价 / p（p 可用 Thompson 采样）。
+
+    max_expected_cost > 0 时，期望成本超过它的候选直接剔除——宁可这一轮不买，
+    也不买"单个成功号要 $5"的号段。
+    """
     stats = stats if stats is not None else build_stats()
-    prior = prior_pair(stats)
+    prior = provider_prior(stats, provider)
+    _health_cache = {}
     out = []
     for row in rows or []:
         try:
@@ -302,9 +497,28 @@ def rank_candidates(provider: str, rows, max_usd: float, stats: dict | None = No
         blend = blended_probability(stats, provider, country, sample=sample)
         p_mean = _posterior(stats["country"].get((provider, country)), prior)
         stock_credit = min(1.0, stock / max(1.0, float(need) * STOCK_FULL_CREDIT))
-        p_eff = max(0.002, blend["p"] * hour_factor(stats, provider) * (0.6 + 0.4 * stock_credit))
+        health = _health_cache.get(provider)
+        if health is None:
+            health = provider_health(provider)
+            _health_cache[provider] = health
+        region_item = stats["region"].get((provider, country, "#" + country)) or {}
+        country_item = stats["country"].get((provider, country)) or {}
+        own_n = int(region_item.get("n") or 0) + int(country_item.get("n") or 0)
+        samples_total = own_n
+        if samples_total <= 0:
+            # 全新号段：用先验的乐观上界，而不是先验均值，否则永远排不到前面
+            base_p = max(blend["p"], optimistic_probability(None, prior))
+        else:
+            base_p = blend["p"]
+        p_eff = max(
+            0.002,
+            base_p * hour_factor(stats, provider) * weekday_factor(stats, provider)
+            * (0.6 + 0.4 * stock_credit)
+            * float(health.get("multiplier") or 1.0),
+        )
         streak = country_streak(provider, country)
-        diversity = 1.0 + DIVERSITY_STEP * max(0, streak - DIVERSITY_FREE)
+        free_n, step = diversity_params()
+        diversity = 1.0 + step * max(0, streak - free_n)
         out.append({
             "provider": provider,
             "country": country,
@@ -315,9 +529,14 @@ def rank_candidates(provider: str, rows, max_usd: float, stats: dict | None = No
             "samples": int(blend["n_total"]),
             "streak": streak,
             "expected_cost_usd": round(cost / max(1e-6, p_eff), 5),
-            "ts_cost_usd": round(cost / max(1e-6, p_eff) * diversity, 5),
+            "ts_cost_usd": round(cost / max(1e-6, p_eff) * diversity * explore_bonus(int(blend["n_total"])), 5),
             "burst_blocked": burst_failed(provider, country),
+            "health_multiplier": float(health.get("multiplier") or 1.0),
+            "health_total": int(health.get("total") or 0),
         })
+    limit = max_expected_cost if max_expected_cost is not None else max_expected_cost_usd()
+    if limit and limit > 0:
+        out = [item for item in out if item["expected_cost_usd"] <= float(limit)]
     out.sort(key=lambda item: (item["burst_blocked"], item["ts_cost_usd"]))
     return out
 

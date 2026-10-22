@@ -34,6 +34,15 @@ SMS_POOL_REJECT_VOIP_NUMBERS: bool = False
 SMS_POOL_PREWARM_SIZE: int = 2
 
 # 并发上限：同时运行的号码池手机验证任务数。
+# 智能选号器参数（pool_selector）
+SMS_POOL_MAX_EXPECTED_COST_USD: float = 0.0     # 每成功一个号的成本上限，0=不限制
+SMS_POOL_STATS_HALF_LIFE_HOURS: float = 12.0    # 成功率统计半衰期
+SMS_POOL_EXPLORE_Z: float = 2.0                 # 冷启动乐观系数（均值 + z*σ）
+SMS_POOL_BURST_WINDOW_MIN: int = 30             # 短时熔断窗口（分钟）
+SMS_POOL_BURST_FAIL_LIMIT: int = 3              # 短时熔断连败次数
+SMS_POOL_DIVERSITY_FREE: int = 2                # 同号段免惩罚次数
+SMS_POOL_DIVERSITY_STEP: float = 0.15           # 超出后每次的降权步长
+
 SMS_POOL_WORKERS: int = 2
 
 # 本地租约：已领取号码多久未更新状态就允许对账回收。
@@ -73,6 +82,13 @@ apply_env_overrides(globals(), {
     "SMS_POOL_MAX_PRICE_CNY": "str",
     "SMS_POOL_REJECT_VOIP_NUMBERS": "bool",
     "SMS_POOL_PREWARM_SIZE": "int",
+    "SMS_POOL_MAX_EXPECTED_COST_USD": "float",
+    "SMS_POOL_STATS_HALF_LIFE_HOURS": "float",
+    "SMS_POOL_EXPLORE_Z": "float",
+    "SMS_POOL_BURST_WINDOW_MIN": "int",
+    "SMS_POOL_BURST_FAIL_LIMIT": "int",
+    "SMS_POOL_DIVERSITY_FREE": "int",
+    "SMS_POOL_DIVERSITY_STEP": "float",
     "SMS_POOL_WORKERS": "int",
     "SMS_POOL_LEASE_SECONDS": "int",
     "SMS_POOL_ACTIVATION_TTL_SECONDS": "int",
