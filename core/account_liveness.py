@@ -4,7 +4,7 @@ import logging
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core import db
@@ -312,6 +312,39 @@ def _extract_factor_id(result: dict | None, continue_url: str) -> str:
     return ""
 
 
+_PWD_MISMATCH_PATH = Path(__file__).resolve().parent.parent / "data" / "password_mismatch.json"
+
+
+def _password_mismatch_known(email: str) -> bool:
+    """该账号是否已被确认"本地密码与账号不一致"。"""
+    try:
+        if not _PWD_MISMATCH_PATH.exists():
+            return False
+        data = json.loads(_PWD_MISMATCH_PATH.read_text(encoding="utf-8"))
+        return str(email or "").strip().lower() in {k.lower() for k in data}
+    except Exception:
+        return False
+
+
+def _remember_password_mismatch(email: str, status: int) -> None:
+    """记住密码失效的账号，后续直接走邮箱 OTP，不再白试一次。"""
+    try:
+        _PWD_MISMATCH_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if _PWD_MISMATCH_PATH.exists():
+            try:
+                data = json.loads(_PWD_MISMATCH_PATH.read_text(encoding="utf-8")) or {}
+            except Exception:
+                data = {}
+        data[str(email or "").strip().lower()] = {
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "status": int(status),
+        }
+        _PWD_MISMATCH_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        logger.debug("[查活] 记录密码失效清单失败", exc_info=True)
+
+
 def _password_verify(session: BrowserSession, password: str) -> dict:
     from core.openai_auth import build_sentinel_header, request_sentinel_token
 
@@ -327,6 +360,20 @@ def _password_verify(session: BrowserSession, password: str) -> dict:
         data=json.dumps({"password": password}),
         allow_redirects=False,
     )
+    if resp.status_code in (400, 401, 403):
+        # 本地保存的密码与账号上的密码不一致（早期注册的密码存在输入串码 bug）。
+        # 这不是账号失效，也不是网络问题，交给上层回退邮箱 OTP。
+        body = ""
+        try:
+            body = str(resp.text or "")
+        except Exception:
+            body = ""
+        logger.warning(
+            "[查活] 密码校验被拒：status=%s body=%s", resp.status_code, body[:160],
+        )
+        raise RuntimeError(
+            f"password_verify_failed: status={resp.status_code} body={body[:160]}"
+        )
     resp.raise_for_status()
     return resp.json()
 
@@ -693,8 +740,30 @@ def _login_via_password_or_otp(
             email_source=email_source,
         )
 
+    if _password_mismatch_known(email):
+        logger.warning("[查活] 该账号本地密码已知与账号不一致，直接走邮箱 OTP：%s", email)
+        return _login_via_email_otp(
+            session,
+            email,
+            otp_after_ts,
+            email_source=email_source,
+        )
     logger.info("[查活] 账号存在密码，优先走密码登录：%s", email)
-    password_result = _password_verify(session, password)
+    try:
+        password_result = _password_verify(session, password)
+    except RuntimeError as pwd_exc:
+        if "password_verify_failed" not in str(pwd_exc):
+            raise
+        _remember_password_mismatch(email, 401)
+        logger.warning(
+            "[查活] 本地密码与账号不一致，回退邮箱 OTP：%s %s", email, str(pwd_exc)[:160],
+        )
+        return _login_via_email_otp(
+            session,
+            email,
+            otp_after_ts,
+            email_source=email_source,
+        )
     continue_url = _extract_continue_url(password_result)
     page = password_result.get("page") if isinstance(password_result, dict) else {}
     page = page if isinstance(page, dict) else {}
