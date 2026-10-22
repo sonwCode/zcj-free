@@ -305,7 +305,27 @@ def _mfa_verify(session: BrowserSession, factor_id: str, code: str) -> dict:
         data=json.dumps({"id": factor_id, "type": "totp", "code": code}),
         allow_redirects=False,
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        body = ""
+        try:
+            body = str(resp.text or "")
+        except Exception:
+            body = ""
+        # 把真实原因打出来：403 可能是账号停用，也可能是 IP/CF 拦截。
+        # 不打印这一段，会把"被墙"误判成"已废"。
+        from core.openai_auth import detect_account_unusable_text
+
+        dead = detect_account_unusable_text(body)
+        logger.warning(
+            "[查活] MFA 验证失败：status=%s dead_code=%s body=%s",
+            resp.status_code, dead or "-", body[:200].replace("\n", " "),
+        )
+        if dead:
+
+            raise AccountUnusableError(f"账号已废弃（{dead}）", error_code=dead)
+        raise RuntimeError(
+            "mfa_verify_failed: status=%s body=%s" % (resp.status_code, body[:160])
+        )
     return resp.json()
 
 

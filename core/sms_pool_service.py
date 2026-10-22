@@ -397,6 +397,9 @@ def purchase_capacity() -> dict:
     cfg = _pool_cfg()
     scan = scan_eligible_accounts()
     eligible_count = len(scan["eligible"])
+    # 只有"查活确认可用"的账号才能接收号码（分发阶段就是这么卡的）。
+    # 之前用 eligible 计算需求，会在没有可用账号时继续买号，号码只能躺到过期。
+    ready_count = sum(1 for item in scan["eligible"] if is_live_check_ready(item))
     unclaimed = store.count_reservations([store.STATUS_RESERVED])
     active = store.count_reservations(list(store.ACTIVE_STATUSES))
 
@@ -404,8 +407,9 @@ def purchase_capacity() -> dict:
     prewarm = max(0, int(getattr(cfg, "SMS_POOL_PREWARM_SIZE", 2) or 0))
     per_tick = max(0, int(getattr(cfg, "SMS_POOL_MAX_ACQUIRE_PER_TICK", 2) or 0))
 
-    # eligible 已排除正在占用号码的账号，因此只需扣除未分配号码，不能再次扣 active。
-    gap = max(0, eligible_count - unclaimed)
+    # 需求按"可用账号"计算：ready 已排除正在占用号码的账号，
+    # 因此只需扣未分配号码，不重复扣 active。
+    gap = max(0, ready_count - unclaimed)
     # 在途 = 已买到但还没结束的号码。并发是硬上限：在途永远不超过 workers，
     # 只有某个并发真正空闲（任务结束）才会补号；预热也只能占用并发额度，
     # 不允许在 workers 之外多囤号码。
@@ -415,6 +419,7 @@ def purchase_capacity() -> dict:
     target = min(gap, room, per_tick)
     return {
         "eligible": eligible_count,
+        "ready": ready_count,
         "unclaimed": unclaimed,
         "active": active,
         "in_flight": in_flight,
@@ -740,6 +745,44 @@ def probe_providers(providers: list[str]) -> list[dict]:
             item.get("p_success"), item.get("expected_cost_usd"), item.get("burst_blocked"),
         )
     return results
+def acquire_many(need: int, order: list) -> list:
+    """并行抢号：多家有货时每家先各抢一个，缺额再顺序补。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    need = max(0, int(need or 0))
+    names = [str(n or "").strip().lower() for n in (order or []) if str(n or "").strip()]
+    if need <= 0 or not names:
+        return []
+
+    results = []
+    got = 0
+    wave = names[:need] if len(names) >= need else list(names)
+    if wave:
+        with ThreadPoolExecutor(max_workers=min(4, len(wave)), thread_name_prefix="pool-buy") as pool:
+            futures = {pool.submit(acquire_one, name): name for name in wave}
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    row = fut.result()
+                except Exception as exc:
+                    logger.warning("[号码池] 并行抢号异常：provider=%s error=%s", name, exc)
+                    row = None
+                results.append({"provider": name, "reservation": row})
+                if row:
+                    got += 1
+
+    shortfall = need - got
+    if shortfall > 0:
+        for name in names:
+            if shortfall <= 0:
+                break
+            row = acquire_one(name)
+            if row:
+                results.append({"provider": name, "reservation": row})
+                shortfall -= 1
+    return results
+
+
 def acquire_one(provider: str) -> dict | None:
     """通过底层 provider 采购一个号码并登记为 reserved。
 
