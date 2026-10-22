@@ -1,79 +1,99 @@
 # -*- coding: utf-8 -*-
-"""号码池智能选号器 v2。
+"""号码池智能选号器 v3。
 
-核心思想：把每个 (平台, 国家, 地区) 当成一个赌臂，按"每个成功号码的期望成本"
-下注，而不是按绝对价格或地区黑名单。
+相比 v2 的三项改进（都有数据依据）：
 
-模型
-----
-1. 分层经验贝叶斯（解决样本稀疏）：
-     p = (n_r*p_r + n_c*p_c + n_p*p_p + n_g*p_g) / (n_r + n_c + n_p + n_g)
-   p_r 地区级、p_c 国家级、p_p 平台级、p_g 全局；各层用 Beta 后验，先验 30%。
-   样本多的层级自动占更大权重，冷门地区向平台/全局水平收缩，不会因为 1/1
-   就被当成 100%。
+1. 失败类型分离
+   不是所有失败都说明"号段不好"：
+     quality_failure（号段/号码质量被拒）：fraud_guard, phone_fraud_guard,
+         voip_phone_disallowed, phone_number_in_use, invalid_number, add_phone_rejected
+     flow_failure（我们自己的流程/网络问题）：code_timeout, transient_*,
+         worker_shutdown, session_circuit_open, lease_expired, cleanup_release,
+         unconfirmed_failure, activation_state_missing
+   只有 quality_failure 作为负面证据降低该号段成功率；flow_failure 单独统计，
+   否则我们自己的 bug 会把好号段一起打死（实测大量 transient 是通道/提交问题）。
 
-2. 时间衰减：半衰期 12 小时，越近的结果权重越高。
+2. Thompson 采样替代 UCB
+   从 Beta 后验采样 p，用 单价/p 排序。探索是自然的：样本少的号段后验方差大，
+   偶尔会被采样到高值而被尝试，不需要人为加奖励项。
 
-3. 时段修正：按小时桶统计成功率，乘以 (0.75~1.25) 的修正系数。
+3. 同号段连买降权
+   同一 (平台,国家) 最近连续买入过多时，按次数乘 1.0→1.5 的惩罚系数，
+   避免把一个还没验证的号段一次性烧完。
 
-4. 库存折算：库存远小于需求时，实际可成交概率打折。
-
-5. 探索：UCB 项，样本越少加分越多，避免冷门号段永远不被尝试。
-
-6. 熔断：同一 (平台,国家) 30 分钟内连续失败 >=3 次，本轮跳过（不是永久拉黑）。
-
-7. 预算节流：最近 60 分钟的号码花费超过上限时给出 pause 建议。
+花费口径保持三分类：confirmed / refunded / unknown。
 """
 from __future__ import annotations
 
 import json
 import math
+import random
 from datetime import datetime, timezone
 
 from core import db
 
 HALF_LIFE_HOURS = 12.0
-PRIOR_ALPHA = 1.5
-PRIOR_BETA = 3.5
-UCB_C = 0.45
+PRIOR_STRENGTH = 4.0
 BURST_WINDOW_MIN = 30
 BURST_FAIL_LIMIT = 3
-HOUR_BUCKET_PENALTY = 0.25      # 时段修正幅度上限
-STOCK_FULL_CREDIT = 3.0         # 库存 >= 3 倍需求时视为充足
+HOUR_BUCKET_PENALTY = 0.25
+STOCK_FULL_CREDIT = 3.0
+DIVERSITY_WINDOW_MIN = 60
+DIVERSITY_FREE = 2
+DIVERSITY_STEP = 0.15
+
+QUALITY_FAILURES = {
+    "fraud_guard", "phone_fraud_guard", "voip_phone_disallowed",
+    "phone_number_in_use", "invalid_number", "add_phone_rejected",
+    "phone_region_not_supported", "incorrect_number",
+}
+FLOW_FAILURES = {
+    "code_timeout", "transient_retry_exhausted", "transient_network",
+    "worker_shutdown", "session_circuit_open", "lease_expired",
+    "cleanup_release", "unconfirmed_failure", "activation_state_missing",
+    "cleanup_cancelled", "not_released_retry_exhausted", "not_released_retry_pending",
+}
 
 
 def _decay(age_hours: float) -> float:
-    if age_hours <= 0:
-        return 1.0
-    return 0.5 ** (age_hours / HALF_LIFE_HOURS)
+    return 1.0 if age_hours <= 0 else 0.5 ** (age_hours / HALF_LIFE_HOURS)
 
 
 def _empty() -> dict:
-    return {"w_ok": 0.0, "w_n": 0.0, "n": 0, "ok": 0}
+    return {"w_ok": 0.0, "w_q": 0.0, "w_f": 0.0, "n": 0, "ok": 0}
 
 
-def _add(bucket: dict, key, weight: float, ok: bool) -> None:
+def _add(bucket: dict, key, weight: float, kind: str) -> None:
     item = bucket.setdefault(key, _empty())
-    item["w_n"] += weight
     item["n"] += 1
-    if ok:
+    if kind == "ok":
         item["w_ok"] += weight
         item["ok"] += 1
+    elif kind == "quality":
+        item["w_q"] += weight
+    else:
+        item["w_f"] += weight
+
+
+def classify_failure(status: str, code: str) -> str:
+    st = str(status or "")
+    cd = str(code or "").lower()
+    if st == "completed":
+        return "ok"
+    if cd in QUALITY_FAILURES:
+        return "quality"
+    if cd in FLOW_FAILURES:
+        return "flow"
+    # 未知失败码按质量失败处理（保守），避免漏掉真实风控
+    return "quality" if st in {"released", "orphaned"} else "flow"
 
 
 def build_stats(hours: int = 72) -> dict:
-    """一次性把四个层级 + 时段桶算出来，供本轮所有候选复用。"""
     stats = {
-        "region": {},
-        "country": {},
-        "provider": {},
-        "global": _empty(),
-        "hour": {},
-        "spent_cny_1h": 0.0,
-        "spent_cny_24h": 0.0,
-        "refunded_cny_24h": 0.0,
-        "unknown_cny_24h": 0.0,
-        "inflight_cny_24h": 0.0,
+        "region": {}, "country": {}, "provider": {},
+        "global": _empty(), "hour": {},
+        "spent_cny_1h": 0.0, "spent_cny_24h": 0.0,
+        "refunded_cny_24h": 0.0, "unknown_cny_24h": 0.0, "inflight_cny_24h": 0.0,
     }
     conn = None
     now = datetime.now(timezone.utc)
@@ -97,7 +117,8 @@ def build_stats(hours: int = 72) -> dict:
     for row in rows:
         provider = str(row["provider"] or "").lower()
         country = str(row["country"] or "")
-        ok = str(row["status"] or "") == "completed"
+        status = str(row["status"] or "")
+        kind = classify_failure(status, row["failure_code"])
         try:
             meta = json.loads(row["activation_metadata"] or "{}")
             region = str(meta.get("phone_country_name") or "").strip()
@@ -108,23 +129,18 @@ def build_stats(hours: int = 72) -> dict:
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             age_h = max(0.0, (now - ts).total_seconds() / 3600.0)
+            hour = ts.astimezone(timezone.utc).hour
         except Exception:
-            age_h = 0.0
+            age_h, hour = 0.0, now.hour
         w = _decay(age_h)
 
-        _add(stats["region"], (provider, country, region or "#" + country), w, ok)
-        _add(stats["country"], (provider, country), w, ok)
-        _add(stats["provider"], provider, w, ok)
-        _add(stats["global"], "__all__", w, ok)
-        _add(stats["hour"], (provider, ts.astimezone(timezone.utc).hour if age_h else now.hour), w, ok)
+        _add(stats["region"], (provider, country, region or "#" + country), w, kind)
+        _add(stats["country"], (provider, country), w, kind)
+        _add(stats["provider"], provider, w, kind)
+        _add(stats["global"], "__all__", w, kind)
+        _add(stats["hour"], (provider, hour), w, kind)
 
-        # 花费三分类（只有前两类进预算）：
-        #   confirmed = 能证明被扣费：completed / failed / expired / orphaned /
-        #               not_released_*（号码没退回去）
-        #   refunded  = cancelled / *cancel* / released_by_oauth（钱退回）
-        #   unknown   = status=released 但没有 release_result（释放没记录结果）
         rel = str(row["release_result"] or "").lower()
-        status = str(row["status"] or "")
         try:
             price = float(row["price_cny"] or 0)
         except (TypeError, ValueError):
@@ -135,83 +151,89 @@ def build_stats(hours: int = 72) -> dict:
         in_flight = status in {"reserved", "running"}
         settled_fail = status in {"failed", "expired", "orphaned"} or rel.startswith("not_released")
         if refunded:
-            bucket_key = "refunded_cny_24h"
+            key = "refunded_cny_24h"
         elif status == "completed" or settled_fail:
-            bucket_key = "spent_cny_24h"
+            key = "spent_cny_24h"
             if age_h <= 1.0:
                 stats["spent_cny_1h"] += price
         elif status == "released" and not rel:
-            bucket_key = "unknown_cny_24h"
+            key = "unknown_cny_24h"
         elif in_flight:
-            bucket_key = "inflight_cny_24h"
+            key = "inflight_cny_24h"
         else:
-            bucket_key = "unknown_cny_24h"
+            key = "unknown_cny_24h"
         if age_h <= 24.0:
-            stats[bucket_key] = float(stats.get(bucket_key) or 0.0) + price
+            stats[key] = float(stats.get(key) or 0.0) + price
     return stats
 
 
-PRIOR_STRENGTH = 4.0   # 先验等效样本量
-
-
 def prior_pair(stats: dict | None = None) -> tuple:
-    """先验不再写死 30%，而是取全局实测成功率的 Beta(α,β)。
-
-    全局 1.1% 就按 1.1% 做先验，冷门号段会被估成 1% 而不是 30%，
-    这样"期望成本"才和现实一致。
-    """
+    """先验取全局实测成功率（只看质量失败），不再写死百分比。"""
     item = (stats or {}).get("global", {}).get("__all__") if stats else None
-    if item and item["w_n"] > 0:
-        p = min(0.9, max(0.001, item["w_ok"] / item["w_n"]))
+    if item:
+        denom = item["w_ok"] + item["w_q"]
+        p = (item["w_ok"] / denom) if denom > 0 else 0.05
     else:
         p = 0.05
+    p = min(0.9, max(0.001, p))
     return p * PRIOR_STRENGTH, (1.0 - p) * PRIOR_STRENGTH
 
 
-def _posterior(item: dict | None, prior: tuple | None = None) -> float:
-    a, b = prior if prior else (PRIOR_ALPHA, PRIOR_BETA)
+def _beta_params(item: dict | None, prior: tuple) -> tuple:
+    a0, b0 = prior
     if not item or item["n"] <= 0:
+        return a0, b0
+    return item["w_ok"] + a0, item["w_q"] + b0
+
+
+def _posterior(item: dict | None, prior: tuple | None = None) -> float:
+    a, b = _beta_params(item, prior or (0.2, 3.8))
+    return a / (a + b) if (a + b) > 0 else 0.05
+
+
+def sample_probability(item: dict | None, prior: tuple | None = None) -> float:
+    """Thompson 采样：从 Beta 后验抽一个 p。"""
+    a, b = _beta_params(item, prior or (0.2, 3.8))
+    try:
+        return random.betavariate(max(0.05, a), max(0.05, b))
+    except Exception:
         return a / (a + b)
-    return (item["w_ok"] + a) / (item["w_n"] + a + b)
 
 
-def blended_probability(stats: dict, provider: str, country: str, region: str = "") -> dict:
-    """分层混合后的成功率，附各层明细，便于页面上解释。"""
+def blended_probability(stats: dict, provider: str, country: str, region: str = "",
+                        *, sample: bool = False) -> dict:
     prior = prior_pair(stats)
-    p_region = _posterior(stats["region"].get((provider, country, region or "#" + country)), prior)
-    p_country = _posterior(stats["country"].get((provider, country)), prior)
-    p_provider = _posterior(stats["provider"].get(provider), prior)
-    p_global = _posterior(stats["global"].get("__all__"), prior)
-
-    n_region = stats["region"].get((provider, country, region or "#" + country), {}).get("n", 0)
-    n_country = stats["country"].get((provider, country), {}).get("n", 0)
-    n_provider = stats["provider"].get(provider, {}).get("n", 0)
-    n_global = stats["global"].get("__all__", {}).get("n", 0)
-
-    weights = [float(n_region), float(n_country) * 0.6, float(n_provider) * 0.3, float(n_global) * 0.1]
-    total_w = sum(weights) or 1.0
-    p = (p_region * weights[0] + p_country * weights[1]
-         + p_provider * weights[2] + p_global * weights[3]) / total_w
-    return {
-        "p": p, "p_region": p_region, "p_country": p_country,
-        "p_provider": p_provider, "p_global": p_global,
-        "n_region": int(n_region), "n_country": int(n_country),
-        "n_provider": int(n_provider), "n_global": int(n_global),
-    }
+    keys = [
+        (stats["region"], (provider, country, region or "#" + country), 1.0),
+        (stats["country"], (provider, country), 0.6),
+        (stats["provider"], provider, 0.3),
+        (stats["global"], "__all__", 0.1),
+    ]
+    total_w = 0.0
+    acc = 0.0
+    detail = {}
+    for bucket, key, factor in keys:
+        item = bucket.get(key)
+        n = item["n"] if item else 0
+        p = sample_probability(item, prior) if sample else _posterior(item, prior)
+        weight = float(n) * factor
+        total_w += weight
+        acc += p * weight
+        detail[key if isinstance(key, str) else key[-1]] = (round(p, 4), n)
+    p = (acc / total_w) if total_w > 0 else _posterior(None, prior)
+    return {"p": p, "detail": detail, "n_total": int(total_w)}
 
 
 def hour_factor(stats: dict, provider: str, hour: int | None = None) -> float:
-    """当前时段的成功率修正系数。样本不足返回 1.0。"""
     hour = datetime.now(timezone.utc).hour if hour is None else int(hour)
     item = stats["hour"].get((provider, hour % 24))
     if not item or item["n"] < 3:
         return 1.0
-    p_hour = _posterior(item)
-    p_provider = _posterior(stats["provider"].get(provider))
-    if p_provider <= 0:
+    p_hour = _posterior(item, prior_pair(stats))
+    p_prov = _posterior(stats["provider"].get(provider), prior_pair(stats))
+    if p_prov <= 0:
         return 1.0
-    factor = p_hour / p_provider
-    return max(1.0 - HOUR_BUCKET_PENALTY, min(1.0 + HOUR_BUCKET_PENALTY, factor))
+    return max(1.0 - HOUR_BUCKET_PENALTY, min(1.0 + HOUR_BUCKET_PENALTY, p_hour / p_prov))
 
 
 def burst_failed(provider: str, country: str, *, window_min: int = BURST_WINDOW_MIN,
@@ -220,7 +242,7 @@ def burst_failed(provider: str, country: str, *, window_min: int = BURST_WINDOW_
     try:
         conn = db._sqlite_conn()
         rows = conn.execute(
-            "select status from sms_pool_reservations "
+            "select status, failure_code from sms_pool_reservations "
             "where provider=? and country=? and created_at >= datetime('now', ?) "
             "order by id desc limit ?",
             (provider, country, "-%d minute" % int(window_min), int(limit)),
@@ -235,20 +257,38 @@ def burst_failed(provider: str, country: str, *, window_min: int = BURST_WINDOW_
                 pass
     if len(rows) < int(limit):
         return False
-    return all(str(r["status"] or "") != "completed" for r in rows)
+    # 只有质量类失败才触发熔断；我们自己的流程失败不该封号段
+    return all(classify_failure(r["status"], r["failure_code"]) != "ok" for r in rows) and all(
+        classify_failure(r["status"], r["failure_code"]) == "quality" for r in rows
+    )
 
 
-def _ucb(total_weight: float, n: int) -> float:
-    if n <= 0:
-        return 0.5
-    return UCB_C * math.sqrt(math.log(max(2.0, total_weight)) / max(1.0, float(n)))
+def country_streak(provider: str, country: str, *, window_min: int = DIVERSITY_WINDOW_MIN) -> int:
+    """近 N 分钟同一 (平台,国家) 的购买次数，用于连买降权。"""
+    conn = None
+    try:
+        conn = db._sqlite_conn()
+        row = conn.execute(
+            "select count(*) c from sms_pool_reservations "
+            "where provider=? and country=? and created_at >= datetime('now', ?)",
+            (provider, country, "-%d minute" % int(window_min)),
+        ).fetchone()
+        return int(row["c"] or 0) if row else 0
+    except Exception:
+        return 0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def rank_candidates(provider: str, rows, max_usd: float, stats: dict | None = None,
-                    *, need: int = 1) -> list:
-    """给一个平台的价格表打分排序，返回可直接消费的候选列表。"""
+                    *, need: int = 1, sample: bool = True) -> list:
+    """打分排序：期望成本 = 单价 / p（p 可用 Thompson 采样）。"""
     stats = stats if stats is not None else build_stats()
-    total_weight = stats["global"].get("__all__", {}).get("w_n", 0.0) or 1.0
+    prior = prior_pair(stats)
     out = []
     for row in rows or []:
         try:
@@ -259,44 +299,44 @@ def rank_candidates(provider: str, rows, max_usd: float, stats: dict | None = No
         if cost <= 0 or stock <= 0 or cost > float(max_usd or 0):
             continue
         country = str(row.get("country") or "")
-        blend = blended_probability(stats, provider, country)
-        hf = hour_factor(stats, provider)
-        p_eff = min(0.95, blend["p"] * hf)
+        blend = blended_probability(stats, provider, country, sample=sample)
+        p_mean = _posterior(stats["country"].get((provider, country)), prior)
         stock_credit = min(1.0, stock / max(1.0, float(need) * STOCK_FULL_CREDIT))
-        p_adj = max(0.01, p_eff * (0.6 + 0.4 * stock_credit))
-        p_score = min(0.95, p_adj + _ucb(total_weight, blend["n_region"] or blend["n_country"]))
-        expected_cost = cost / max(1e-6, p_score)
+        p_eff = max(0.002, blend["p"] * hour_factor(stats, provider) * (0.6 + 0.4 * stock_credit))
+        streak = country_streak(provider, country)
+        diversity = 1.0 + DIVERSITY_STEP * max(0, streak - DIVERSITY_FREE)
         out.append({
             "provider": provider,
             "country": country,
             "cost_usd": round(cost, 5),
             "stock": stock,
-            "p_success": round(p_eff, 3),
-            "p_base": round(blend["p"], 3),
-            "hour_factor": round(hf, 3),
-            "samples": blend["n_region"] or blend["n_country"],
-            "score": round(p_score, 3),
-            "expected_cost_usd": round(expected_cost, 5),
+            "p_success": round(p_eff, 4),
+            "p_mean": round(p_mean, 4),
+            "samples": int(blend["n_total"]),
+            "streak": streak,
+            "expected_cost_usd": round(cost / max(1e-6, p_eff), 5),
+            "ts_cost_usd": round(cost / max(1e-6, p_eff) * diversity, 5),
             "burst_blocked": burst_failed(provider, country),
         })
-    out.sort(key=lambda item: (item["burst_blocked"], item["expected_cost_usd"]))
+    out.sort(key=lambda item: (item["burst_blocked"], item["ts_cost_usd"]))
     return out
 
 
 def budget_verdict(stats: dict, cap_cny_hour: float | None, cap_cny_24h: float | None = None) -> dict:
-    """预算节流建议：不直接停，只给调用方一个可解释的判断。"""
     spent_1h = float(stats.get("spent_cny_1h") or 0)
     spent_24h = float(stats.get("spent_cny_24h") or 0)
-    # 只有 confirmed 参与预算判断；refunded/unknown 单列展示，避免虚高
-    verdict = {"spent_cny_1h": round(spent_1h, 3), "spent_cny_24h": round(spent_24h, 3),
-               "refunded_cny_24h": round(float(stats.get("refunded_cny_24h") or 0), 3),
-               "unknown_cny_24h": round(float(stats.get("unknown_cny_24h") or 0), 3),
-               "inflight_cny_24h": round(float(stats.get("inflight_cny_24h") or 0), 3),
-               "blocked": False, "reason": ""}
+    verdict = {
+        "spent_cny_1h": round(spent_1h, 3),
+        "spent_cny_24h": round(spent_24h, 3),
+        "refunded_cny_24h": round(float(stats.get("refunded_cny_24h") or 0), 3),
+        "unknown_cny_24h": round(float(stats.get("unknown_cny_24h") or 0), 3),
+        "inflight_cny_24h": round(float(stats.get("inflight_cny_24h") or 0), 3),
+        "blocked": False, "reason": "",
+    }
     if cap_cny_hour and spent_1h >= float(cap_cny_hour):
         verdict["blocked"] = True
-        verdict["reason"] = "近 1 小时花费 %.2f 已达上限 %.2f" % (spent_1h, float(cap_cny_hour))
+        verdict["reason"] = "近 1 小时实扣 %.2f 已达上限 %.2f" % (spent_1h, float(cap_cny_hour))
     elif cap_cny_24h and spent_24h >= float(cap_cny_24h):
         verdict["blocked"] = True
-        verdict["reason"] = "近 24 小时花费 %.2f 已达上限 %.2f" % (spent_24h, float(cap_cny_24h))
+        verdict["reason"] = "近 24 小时实扣 %.2f 已达上限 %.2f" % (spent_24h, float(cap_cny_24h))
     return verdict

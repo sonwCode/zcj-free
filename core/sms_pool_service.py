@@ -696,7 +696,7 @@ def probe_providers(providers: list[str]) -> list[dict]:
                 http.close()
             except Exception:
                 pass
-        ranked = pool_selector.rank_candidates(name, rows, float(max_usd), stats, need=1)
+        ranked = pool_selector.rank_candidates(name, rows, float(max_usd), stats, need=1, sample=False)
         if not ranked:
             return {"provider": name, "available": False, "candidates": 0,
                     "error": "价内无库存（上限 ¥%s）" % max_cny}
@@ -713,7 +713,10 @@ def probe_providers(providers: list[str]) -> list[dict]:
             "min_price_cny": "%.3f" % cny,
             "best_country": str(best["country"]),
             "p_success": best["p_success"],
+            "p_mean": best.get("p_mean"),
+            "streak": best.get("streak"),
             "expected_cost_usd": best["expected_cost_usd"],
+            "ts_cost_usd": best.get("ts_cost_usd", best["expected_cost_usd"]),
             "burst_blocked": best["burst_blocked"],
             "top": ranked[:5],
         }

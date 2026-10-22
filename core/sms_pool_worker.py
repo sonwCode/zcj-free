@@ -280,7 +280,7 @@ def run_once() -> dict:
                         probes,
                         key=lambda item: (
                             0 if item.get("available") else 1,
-                            float(item.get("expected_cost_usd") or 10 ** 6),
+                            float(item.get("ts_cost_usd") or item.get("expected_cost_usd") or 10 ** 6),
                         ),
                     )
                     if item.get("provider")
