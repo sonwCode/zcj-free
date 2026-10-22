@@ -55,11 +55,19 @@ def _network_deferred_result(result: dict, *, attempts: int, proxy: str | None) 
 
 
 def _configured_live_check_proxies(proxy_cfg) -> list[str]:
-    """查活优先使用套餐专用代理池，未配置时使用注册代理池。"""
-    values = list(getattr(proxy_cfg, "PLAN_CHECK_PROXY", []) or [])
-    if not values:
-        values = list(getattr(proxy_cfg, "PROXY_POOL", []) or [])
-    return [str(value).strip() for value in values if str(value).strip()]
+    """查活出口候选：住宅代理池优先，套餐专用代理（常为本地隧道）兜底。
+
+    实测：PLAN_CHECK_PROXY 指向 127.0.0.1:789x 时出口是机房 IP（OVH/阿里云），
+    auth.openai.com/api/accounts/authorize 第一发就被 Cloudflare 403；
+    而用户代理池里配的是住宅代理（rotgb），能正常通过。所以池优先。
+    """
+    pool = [str(v).strip() for v in (getattr(proxy_cfg, "PROXY_POOL", []) or []) if str(v).strip()]
+    dedicated = [str(v).strip() for v in (getattr(proxy_cfg, "PLAN_CHECK_PROXY", []) or []) if str(v).strip()]
+    ordered: list[str] = []
+    for item in pool + dedicated:
+        if item not in ordered:
+            ordered.append(item)
+    return ordered
 
 
 def _live_proxy_route(proxy_url: str, proxy_cfg) -> dict:
@@ -112,7 +120,7 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
         # 换到别的隧道出口常常第一发就被 Cloudflare 403（实测新注册账号查活全灭）。
         account_proxy = str(account.get("proxy_used") or "").strip()
         if account_proxy and account_proxy not in candidates:
-            candidates = [account_proxy] + list(candidates)
+            candidates = list(candidates) + [account_proxy]
         route = resolve_plan_check_route(explicit_proxy=proxy)
         # 查活规则独立于套餐查询的 direct/auto 选择：只要任一代理池有数据，
         # 就禁止直连，并从池中随机选择一个出口。

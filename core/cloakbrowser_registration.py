@@ -293,6 +293,12 @@ def _run_cloak_registration_impl(
         openai_password = _fill_password_page_if_present(driver, email, timeout=25)
         _check_manual_stop()
         if openai_password:
+            try:
+                from core.codex_oauth import remember_registration_password as _remember_pwd
+                _remember_pwd(email, openai_password)
+                logger.info("[Cloak注册] 已保存注册密码，查活可走密码登录")
+            except Exception:
+                logger.warning("[Cloak注册] 保存注册密码失败", exc_info=True)
             # 密码校验后会重新发送注册 OTP；只接受该阶段之后到达的验证码。
             otp_after_ts = time.time()
             logger.info("[Cloak注册][OTP] 密码阶段完成，重置 OTP 起始时间")
@@ -390,6 +396,12 @@ def _run_cloak_registration_impl(
                 late_password = _fill_password_page_if_present(driver, email, timeout=45)
                 if late_password:
                     openai_password = late_password
+                    try:
+                        from core.codex_oauth import remember_registration_password as _remember_pwd
+                        _remember_pwd(email, openai_password)
+                        logger.info("[Cloak注册] 已保存注册密码，查活可走密码登录")
+                    except Exception:
+                        logger.warning("[Cloak注册] 保存注册密码失败", exc_info=True)
                     otp_after_ts = time.time()
                     current_otp = None
                     logger.info("[Cloak注册][OTP] 收码后页面才进入密码页，已补完密码并重新等待OTP")

@@ -213,31 +213,6 @@ def _network_preflight_with_retry(
             return session, authorize_url
         except Exception as exc:
             last_exc = exc
-            challenge = _challenge_error_from_exception(exc)
-            if challenge is not None:
-                try:
-                    close_browser_session(session)
-                except Exception:
-                    pass
-                logger.warning(
-                    "[查活] 当前出口收到 Cloudflare challenge，停止同会话重试并切换出口：%s",
-                    challenge,
-                )
-                raise challenge from exc
-            # A 403 from the ChatGPT/Cloudflare preflight is an exit-level
-            # block for this proxy session. Retrying the same BrowserSession
-            # only replays the blocked request and delays the outer route
-            # switch, which made a batch look like every account had failed.
-            if "403" in str(exc or ""):
-                try:
-                    close_browser_session(session)
-                except Exception:
-                    pass
-                logger.warning(
-                    "[查活] 网络预检收到 HTTP 403，立即交给上层切换代理：%s",
-                    str(exc)[:200],
-                )
-                raise
             if attempt >= max_attempts or not _is_retryable_network_error(exc):
                 try:
                     close_browser_session(session)
