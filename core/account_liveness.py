@@ -4,8 +4,9 @@ import logging
 import json
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from core import db
 from core.session import BrowserSession, close_browser_session
@@ -28,7 +29,6 @@ from core.account_export import (
     follow_oauth_callback,
 )
 from core.email_provider import wait_for_otp
-from core.http_diagnostics import is_cloudflare_challenge, response_summary
 
 logger = logging.getLogger(__name__)
 _LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
@@ -54,24 +54,6 @@ _SESSION_FINGERPRINT_KEYS = {
     "react_container_key",
     "react_resources_key",
 }
-
-
-class CloudflareChallengeError(RuntimeError):
-    """An upstream Cloudflare challenge, not evidence that the account is dead."""
-
-    error_code = "cloudflare_challenge"
-    retryable = True
-
-    def __init__(self, response):
-        self.response = response
-        super().__init__(f"Cloudflare challenge: {response_summary(response)}")
-
-
-def _challenge_error_from_exception(exc: BaseException) -> CloudflareChallengeError | None:
-    response = getattr(exc, "response", None)
-    if response is None or not is_cloudflare_challenge(response):
-        return None
-    return CloudflareChallengeError(response)
 
 
 def _is_retryable_network_error(exc: BaseException) -> bool:
@@ -155,14 +137,7 @@ def _warm_login_fingerprint_context(session: BrowserSession) -> None:
         # 代理端口可连接不代表其上游 TLS 可用，避免坏节点长期占住 worker。
         timeout=12,
     )
-    try:
-        nav.raise_for_status()
-    except Exception as exc:
-        challenge = _challenge_error_from_exception(exc)
-        if challenge is not None:
-            logger.warning("[查活] 登录页被 Cloudflare challenge 拦截：%s", challenge)
-            raise challenge from exc
-        raise
+    nav.raise_for_status()
     observe = getattr(session, "observe_chatgpt_document", None)
     if callable(observe):
         observe(nav)
@@ -287,39 +262,6 @@ def _extract_factor_id(result: dict | None, continue_url: str) -> str:
     return ""
 
 
-_PWD_MISMATCH_PATH = Path(__file__).resolve().parent.parent / "data" / "password_mismatch.json"
-
-
-def _password_mismatch_known(email: str) -> bool:
-    """该账号是否已被确认"本地密码与账号不一致"。"""
-    try:
-        if not _PWD_MISMATCH_PATH.exists():
-            return False
-        data = json.loads(_PWD_MISMATCH_PATH.read_text(encoding="utf-8"))
-        return str(email or "").strip().lower() in {k.lower() for k in data}
-    except Exception:
-        return False
-
-
-def _remember_password_mismatch(email: str, status: int) -> None:
-    """记住密码失效的账号，后续直接走邮箱 OTP，不再白试一次。"""
-    try:
-        _PWD_MISMATCH_PATH.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
-        if _PWD_MISMATCH_PATH.exists():
-            try:
-                data = json.loads(_PWD_MISMATCH_PATH.read_text(encoding="utf-8")) or {}
-            except Exception:
-                data = {}
-        data[str(email or "").strip().lower()] = {
-            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "status": int(status),
-        }
-        _PWD_MISMATCH_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    except Exception:
-        logger.debug("[查活] 记录密码失效清单失败", exc_info=True)
-
-
 def _password_verify(session: BrowserSession, password: str) -> dict:
     from core.openai_auth import build_sentinel_header, request_sentinel_token
 
@@ -335,20 +277,6 @@ def _password_verify(session: BrowserSession, password: str) -> dict:
         data=json.dumps({"password": password}),
         allow_redirects=False,
     )
-    if resp.status_code in (400, 401, 403):
-        # 本地保存的密码与账号上的密码不一致（早期注册的密码存在输入串码 bug）。
-        # 这不是账号失效，也不是网络问题，交给上层回退邮箱 OTP。
-        body = ""
-        try:
-            body = str(resp.text or "")
-        except Exception:
-            body = ""
-        logger.warning(
-            "[查活] 密码校验被拒：status=%s body=%s", resp.status_code, body[:160],
-        )
-        raise RuntimeError(
-            f"password_verify_failed: status={resp.status_code} body={body[:160]}"
-        )
     resp.raise_for_status()
     return resp.json()
 
@@ -432,69 +360,6 @@ def _stored_access_token(email: str) -> str:
         return ""
 
 
-def _probe_existing_access_token(email: str, access_token: str) -> dict | None:
-    """通过只读 usage 接口快速确认现有 AT，避免页面 403 误判账号失败。"""
-    token = str(access_token or "").strip()
-    if not token:
-        return None
-    try:
-        from curl_cffi.requests import Session as CurlSession
-        from config import IMPERSONATE, USER_AGENT
-
-        http = CurlSession(impersonate=IMPERSONATE)
-        try:
-            response = http.get(
-                "https://chatgpt.com/backend-api/wham/usage",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/json",
-                    "User-Agent": USER_AGENT,
-                    "Origin": "https://chatgpt.com",
-                    "Referer": "https://chatgpt.com/",
-                },
-                timeout=15,
-            )
-            status = int(getattr(response, "status_code", 0) or 0)
-            if status != 200:
-                logger.info("[查活] 现有 AT 快速校验未通过 HTTP %s，继续完整查活：%s", status, email)
-                return None
-            try:
-                payload = response.json()
-            except Exception:
-                payload = {}
-            payload = payload if isinstance(payload, dict) else {}
-            user_id = str(payload.get("user_id") or "").strip()
-            plan_type = str(payload.get("plan_type") or "").strip()
-            logger.info(
-                "[查活] 现有 AT 快速校验成功，跳过页面登录/OTP：%s user_id=%s plan=%s",
-                email,
-                user_id or "-",
-                plan_type or "-",
-            )
-            return {
-                "ok": True,
-                "status": "live",
-                "checked_at": _now(),
-                "access_token": token,
-                "session": {
-                    "accessToken": token,
-                    "user": {"id": user_id, "email": str(payload.get("email") or email)},
-                    "account": {"planType": plan_type} if plan_type else {},
-                },
-                "token_probe": "backend-api/wham/usage",
-            }
-        finally:
-            http.close()
-    except Exception as exc:
-        logger.info(
-            "[查活] 现有 AT 快速校验异常，继续完整查活：%s %s: %s",
-            email,
-            type(exc).__name__,
-            str(exc)[:180],
-        )
-        return None
-
-
 def _clear_optional_bootstrap_circuit(session: BrowserSession) -> None:
     """清理可选登录态预热造成的本地熔断，不影响后续正式认证请求。
 
@@ -542,30 +407,6 @@ def _exception_status_code(exc: BaseException) -> int | None:
     return status or None
 
 
-def _is_otp_not_sent(exc: BaseException) -> bool:
-    """"服务端没发验证码"：邮箱可读但无新邮件。
-
-    与 otp_timeout（我们取不到）区分开：这类重试只会再等一轮并且更容易触发风控，
-    所以直接判失败、不重试、不切换到干净会话。
-    """
-    code = str(getattr(exc, "error_code", "") or "").lower()
-    if code == "otp_not_sent":
-        return True
-    return "otp_not_sent" in str(exc or "").lower()
-
-
-def _is_otp_wait_timeout(exc: BaseException) -> bool:
-    """取码阶段"等待验证码超时"（没有 HTTP 响应）属于可重试的瞬时问题。
-
-    取码源在投递抖动时往往先超时、几十秒后验证码才到；此前只把 400/401/422
-    视为可重试，导致日志写着"第 1/3 次"却第一次就放弃。
-    """
-    if _exception_status_code(exc) is not None:
-        return False
-    text = str(exc or "").lower()
-    return ("超时" in str(exc or "")) or ("timeout" in text) or ("timed out" in text)
-
-
 def _validate_reauth_with_retry(
     session: BrowserSession,
     email: str,
@@ -602,13 +443,10 @@ def _validate_reauth_with_retry(
                     error_code=dead_code,
                 ) from exc
 
-            if _is_otp_not_sent(exc):
-                logger.warning("[查活] 服务端未发送验证码（otp_not_sent），不再重试：%s", email)
-                raise
             status = _exception_status_code(exc)
             # reauth validate 的 403 可能是 Cloudflare/出口拦截；不要在同一已熔断
             # 会话上反复发送 OTP，交给上层的直连兜底处理。
-            retryable_otp = status in (400, 401, 422) or _is_otp_wait_timeout(exc)
+            retryable_otp = status in (400, 401, 422)
             if attempt >= max_otp_attempts or not retryable_otp:
                 raise
             logger.warning(
@@ -635,27 +473,9 @@ def _login_via_reauth(
     logger.info("[查活] reauth authorize URL 已获取")
     human_delay("api")
     final_url = _follow_reauth_with_retry(session, auth_url)
-    logger.info("[查活] reauth 落点页面：%s", str(final_url or "")[:200])
     dead_code = detect_account_unusable_text(final_url)
     if dead_code:
         raise AccountUnusableError(f"账号已废弃（{dead_code}）", error_code=dead_code)
-    # 只有真正落到邮箱验证码页才会发新邮件。此前不校验落点，落到密码/TOTP/
-    # 错误页时仍死等 90 秒，最终把"根本没发信"误报成"收件箱为空"。
-    lowered = str(final_url or "").lower()
-    if not any(k in lowered for k in ("email-verification", "email_verification")):
-        stage = next(
-            (label for key, label in (
-                ("totp", "TOTP 动态码"), ("authenticator", "TOTP 动态码"),
-                ("/mfa", "多因素认证"), ("/add-phone", "绑定手机号"),
-                ("/log-in/password", "密码登录"), ("/about-you", "资料填写"),
-                ("deactivated", "账号已停用"), ("error=", "错误页"),
-            ) if key in lowered),
-            "未知页面",
-        )
-        raise RuntimeError(
-            f"重认证未进入邮箱验证页（落点={stage}，url={str(final_url or '')[:160]}），"
-            "服务端不会发送新的邮箱验证码"
-        )
     human_delay("navigate")
     logger.info("[查活] 已跟随 reauth authorize URL，开始等待邮箱 OTP")
     continue_url = _validate_reauth_with_retry(
@@ -715,30 +535,8 @@ def _login_via_password_or_otp(
             email_source=email_source,
         )
 
-    if _password_mismatch_known(email):
-        logger.warning("[查活] 该账号本地密码已知与账号不一致，直接走邮箱 OTP：%s", email)
-        return _login_via_email_otp(
-            session,
-            email,
-            otp_after_ts,
-            email_source=email_source,
-        )
     logger.info("[查活] 账号存在密码，优先走密码登录：%s", email)
-    try:
-        password_result = _password_verify(session, password)
-    except RuntimeError as pwd_exc:
-        if "password_verify_failed" not in str(pwd_exc):
-            raise
-        _remember_password_mismatch(email, 401)
-        logger.warning(
-            "[查活] 本地密码与账号不一致，回退邮箱 OTP：%s %s", email, str(pwd_exc)[:160],
-        )
-        return _login_via_email_otp(
-            session,
-            email,
-            otp_after_ts,
-            email_source=email_source,
-        )
+    password_result = _password_verify(session, password)
     continue_url = _extract_continue_url(password_result)
     page = password_result.get("page") if isinstance(password_result, dict) else {}
     page = page if isinstance(page, dict) else {}
@@ -795,21 +593,29 @@ def _login_via_full_web_flow(
         proxy,
         fingerprint_state=fingerprint_state,
     )
-    otp_after_ts = time.time()
-    final_url = follow_authorize(session, authorize_url)
-    dead_code = detect_account_unusable_text(final_url)
-    if dead_code:
-        raise AccountUnusableError(
-            f"账号已废弃（{dead_code}）",
-            error_code=dead_code,
+    # 预检返回后本函数持有会话；只有成功返回才把释放责任移交给上层。
+    try:
+        otp_after_ts = time.time()
+        final_url = follow_authorize(session, authorize_url)
+        dead_code = detect_account_unusable_text(final_url)
+        if dead_code:
+            raise AccountUnusableError(
+                f"账号已废弃（{dead_code}）",
+                error_code=dead_code,
+            )
+        session_info = _login_via_password_or_otp(
+            session,
+            email,
+            otp_after_ts,
+            email_source=email_source,
         )
-    session_info = _login_via_password_or_otp(
-        session,
-        email,
-        otp_after_ts,
-        email_source=email_source,
-    )
-    return session, session_info
+        return session, session_info
+    except BaseException:
+        try:
+            close_browser_session(session)
+        except Exception:
+            logger.warning("[查活] 登录失败后的会话清理异常", exc_info=True)
+        raise
 
 
 def log_path(email: str) -> Path:
@@ -854,13 +660,8 @@ def _validate_with_retry(
             current_otp = None
             time.sleep(1)
         except Exception as exc:
-            if _is_otp_not_sent(exc):
-                logger.warning("[查活] 登录阶段服务端未发送验证码（otp_not_sent），不再重试：%s", email)
-                raise
             # 提交 OTP 后的网络抖动（连接断开/超时/代理波动）：同一会话重发验证码再验证一次。
-            if attempt >= max_otp_attempts or not (
-                _is_retryable_network_error(exc) or _is_otp_wait_timeout(exc)
-            ):
+            if attempt >= max_otp_attempts or not _is_retryable_network_error(exc):
                 raise
             last_exc = exc
             logger.warning("[查活] OTP 验证网络抖动，重新发送后再取（%s/%s）：%s", attempt, max_otp_attempts, str(exc)[:180])
@@ -881,9 +682,10 @@ def check_account_liveness(
     clear_log: bool = True,
     email_source: str | None = None,
     fingerprint_state: dict | None = None,
+    on_authenticated: Callable[[dict, BrowserSession], dict] | None = None,
 ) -> dict:
     """
-    重新登录账号并刷新最新 accessToken。
+    重新登录账号并刷新最新 accessToken，关闭会话前在原会话查询套餐。
 
     返回：
       {
@@ -892,6 +694,7 @@ def check_account_liveness(
         access_token: str?,
         session: dict?,
         checked_at: ISO,
+        plan_result: dict?,  # 查活成功时的同会话套餐查询结果；失败不影响查活 ok
         error: str?
       }
     """
@@ -926,20 +729,8 @@ def check_account_liveness(
         logger.info("[查活] 日志文件：%s", path)
         logger.info("[查活] 开始重新登录：%s", email)
         existing_access_token = _stored_access_token(email)
-        fast_result = _probe_existing_access_token(email, existing_access_token)
-        if fast_result is not None:
-            return fast_result
         has_totp = bool(_account_totp_secret(email))
-        # 注册时保存了密码的账号优先走"邮箱 → 密码 → MFA(TOTP)"，
-        # 不再默认落回 reauth 的邮箱 OTP 链路：OTP 依赖邮件投递，
-        # 服务端不发码时整条链路就废了，而密码本身是可靠的。
-        password_available = bool(_account_registration_password(email))
-        if password_available:
-            logger.info(
-                "[查活] 流程：登录页 → 密码 → MFA(TOTP，如有) → OAuth callback → Session/AT"
-                "（账号已保存密码，跳过 reauth 邮件 OTP）"
-            )
-        if existing_access_token and not has_totp and not password_available:
+        if existing_access_token and not has_totp:
             # 2FA 设置流程已经验证：先用已有 AT 预热 ChatGPT 登录态，再走
             # reauth → 邮箱 OTP → callback。该链路不依赖容易被 CF 拦截的
             # /api/auth/providers。已开启 TOTP 的账号保留密码 → MFA 路径，
@@ -966,17 +757,7 @@ def check_account_liveness(
                     email_source=email_source,
                 )
             except Exception as reauth_exc:
-                if _is_otp_not_sent(reauth_exc):
-                    logger.warning(
-                        "[查活] 服务端未发送验证码（otp_not_sent），不再切换干净会话重试：%s", email,
-                    )
-                    raise
-                # 取码超时（邮箱里没有新验证码）不能直接判失败：账号已停用时
-                # 服务端根本不会发新验证码，继续等只会把真实状态藏起来。
-                # 这类情况同样回退到完整登录，由服务端给出确定结论。
-                if not (
-                    _is_retryable_network_error(reauth_exc) or _is_otp_wait_timeout(reauth_exc)
-                ):
+                if not _is_retryable_network_error(reauth_exc):
                     raise
                 # reauth/callback 的同会话阶段重试已经耗尽。继续复用熔断的
                 # Cookie Jar 没有意义；参考 plus 纯协议注册，建立干净会话并按
@@ -1017,7 +798,7 @@ def check_account_liveness(
         account = session_info.get("account") or {}
         logger.info("[查活] 正常：%s user_id=%s plan=%s", email, user.get("id"), account.get("planType"))
         fp = _safe_fingerprint_for_account(session)
-        return {
+        result = {
             "ok": True,
             "status": "live",
             "checked_at": checked_at,
@@ -1027,6 +808,18 @@ def check_account_liveness(
             "fingerprint": fp,
             "fingerprint_text": _safe_fingerprint_text_for_account(session),
         }
+        if on_authenticated is not None:
+            return on_authenticated(result, session)
+        # 直接调用底层查活时也自动查询；业务队列通过 hook 先落库新 AT，再统一占用套餐任务。
+        try:
+            from core.chatgpt_plan import check_account_plan
+            from core.plan_check_service import _wait_for_rate_slot
+            _wait_for_rate_slot()
+            result["plan_result"] = check_account_plan(access_token, session=session)
+        except Exception as exc:
+            result["plan_result"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        return result
+
     except AccountUnusableError as exc:
         code = getattr(exc, "error_code", "") or detect_account_unusable_text(str(exc)) or "account_deactivated"
         logger.warning("[查活] 已废号：%s %s", email, code)
@@ -1037,9 +830,7 @@ def check_account_liveness(
             logger.warning("[查活] 已废号：%s %s", email, code)
             return {"ok": False, "status": "deactivated", "checked_at": checked_at, "error": code}
         logger.warning("[查活] 失败：%s %s: %s", email, type(exc).__name__, str(exc)[:260])
-        failure_status = "otp_not_sent" if _is_otp_not_sent(exc) else "failed"
-        return {"ok": False, "status": failure_status, "checked_at": checked_at,
-                "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+        return {"ok": False, "status": "failed", "checked_at": checked_at, "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
     finally:
         try:
             logger.info("[查活] 结束：%s", email)
@@ -1050,7 +841,11 @@ def check_account_liveness(
                     pass
             if fh is not None:
                 root_logger.removeHandler(fh)
-                fh.close()
+                try:
+                    fh.close()
+                except Exception:
+                    # 已保存的查活/套餐结果不应被日志文件关闭异常覆盖。
+                    logger.warning("[查活] 日志文件关闭失败", exc_info=True)
         finally:
             with _RUNNING_LOCK:
                 _RUNNING.discard(key)
