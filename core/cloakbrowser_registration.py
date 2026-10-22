@@ -569,6 +569,15 @@ def _run_cloak_registration_impl(
                         if driver and not driver_quit:
                             driver_quit = True
                             try:
+                                from core import cloak_profile_cache as _pc
+
+                                if _pc.enabled() and unique_profile:
+                                    _user_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+                                    if _user_dir:
+                                        _pc.finalize(driver, Path(_user_dir).expanduser() / unique_profile)
+                            except Exception:
+                                pass
+                            try:
                                 close_cloak_driver(driver, timeout_seconds=_CLOAK_CLEANUP_TIMEOUT_SECONDS)
                             except Exception:
                                 try:

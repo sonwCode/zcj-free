@@ -732,9 +732,18 @@ def build_cloak_driver(
         run_profile = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(profile_name or "").strip())
         run_profile = run_profile.strip(".-_")[:64] or f"cloak-{uuid.uuid4().hex[:12]}"
         user_data_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+        profile_dir = None
         if user_data_dir:
             profile_dir = Path(user_data_dir).expanduser() / run_profile
             profile_dir.mkdir(parents=True, exist_ok=True)
+            # 冷启动前注入缓存模板：静态资源直接命中，省掉重复下载
+            try:
+                from core import cloak_profile_cache as _cache
+
+                _cache.prepare(profile_dir)
+                _cache.cleanup()
+            except Exception:
+                pass
             user_data_dir = str(profile_dir)
         logger.info(
             "[Cloak] 启动 CloakBrowser：job_id=%s profile=%s headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
