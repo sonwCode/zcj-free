@@ -3416,9 +3416,23 @@ def clear_roxy_browser_auth_state(driver) -> bool:
     if not _bounded_codex_browser_call("Network.clearBrowserCookies", lambda: driver.execute_cdp_cmd("Network.clearBrowserCookies", {}), driver=driver):
         return False
     logger.info("[Codex][Browser] 已清理浏览器 Cookie")
-    if not _bounded_codex_browser_call("Network.clearBrowserCache", lambda: driver.execute_cdp_cmd("Network.clearBrowserCache", {}), driver=driver):
-        return False
-    logger.info("[Codex][Browser] 已清理浏览器 Cache")
+    # 复用窗口时默认保留 HTTP 缓存：JS/CSS 静态资源重复下载是流量大头
+    # （实测单次注册下载 17~21MB，其中脚本占 78%）。
+    # 只清 Cookie/Storage 已足够隔离登录态；需要彻底干净时把
+    # BROWSER_KEEP_CACHE_ON_REUSE 设为 False。
+    _keep_cache = True
+    try:
+        from config import codex as _cc
+
+        _keep_cache = bool(getattr(_cc, "BROWSER_KEEP_CACHE_ON_REUSE", True))
+    except Exception:
+        _keep_cache = True
+    if not _keep_cache:
+        if not _bounded_codex_browser_call("Network.clearBrowserCache", lambda: driver.execute_cdp_cmd("Network.clearBrowserCache", {}), driver=driver):
+            return False
+        logger.info("[Codex][Browser] 已清理浏览器 Cache")
+    else:
+        logger.info("[Codex][Browser] 保留浏览器 Cache（省流量模式）")
     for origin in origins:
         if not _bounded_codex_browser_call(
             f"Storage.clearDataForOrigin:{origin}",
