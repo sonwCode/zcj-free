@@ -30,23 +30,28 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _cfg_get(name: str, default=None):
+    """配置可能位于 config.cloakbrowser / config.sms_pool / config.codex。"""
+    for module_name in ("cloakbrowser", "sms_pool", "codex"):
+        try:
+            mod = __import__("config." + module_name, fromlist=["x"])
+        except Exception:
+            continue
+        value = getattr(mod, name, None)
+        if value not in (None, ""):
+            return value
+    return default
+
+
 def _cfg_bool(name: str, default: bool) -> bool:
-    try:
-        from config import codex as _c
-
-        value = getattr(_c, name, None)
-        if value is None:
-            return default
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-    except Exception:
+    value = _cfg_get(name, None)
+    if value is None:
         return default
-
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 def _cfg_int(name: str, default: int) -> int:
+    value = _cfg_get(name, None)
     try:
-        from config import codex as _c
-
-        value = getattr(_c, name, None)
         return int(value) if value not in (None, "") else default
     except Exception:
         return default
@@ -62,9 +67,7 @@ def ttl_days() -> int:
 
 def _root() -> Path | None:
     try:
-        from config import codex as _c
-
-        raw = str(getattr(_c, "CLOAK_USER_DATA_DIR", "") or "").strip()
+        raw = str(_cfg_get("CLOAK_USER_DATA_DIR", "") or "").strip()
         if not raw:
             return None
         root = Path(raw).expanduser()
