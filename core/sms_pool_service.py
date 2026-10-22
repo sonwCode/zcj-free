@@ -22,7 +22,9 @@ from core import sms_pool_store as store
 logger = logging.getLogger(__name__)
 
 # codex_status 中表示"尚未成功接码"的终态集合
-_CODEX_PENDING = {"", "not_started", "failed", "stopped", "skipped", "cancelled"}
+# codex 尚未成功的终态/待跑状态都应可补跑；"pending" 是任务排队中的状态，
+# 之前漏在里面，导致 4 个账号永远进不了候选。
+_CODEX_PENDING = {"", "not_started", "pending", "failed", "stopped", "skipped", "cancelled"}
 
 
 def _pool_cfg():
