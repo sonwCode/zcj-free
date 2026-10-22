@@ -886,7 +886,16 @@ def check_account_liveness(
         if fast_result is not None:
             return fast_result
         has_totp = bool(_account_totp_secret(email))
-        if existing_access_token and not has_totp:
+        # 注册时保存了密码的账号优先走"邮箱 → 密码 → MFA(TOTP)"，
+        # 不再默认落回 reauth 的邮箱 OTP 链路：OTP 依赖邮件投递，
+        # 服务端不发码时整条链路就废了，而密码本身是可靠的。
+        password_available = bool(_account_registration_password(email))
+        if password_available:
+            logger.info(
+                "[查活] 流程：登录页 → 密码 → MFA(TOTP，如有) → OAuth callback → Session/AT"
+                "（账号已保存密码，跳过 reauth 邮件 OTP）"
+            )
+        if existing_access_token and not has_totp and not password_available:
             # 2FA 设置流程已经验证：先用已有 AT 预热 ChatGPT 登录态，再走
             # reauth → 邮箱 OTP → callback。该链路不依赖容易被 CF 拦截的
             # /api/auth/providers。已开启 TOTP 的账号保留密码 → MFA 路径，

@@ -55,11 +55,6 @@ _ACCOUNT_DEAD_CODES = frozenset({
     "account_banned",
 })
 
-
-def is_account_unusable_code(code: str) -> bool:
-    return str(code or "").strip() in _ACCOUNT_DEAD_CODES
-
-
 _ACCOUNT_DEAD_TEXT_MARKERS = (
     "account_deactivated",
     "account_deleted",
@@ -769,6 +764,7 @@ def validate_email_otp(session: BrowserSession, code: str, sentinel_header: str 
         logger.error("[步骤10] 响应内容已省略：status=%s content_length=%s", resp.status_code, len(resp.text or ""))
         # 先看是不是"账号已废"——这类邮箱再试也没用，单独抛出让上层标 failed
         err_code = _extract_error_code(resp)
+        logger.warning("[步骤10] 提取到的错误码：%s", err_code or "(空)")
         if err_code in _ACCOUNT_DEAD_CODES:
             raise AccountUnusableError(
                 f"账号已废弃（{err_code}），邮箱不可再用", error_code=err_code,
