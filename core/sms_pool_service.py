@@ -470,6 +470,37 @@ def _probe_cache_seconds() -> int:
     return max(0, min(300, value))
 
 
+def _bad_countries(hours: int = 24, min_attempts: int = 3):
+    """近 N 小时"尝试 >= N 且 0 成功"的 (provider, country)。
+
+    有些号源没有地区名（例如 smsbower 的 country=1004），按地区名排除根本拦不住，
+    只能在查价阶段按"这个国家近期全灭"直接跳过，避免买了再释放。
+    """
+    out = set()
+    conn = None
+    try:
+        conn = db._sqlite_conn()
+        rows = conn.execute(
+            "select provider, country, count(*) total, "
+            "sum(case when status='completed' then 1 else 0 end) ok "
+            "from sms_pool_reservations where created_at >= datetime('now', ?) "
+            "group by provider, country",
+            ("-%d hour" % int(hours),),
+        ).fetchall()
+        for row in rows:
+            if int(row["total"] or 0) >= int(min_attempts) and int(row["ok"] or 0) == 0:
+                out.add((str(row["provider"] or "").lower(), str(row["country"] or "")))
+    except Exception:
+        logger.debug("[号码池] 读取全灭国家失败", exc_info=True)
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return out
+
+
 def _countries_with_success(hours: int = 720):
     """近 N 天有过成功成交的 (provider, country) 集合。
 
@@ -646,6 +677,7 @@ def probe_providers(providers: list[str]) -> list[dict]:
         "vaksms": lambda http: sms_provider._vaksms_price_rows(http, service_code, country),
     }
     decay_scores, last_success = _country_decay_scores()
+    bad_countries = _bad_countries()
     hour_penalty = _hour_demand_penalty()
 
     def _one(name: str) -> dict:
@@ -678,6 +710,9 @@ def probe_providers(providers: list[str]) -> list[dict]:
             if stock <= 0 or cost <= 0 or cost > max_usd:
                 continue
             country_id = str(row.get("country") or "")
+            if (name, country_id) in bad_countries and (name, country_id) not in with_success:
+                skipped += 1
+                continue
             if (
                 country_id
                 and country_id in region_blocked
