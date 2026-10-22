@@ -182,7 +182,8 @@ def anonymous_bootstrap(session: BrowserSession, *, strict: bool = False) -> Non
     logger.info("[Bootstrap] 匿名态 ChatGPT 预热完成")
 
 
-def authenticated_bootstrap(session: BrowserSession, access_token: str | None = None, *, strict: bool = False) -> None:
+def authenticated_bootstrap(session: BrowserSession, access_token: str | None = None, *,
+                           strict: bool = False, light: bool | None = None) -> None:
     """登录态 ChatGPT bootstrap，access_token 存在时补 Authorization。"""
     referer = "https://chatgpt.com/"
     tz = session.js_timezone_offset_min()
@@ -193,20 +194,34 @@ def authenticated_bootstrap(session: BrowserSession, access_token: str | None = 
             h["authorization"] = access_token if access_token.lower().startswith("bearer ") else f"Bearer {access_token}"
         return h
 
-    logger.info("[Bootstrap] 登录态 ChatGPT 预热开始")
+    # light=True 时只保留"判断账号是否可用"真正需要的端点：
+    # /me（身份+套餐）、/accounts/optimized/check、/accounts/check/v4。
+    # 其余（consent、settings、system_hints×3、models、rooms、pins、conversations、
+    # aip eligibility）只影响本地面板展示，实测占预热流量的大头。
+    if light is None:
+        try:
+            from config import codex as _cc
+
+            light = bool(getattr(_cc, "LIVE_CHECK_LIGHT_BOOTSTRAP", True))
+        except Exception:
+            light = True
+    logger.info("[Bootstrap] 登录态 ChatGPT 预热开始%s", "（轻量模式）" if light else "")
     diagnostic_paths = {
         "/accounts/optimized/check",
         "/me",
         f"/accounts/check/v4-2023-04-27?timezone_offset_min={tz}",
     }
-    for path in [
-        "/user_granular_consent",
-        "/settings/is_adult",
+    core_paths = [
         "/accounts/optimized/check",
         "/me",
         f"/accounts/check/v4-2023-04-27?timezone_offset_min={tz}",
+    ]
+    extra_paths = [
+        "/user_granular_consent",
+        "/settings/is_adult",
         "/settings/user",
-    ]:
+    ]
+    for path in core_paths + ([] if light else extra_paths):
         resp = _safe_request(
             f"auth {path}",
             lambda p=path: session.get(f"{_API_BASE}{p}", headers=headers()),
@@ -214,6 +229,12 @@ def authenticated_bootstrap(session: BrowserSession, access_token: str | None = 
         )
         if path in diagnostic_paths:
             logger.info("[资格诊断] endpoint=%s %s", path, _diagnostic_response_summary(resp))
+    if light:
+        log_cookies = getattr(session, "log_cookie_names", None)
+        if callable(log_cookies):
+            log_cookies("authenticated_bootstrap_complete_light")
+        logger.info("[Bootstrap] 轻量预热完成（已跳过 9 个非必需端点）")
+        return
     prep = _chat_requirements_prepare(session, _API_BASE, referer, strict=strict)
     for url in [
         f"{_API_BASE}/system_hints?mode=basic",
