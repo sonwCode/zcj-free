@@ -1879,7 +1879,7 @@ def _select_sms_channel_or_raise(driver) -> None:
     # React/React-Aria 可能在失焦或异步校验后重渲染表单。选择后重新读取
     # checked 状态，提交前若回到 WhatsApp 就立即释放当前激活并换号。
     last_state = state
-    for selection_round in range(1, 4):
+    for selection_round in range(1, 2):
         target_info = driver.execute_script(r"""
         const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length))
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
@@ -2908,43 +2908,6 @@ def _prepare_and_submit_add_phone(driver, e164: str, *, label: str = "") -> dict
             "[Codex][Browser] 重填后校验通过：visible=%s hidden=%s dialCode=%s country=%s",
             phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-",
             phone_verify.get("dialCode") or "-", phone_verify.get("countryText") or "-",
-        )
-    # 提交前复核：国家、号码、SMS 通道都可能被 React 重渲染重置。
-    # 实测：国家从 Brazil 回到 Canada(+1) 后掩码按美式格式化，11 位号码被截成 10 位
-    # （expected 67984240990 → actual (679) 842-4099），提交必然失败。
-    for preflight_round in range(1, 3):
-        state_before = _phone_page_state(driver)
-        value_ok = True
-        try:
-            _verify_add_phone_value_before_submit(driver, e164, dial_code)
-        except RuntimeError as verify_exc:
-            value_ok = False
-            logger.warning(
-                "[Codex][Browser] 提交前号码/国家校验失败（第 %s 次）：%s",
-                preflight_round, str(verify_exc)[:200],
-            )
-        channel_ok = _sms_channel_ok(state_before)
-        if value_ok and channel_ok:
-            if preflight_round > 1:
-                logger.info("[Codex][Browser] 提交前复核通过（第 %s 次）", preflight_round)
-            break
-        if not channel_ok:
-            js_result = _js_select_sms_channel(driver)
-            logger.info("[Codex][Browser] 提交前重新选择 SMS 通道 js=%s", str(js_result)[:120])
-        if not value_ok:
-            phone_fill = _set_phone_value(driver, e164, timeout=10)
-            _blur_active_input_and_wait(driver, label="提交前重填完成")
-            logger.info(
-                "[Codex][Browser] 提交前重填号码：visible=%s hidden=%s country=%s",
-                phone_fill.get("actualVisible"), phone_fill.get("hiddenValue") or "-",
-                phone_fill.get("selectedText") or "-",
-            )
-            _js_select_sms_channel(driver)
-        _stop_sleep(0.3)
-    final_state = _phone_page_state(driver)
-    if not _sms_channel_ok(final_state):
-        raise RuntimeError(
-            f"whatsapp_channel_reverted: 提交前仍未选中 SMS state={_phone_state_digest(final_state)}"
         )
     submit_info = _click_add_phone_continue_button(driver, timeout=10)
     logger.info("[Codex][Browser] 手机号提交动作已派发：%s，开始检查验证码页/错误状态", submit_info)
