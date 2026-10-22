@@ -634,16 +634,17 @@ def _cooldown_snapshot() -> list:
 
 
 def probe_providers(providers: list[str]) -> list[dict]:
-    """并行查询各平台价内库存（只调 getPrices，不下单）。
+    """并行查价 + 智能选号（只调 getPrices，不下单）。
 
-    优化点：
-      1. 三家同时查，不再串行（原来 smsbower 等库存最多阻塞 90 秒）；
-      2. 结果缓存 SMS_POOL_PROBE_CACHE_SECONDS 秒，连续多轮共享，省一次往返；
-      3. 过滤"近 6 小时只失败没成功"的国家，避免必然失败的平台排在最前面。
+    排序依据不再是"最便宜"，而是"每个成功号码的期望成本"：
+      期望成本 = 单价 / 后验成功率（含时段修正、库存折算、UCB 探索）
+    地区黑名单已移除，任何号段都有机会被尝试；只有 30 分钟内连败 3 次
+    的 (平台,国家) 会在本轮排到最后（burst_blocked）。
     """
     from concurrent.futures import ThreadPoolExecutor
 
     from core import sms_provider
+    from core import pool_selector
 
     names = [str(p or "").strip().lower() for p in (providers or []) if str(p or "").strip()]
     if not names:
@@ -668,7 +669,8 @@ def probe_providers(providers: list[str]) -> list[dict]:
         with _PROBE_CACHE_LOCK:
             hit = _PROBE_CACHE.get(cache_key)
         if hit and (datetime.now(timezone.utc).timestamp() - hit[0]) < ttl:
-            logger.info("[号码池] 复用 %.0fs 前的查价结果", datetime.now(timezone.utc).timestamp() - hit[0])
+            logger.info("[号码池] 复用 %.0fs 前的查价结果",
+                        datetime.now(timezone.utc).timestamp() - hit[0])
             return [dict(item) for item in hit[1]]
 
     probes = {
@@ -676,9 +678,7 @@ def probe_providers(providers: list[str]) -> list[dict]:
         "tiger": lambda http: sms_provider._tiger_price_rows(http, service_code, country),
         "vaksms": lambda http: sms_provider._vaksms_price_rows(http, service_code, country),
     }
-    decay_scores, last_success = _country_decay_scores()
-    bad_countries = _bad_countries()
-    hour_penalty = _hour_demand_penalty()
+    stats = pool_selector.build_stats()
 
     def _one(name: str) -> dict:
         fn = probes.get(name)
@@ -696,65 +696,26 @@ def probe_providers(providers: list[str]) -> list[dict]:
                 http.close()
             except Exception:
                 pass
-        priced = []
-        skipped = 0
-        skipped_region = 0
-        region_blocked = sms_provider.region_blocked_countries(name)
-        with_success = _countries_with_success()
-        for row in rows:
-            try:
-                cost = Decimal(str(row.get("cost") if row.get("cost") is not None else row.get("price") or "0"))
-                stock = int(row.get("count") or row.get("stock") or 0)
-            except (InvalidOperation, TypeError, ValueError):
-                continue
-            if stock <= 0 or cost <= 0 or cost > max_usd:
-                continue
-            country_id = str(row.get("country") or "")
-            if (name, country_id) in bad_countries and (name, country_id) not in with_success:
-                skipped += 1
-                continue
-            if (
-                country_id
-                and country_id in region_blocked
-                and (name, country_id) not in with_success
-            ):
-                skipped_region += 1
-                continue
-            score = decay_scores.get((name, country_id), 0.0)
-            last_ok = last_success.get((name, country_id), 0.0)
-            recent_success = last_ok and (datetime.now(timezone.utc).timestamp() - last_ok) < 7200
-            if score <= -1.2 and not recent_success:
-                skipped += 1
-                continue
-            sort_cost = cost + Decimal(str(hour_penalty.get((name, country_id), 0.0)))
-            priced.append((sort_cost, cost, country_id))
-        if not priced:
-            reason = "价内无库存"
-            parts = []
-            if skipped_region:
-                parts.append("%d 国地区被排除" % skipped_region)
-            if skipped:
-                parts.append("%d 国近 6 小时全失败" % skipped)
-            if parts:
-                reason = "价内 %s，已跳过" % "，".join(parts)
+        ranked = pool_selector.rank_candidates(name, rows, float(max_usd), stats, need=1)
+        if not ranked:
             return {"provider": name, "available": False, "candidates": 0,
-                    "skipped_countries": skipped, "skipped_region": skipped_region,
-                    "error": reason}
-        priced.sort(key=lambda item: (item[0], item[1]))
-        _sort_cost, best_cost, best_country = priced[0]
+                    "error": "价内无库存（上限 ¥%s）" % max_cny}
+        best = ranked[0]
         try:
-            best_cny = format(best_cost / (max_usd / max_cny), ".3f")
+            cny = float(best["cost_usd"]) / (float(max_usd) / float(max_cny))
         except Exception:
-            best_cny = ""
+            cny = 0.0
         return {
             "provider": name,
-            "available": True,
-            "candidates": len(priced),
-            "skipped_countries": skipped,
-            "skipped_region": skipped_region,
-            "min_price_usd": format(best_cost, "f"),
-            "min_price_cny": best_cny,
-            "best_country": str(best_country or ""),
+            "available": not best["burst_blocked"],
+            "candidates": len(ranked),
+            "min_price_usd": "%.4f" % float(best["cost_usd"]),
+            "min_price_cny": "%.3f" % cny,
+            "best_country": str(best["country"]),
+            "p_success": best["p_success"],
+            "expected_cost_usd": best["expected_cost_usd"],
+            "burst_blocked": best["burst_blocked"],
+            "top": ranked[:5],
         }
 
     with ThreadPoolExecutor(max_workers=min(4, len(names)), thread_name_prefix="pool-probe") as pool:
@@ -762,59 +723,17 @@ def probe_providers(providers: list[str]) -> list[dict]:
 
     if ttl > 0:
         with _PROBE_CACHE_LOCK:
-            _PROBE_CACHE[cache_key] = (datetime.now(timezone.utc).timestamp(), [dict(item) for item in results])
+            _PROBE_CACHE[cache_key] = (
+                datetime.now(timezone.utc).timestamp(), [dict(item) for item in results]
+            )
 
     for item in results:
         logger.info(
-            "[号码池] 并行查价：provider=%s available=%s 候选=%s 地区排除=%s 历史失败=%s 最低=%s",
+            "[号码池] 智能选号：provider=%s available=%s 候选=%s p=%s 期望成本=$%s 熔断=%s",
             item.get("provider"), item.get("available"), item.get("candidates"),
-            item.get("skipped_region", 0), item.get("skipped_countries", 0),
-            ("¥" + item["min_price_cny"]) if item.get("min_price_cny") else "-",
+            item.get("p_success"), item.get("expected_cost_usd"), item.get("burst_blocked"),
         )
     return results
-
-
-def acquire_many(need: int, order: list[str]) -> list[dict]:
-    """并行抢号：多家有货时每家先各抢一个，缺额再顺序补。
-
-    原实现是逐家串行 acquire_one（每单 1~7 秒，capacity=4 时要 5~25 秒）。
-    现在第一波并行下单，把 4 个号的总耗时压到单家的量级。
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    need = max(0, int(need or 0))
-    names = [str(n or "").strip().lower() for n in (order or []) if str(n or "").strip()]
-    if need <= 0 or not names:
-        return []
-
-    results: list[dict] = []
-    got = 0
-    wave = names[:need] if len(names) >= need else list(names)
-    if wave:
-        with ThreadPoolExecutor(max_workers=min(4, len(wave)), thread_name_prefix="pool-buy") as pool:
-            futures = {pool.submit(acquire_one, name): name for name in wave}
-            for fut in as_completed(futures):
-                name = futures[fut]
-                try:
-                    row = fut.result()
-                except Exception as exc:
-                    logger.warning("[号码池] 并行抢号异常：provider=%s error=%s", name, exc)
-                    row = None
-                results.append({"provider": name, "reservation": row})
-                if row:
-                    got += 1
-
-    shortfall = need - got
-    if shortfall > 0:
-        for name in names:
-            if shortfall <= 0:
-                break
-            row = acquire_one(name)
-            if row:
-                results.append({"provider": name, "reservation": row})
-                shortfall -= 1
-    return results
-
 def acquire_one(provider: str) -> dict | None:
     """通过底层 provider 采购一个号码并登记为 reserved。
 

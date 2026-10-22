@@ -253,9 +253,15 @@ def run_once() -> dict:
                     continue
                 if item.get("available"):
                     price = item.get("min_price_cny") or ""
+                    _p = item.get("p_success")
+                    _cost = item.get("expected_cost_usd")
                     provider_state[name] = {
                         "status": "waiting",
-                        "last_result": f"候选 {item.get('candidates')} 个" + (f"，最低 ¥{price}" if price else ""),
+                        "last_result": (
+                            f"候选 {item.get('candidates')} 个，最低 ¥{price}，p={_p}，期望成本 {_cost}"
+                        ) if _p is not None else (
+                            f"候选 {item.get('candidates')} 个" + (f"，最低 ¥{price}" if price else "")
+                        ),
                     }
                 else:
                     provider_state[name] = {
@@ -274,13 +280,29 @@ def run_once() -> dict:
                         probes,
                         key=lambda item: (
                             0 if item.get("available") else 1,
-                            float(item.get("min_price_usd") or 10 ** 6),
+                            float(item.get("expected_cost_usd") or 10 ** 6),
                         ),
                     )
                     if item.get("provider")
                 ]
                 providers = order + [p for p in providers if p not in order]
-            buy_results = service.acquire_many(need, providers)
+            try:
+                from core import pool_selector as _selector
+
+                _verdict = _selector.budget_verdict(
+                    _selector.build_stats(),
+                    getattr(cfg, "SMS_POOL_HOURLY_BUDGET_CNY", 0) or 0,
+                    getattr(cfg, "SMS_POOL_DAILY_BUDGET_CNY", 0) or 0,
+                )
+            except Exception:
+                _verdict = {"blocked": False, "reason": ""}
+            if _verdict.get("blocked"):
+                logger.warning("[号码池] 预算节流：%s，本轮不采购", _verdict.get("reason"))
+                _write_poll_state(status="paused", providers=providers, provider_state=provider_state,
+                                  last_result="预算节流：" + str(_verdict.get("reason")))
+                buy_results = []
+            else:
+                buy_results = service.acquire_many(need, providers)
             for item in buy_results:
                 name = str(item.get("provider") or "")
                 reservation = item.get("reservation")
