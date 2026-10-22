@@ -108,6 +108,11 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             return {"ok": False, "status": "failed", "error": "账号已删除或查活状态已被重置"}
         from config import proxy as proxy_cfg
         candidates = _configured_live_check_proxies(proxy_cfg)
+        # 优先用"注册这个账号时用的出口"：同 IP 的 CF Cookie/设备指纹是配套的，
+        # 换到别的隧道出口常常第一发就被 Cloudflare 403（实测新注册账号查活全灭）。
+        account_proxy = str(account.get("proxy_used") or "").strip()
+        if account_proxy and account_proxy not in candidates:
+            candidates = [account_proxy] + list(candidates)
         route = resolve_plan_check_route(explicit_proxy=proxy)
         # 查活规则独立于套餐查询的 direct/auto 选择：只要任一代理池有数据，
         # 就禁止直连，并从池中随机选择一个出口。
