@@ -2126,7 +2126,7 @@ def recover_interrupted_email_changes() -> int:
         return count
 
 
-def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
+def update_account_liveness(acc_id: int, result: dict | None = None, **kwargs) -> bool:
     """写回账号查活结果；成功时同步刷新最新 access_token 和账号基础信息。"""
     result = result or {}
     with _LOCK:
@@ -2267,13 +2267,17 @@ def recover_interrupted_totp_setups() -> int:
         return recovered
 
 
-def claim_account_live_check(acc_id: int, trigger: str = "manual") -> bool:
+def claim_account_live_check(acc_id: int, trigger: str = "manual", *, run_id: str | None = None, expected_email: str | None = None) -> bool:
     """原子占用账号查活任务；已有 queued/running 时返回 False。"""
     with _LOCK:
         rows = _load_accounts()
         row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
         if row is None:
             return False
+        if expected_email and str(row.get("email") or "").strip().lower() != str(expected_email).strip().lower():
+            return False
+        if run_id:
+            row["live_check_run_id"] = str(run_id)
         if row.get("live_check_status") in {"queued", "running"}:
             try:
                 stamp_key = "live_check_queued_at" if row.get("live_check_status") == "queued" else "live_check_started_at"
@@ -2316,7 +2320,7 @@ def recover_interrupted_live_checks() -> int:
         return recovered
 
 
-def mark_account_live_check_running(acc_id: int) -> bool:
+def mark_account_live_check_running(acc_id: int, run_id: str | None = None, expected_run_id: str | None = None) -> bool:
     """把账号查活任务标记为运行中。"""
     with _LOCK:
         rows = _load_accounts()
