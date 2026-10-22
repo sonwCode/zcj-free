@@ -897,6 +897,27 @@ def reconcile() -> dict:
     return {"expired_released": expired_count, "orphaned": orphaned}
 
 
+def _budget_snapshot() -> dict:
+    """花费三分类 + 成功率，供 UI 展示（只有 confirmed 参与预算判断）。"""
+    try:
+        from core import pool_selector
+
+        stats = pool_selector.build_stats()
+        verdict = pool_selector.budget_verdict(
+            stats,
+            getattr(_pool_cfg(), "SMS_POOL_HOURLY_BUDGET_CNY", 0) or 0,
+            getattr(_pool_cfg(), "SMS_POOL_DAILY_BUDGET_CNY", 0) or 0,
+        )
+        g = stats.get("global", {}).get("__all__", {})
+        n = float(g.get("w_n") or 0)
+        verdict["success_rate"] = round((g.get("w_ok") or 0) / n, 4) if n else None
+        verdict["samples"] = int(g.get("n") or 0)
+        return verdict
+    except Exception:
+        logger.debug("[号码池] 读取预算快照失败", exc_info=True)
+        return {}
+
+
 def pool_status() -> dict:
     """号码池运行状态快照，供 UI 展示。"""
     cfg = _pool_cfg()
@@ -908,6 +929,7 @@ def pool_status() -> dict:
         "providers": pool_providers(),
         "configured_providers": configured_pool_providers(),
         "poll_interval": int(getattr(cfg, "SMS_POOL_POLL_INTERVAL", 120) or 120),
+        "budget": _budget_snapshot(),
         "max_price_cny": str(price_cny) if price_cny is not None else "",
         "max_price_usd": format(max_usd, "f") if max_usd is not None else "",
         "fx_source": fx_source,

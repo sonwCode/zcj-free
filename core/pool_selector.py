@@ -72,6 +72,8 @@ def build_stats(hours: int = 72) -> dict:
         "spent_cny_1h": 0.0,
         "spent_cny_24h": 0.0,
         "refunded_cny_24h": 0.0,
+        "unknown_cny_24h": 0.0,
+        "inflight_cny_24h": 0.0,
     }
     conn = None
     now = datetime.now(timezone.utc)
@@ -116,39 +118,70 @@ def build_stats(hours: int = 72) -> dict:
         _add(stats["global"], "__all__", w, ok)
         _add(stats["hour"], (provider, ts.astimezone(timezone.utc).hour if age_h else now.hour), w, ok)
 
-        # 花费只能算"真正扣钱"的号码：cancelled / *cancelled 会退款，
-        # 算进去会把预算统计放大十几倍（实测 736 个 cancelled 占 ¥126）。
+        # 花费三分类（只有前两类进预算）：
+        #   confirmed = 能证明被扣费：completed / failed / expired / orphaned /
+        #               not_released_*（号码没退回去）
+        #   refunded  = cancelled / *cancel* / released_by_oauth（钱退回）
+        #   unknown   = status=released 但没有 release_result（释放没记录结果）
         rel = str(row["release_result"] or "").lower()
-        refunded = ("cancel" in rel) or ("refund" in rel) or ("released_by_oauth" in rel)
-        in_flight = str(row["status"] or "") in {"reserved", "running"}
+        status = str(row["status"] or "")
         try:
             price = float(row["price_cny"] or 0)
         except (TypeError, ValueError):
             price = 0.0
-        if price > 0:
-            if refunded:
-                if age_h <= 24.0:
-                    stats["refunded_cny_24h"] += price
-            elif not in_flight:
-                if age_h <= 1.0:
-                    stats["spent_cny_1h"] += price
-                if age_h <= 24.0:
-                    stats["spent_cny_24h"] += price
+        if price <= 0:
+            continue
+        refunded = ("cancel" in rel) or ("refund" in rel) or ("released_by_oauth" in rel)
+        in_flight = status in {"reserved", "running"}
+        settled_fail = status in {"failed", "expired", "orphaned"} or rel.startswith("not_released")
+        if refunded:
+            bucket_key = "refunded_cny_24h"
+        elif status == "completed" or settled_fail:
+            bucket_key = "spent_cny_24h"
+            if age_h <= 1.0:
+                stats["spent_cny_1h"] += price
+        elif status == "released" and not rel:
+            bucket_key = "unknown_cny_24h"
+        elif in_flight:
+            bucket_key = "inflight_cny_24h"
+        else:
+            bucket_key = "unknown_cny_24h"
+        if age_h <= 24.0:
+            stats[bucket_key] = float(stats.get(bucket_key) or 0.0) + price
     return stats
 
 
-def _posterior(item: dict | None) -> float:
+PRIOR_STRENGTH = 4.0   # 先验等效样本量
+
+
+def prior_pair(stats: dict | None = None) -> tuple:
+    """先验不再写死 30%，而是取全局实测成功率的 Beta(α,β)。
+
+    全局 1.1% 就按 1.1% 做先验，冷门号段会被估成 1% 而不是 30%，
+    这样"期望成本"才和现实一致。
+    """
+    item = (stats or {}).get("global", {}).get("__all__") if stats else None
+    if item and item["w_n"] > 0:
+        p = min(0.9, max(0.001, item["w_ok"] / item["w_n"]))
+    else:
+        p = 0.05
+    return p * PRIOR_STRENGTH, (1.0 - p) * PRIOR_STRENGTH
+
+
+def _posterior(item: dict | None, prior: tuple | None = None) -> float:
+    a, b = prior if prior else (PRIOR_ALPHA, PRIOR_BETA)
     if not item or item["n"] <= 0:
-        return PRIOR_ALPHA / (PRIOR_ALPHA + PRIOR_BETA)
-    return (item["w_ok"] + PRIOR_ALPHA) / (item["w_n"] + PRIOR_ALPHA + PRIOR_BETA)
+        return a / (a + b)
+    return (item["w_ok"] + a) / (item["w_n"] + a + b)
 
 
 def blended_probability(stats: dict, provider: str, country: str, region: str = "") -> dict:
     """分层混合后的成功率，附各层明细，便于页面上解释。"""
-    p_region = _posterior(stats["region"].get((provider, country, region or "#" + country)))
-    p_country = _posterior(stats["country"].get((provider, country)))
-    p_provider = _posterior(stats["provider"].get(provider))
-    p_global = _posterior(stats["global"].get("__all__"))
+    prior = prior_pair(stats)
+    p_region = _posterior(stats["region"].get((provider, country, region or "#" + country)), prior)
+    p_country = _posterior(stats["country"].get((provider, country)), prior)
+    p_provider = _posterior(stats["provider"].get(provider), prior)
+    p_global = _posterior(stats["global"].get("__all__"), prior)
 
     n_region = stats["region"].get((provider, country, region or "#" + country), {}).get("n", 0)
     n_country = stats["country"].get((provider, country), {}).get("n", 0)
@@ -254,8 +287,11 @@ def budget_verdict(stats: dict, cap_cny_hour: float | None, cap_cny_24h: float |
     """预算节流建议：不直接停，只给调用方一个可解释的判断。"""
     spent_1h = float(stats.get("spent_cny_1h") or 0)
     spent_24h = float(stats.get("spent_cny_24h") or 0)
+    # 只有 confirmed 参与预算判断；refunded/unknown 单列展示，避免虚高
     verdict = {"spent_cny_1h": round(spent_1h, 3), "spent_cny_24h": round(spent_24h, 3),
                "refunded_cny_24h": round(float(stats.get("refunded_cny_24h") or 0), 3),
+               "unknown_cny_24h": round(float(stats.get("unknown_cny_24h") or 0), 3),
+               "inflight_cny_24h": round(float(stats.get("inflight_cny_24h") or 0), 3),
                "blocked": False, "reason": ""}
     if cap_cny_hour and spent_1h >= float(cap_cny_hour):
         verdict["blocked"] = True
