@@ -24,6 +24,6 @@ b8321f84  core/cloakbrowser_registration.py
 4956eba8  core/roxy_codex_oauth.py
 ad5af30a  core/chatgpt_plan.py
 cf2477d3  core/plan_check_service.py
-a014d2cc  webui/app.py
-4db65336  webui/templates/index.html
+dacc4673  webui/app.py
+1f746a55  webui/templates/index.html
 cd3c430f  main.py

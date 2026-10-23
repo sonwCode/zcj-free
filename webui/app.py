@@ -842,73 +842,116 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.post("/api/accounts/cleanup-dead")
     def api_accounts_cleanup_dead():
-        """一键清理已废账号。
+        """一键清理查活已废账号。
 
         Body:
-          dry_run:           True 只统计不删除（默认 True，避免误删）
-          mode:              "delete"（默认）或 "archive"
-          older_than_days:   只清理最近一次查活早于 N 天的号；0/None=不限
-          only_token_revoked: True 时只清理错误里带 token_revoked 的号
+          dry_run:            True 只统计不删除（默认）
+          mode:               "delete"（默认）或 "archive"
+          verify:             True 用库里的 access_token 真探活（默认 True）
+          older_than_days:    只清理最近查活早于 N 天的号；0/None=不限
 
-        判定为"已废"：live_check_status == "deactivated"。
-        不会碰 live / queued / running 的账号。
+        判定为已废（满足任一即可）：
+          1. verify=True 时，用 AT 请求 /backend-api/me 返回 401/token_revoked；
+          2. live_check_status == "deactivated"。
+        绝不会动探活成功（200）的账号。
         """
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
         data = request.get_json(silent=True) or {}
         dry_run = bool(data.get("dry_run", True))
         mode = str(data.get("mode") or "delete").strip().lower()
         if mode not in ("delete", "archive"):
             return jsonify({"ok": False, "error": "mode 只能是 delete 或 archive"}), 400
+        verify = bool(data.get("verify", True))
         try:
             older_days = int(data.get("older_than_days") or 0)
         except (TypeError, ValueError):
             older_days = 0
-        only_revoked = bool(data.get("only_token_revoked", False))
-
-        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-
-        accounts = db.list_accounts(limit=100000) or []
         cutoff = None
         if older_days > 0:
             cutoff = _dt.now(_tz.utc) - _td(days=older_days)
 
-        candidates = []
-        for acc in accounts:
-            if str(acc.get("live_check_status") or "").strip().lower() != "deactivated":
-                continue
-            if only_revoked:
-                err = str(acc.get("live_check_error") or "").lower()
-                if "token_revoked" not in err and "account_deactivated" not in err:
-                    continue
-            if cutoff is not None:
-                checked_raw = str(acc.get("live_checked_at") or "").strip()
-                if not checked_raw:
+        accounts = db.list_accounts(limit=100000) or []
+        if cutoff is not None:
+            filtered = []
+            for acc in accounts:
+                raw = str(acc.get("live_checked_at") or "").strip()
+                if not raw:
                     continue
                 try:
-                    checked_at = _dt.fromisoformat(checked_raw.replace("Z", "+00:00"))
-                    if checked_at.tzinfo is None:
-                        checked_at = checked_at.replace(tzinfo=_tz.utc)
+                    when = _dt.fromisoformat(raw.replace("Z", "+00:00"))
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=_tz.utc)
                 except ValueError:
                     continue
-                if checked_at > cutoff:
-                    continue
-            candidates.append(acc)
+                if when <= cutoff:
+                    filtered.append(acc)
+            accounts = filtered
+
+        dead = []
+        alive_ids = []
+        unknown = []
+        if verify:
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _probe(acc):
+                token = str(acc.get("access_token") or "").strip()
+                if not token:
+                    return (acc, "no_token")
+                try:
+                    import requests as _rq
+
+                    resp = _rq.get(
+                        "https://chatgpt.com/backend-api/me",
+                        headers={"Authorization": "Bearer " + token,
+                                 "Accept": "application/json",
+                                 "User-Agent": "Mozilla/5.0"},
+                        timeout=15,
+                    )
+                    if resp.status_code == 200:
+                        return (acc, "alive")
+                    body = (resp.text or "")[:200].lower()
+                    if resp.status_code == 401 or "token_revoked" in body or "account_deactivated" in body:
+                        return (acc, "dead")
+                    return (acc, "unknown")
+                except Exception:
+                    return (acc, "unknown")
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for acc, verdict in pool.map(_probe, accounts):
+                    if verdict == "dead":
+                        dead.append(acc)
+                    elif verdict == "alive":
+                        alive_ids.append(int(acc.get("id") or 0))
+                    else:
+                        unknown.append(acc)
+        else:
+            for acc in accounts:
+                if str(acc.get("live_check_status") or "").strip().lower() == "deactivated":
+                    dead.append(acc)
+                else:
+                    alive_ids.append(int(acc.get("id") or 0))
 
         sample = [
             {"id": int(a.get("id") or 0), "email": a.get("email"),
-             "error": str(a.get("live_check_error") or "")[:80]}
-            for a in candidates[:20]
+             "error": str(a.get("live_check_error") or "token_revoked")[:80]}
+            for a in dead[:20]
         ]
         payload = {
             "ok": True,
             "dry_run": dry_run,
             "mode": mode,
-            "count": len(candidates),
+            "verified": verify,
+            "scanned": len(accounts),
+            "count": len(dead),
+            "alive": len(alive_ids),
+            "unknown": len(unknown),
             "sample": sample,
         }
-        if dry_run or not candidates:
+        if dry_run or not dead:
             return jsonify(payload)
 
-        ids = [int(a.get("id") or 0) for a in candidates if int(a.get("id") or 0) > 0]
+        ids = [int(a.get("id") or 0) for a in dead if int(a.get("id") or 0) > 0]
         if mode == "archive":
             archived, skipped = [], []
             for acc_id in ids:
@@ -923,7 +966,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         else:
             deleted, skipped = db.delete_accounts(account_ids=ids)
             payload.update({"deleted_count": len(deleted), "skipped": skipped[:20]})
-        logger.info("[清理已废] mode=%s 处理 %d 个账号", mode, len(ids))
+        logger.info("[清理已废] verify=%s mode=%s 处理 %d 个账号", verify, mode, len(ids))
         return jsonify(payload)
 
     @app.post("/api/accounts/<int:acc_id>/note")
