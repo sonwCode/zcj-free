@@ -375,8 +375,68 @@ README 写得很清楚：**它不伪造 token，而是把 full-page interstitial
 
 ---
 
-## 9. 其余项目
+## 9. sky3100/FrciblyK12
 
-（后续轮次补齐：sky3100、ZRainbow1275、basketikun、pirder、HengXin666、
+规模：334 个 py 文件、9.9 万行。最大模块 `platforms/chatgpt/payment.py` 375KB、
+`platforms/chatgpt/browser_register.py` 199KB。它有完整的
+`services/`（解题服务）、`core/registration`+`core/executors`（任务执行）、
+`frontend/src`（真实前端源码，留给前端轮次）。
+
+### 9.1 turnstile_solver 的做法
+
+不是付费接口，而是**本地浏览器解题服务**：
+
+- 依赖 `camoufox.async_api.AsyncCamoufox` 与 `patchright.async_api.async_playwright`；
+- 打开页面 → 等待 widget 渲染（3s）→ 轮询 30 次、最多点击 10 次；
+- token 提取方式：页面内挂钩 `window._turnstileTokenCallback`，
+  把 token 写进隐藏 input `input[name="cf-turnstile-response"]`，再由 Python 读该 input 的值。
+
+对我们意义：我们的协议链路 token 由真实 sdk.js 生成（已确认与线上同版本），
+不需要另建解题服务；但**它的"挂钩 callback + 读隐藏 input"提取法**，
+在将来需要从页面抓 Turnstile token 时可直接照搬。
+
+### 9.2 frontend/src（前端轮次的素材）
+
+它是本批项目里少数带**前端源码**的（不是构建产物）：
+`frontend/src`、`frontend/public`。后续 5 轮前端研究从这里开始读，
+对比我们自己的 `webui/templates/index.html`（单文件 + 原生 JS）。
+
+### 9.3 本轮真正落地：注册断点（checkpoint / resume）
+
+来源是 2951461586 的 `registration/checkpoint.py + resume.py`。
+
+要解决的问题：
+```
+create_account 成功 → 取 session/AT 失败 → 整轮判失败
+重试又从头走 → user/register 撞 user_already_exists → 反而更难成功
+```
+
+**已落地** `core/registration_checkpoint.py`：
+- `save/load/update/clear`：按邮箱分文件，权限 600（含密码，不能进日志）
+- `resumable(email)`：只有 `account_created=True` **且**已有 access_token 才算可恢复
+
+**已落地** `core/resume_service.py`：
+- `try_resume(email)`：命中断点 → `db.insert_account` 直接落库 →
+  补 2FA/套餐入队 → 清理断点 → 返回 success（带 `resumed=True`）
+
+**接入**：`protocol_registration` 在三个位置写断点
+（`otp_validated` / `account_created` / `access_token`）；
+`registration_service` 在跑注册前先试 `try_resume`，命中则跳过整条链路。
+
+**端到端实测**：
+```
+可恢复判定: True (account_created+access_token)
+恢复结果: success=True resumed=True account_id=238
+落库校验: 238 test-token-r9
+断点已清理: True
+```
+
+测试 `tests/test_registration_checkpoint.py` **4 项全部 PASS**。
+
+---
+
+## 10. 其余项目
+
+（后续轮次补齐：ZRainbow1275、basketikun、pirder、HengXin666、
 starmiaoa、xiaoguzuiniu、pixian5、fuckoai、88cjohn、OpenBrowser、
 upstream-ratio-watch、taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
