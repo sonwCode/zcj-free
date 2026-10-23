@@ -891,6 +891,17 @@ def save_account_data(
     """
     from core.db import insert_account
     extra = dict(extra or {})
+    # 浏览器注册的密码是 UI 阶段产生的，先暂存在 codex_oauth，落库时回填。
+    if not str(extra.get('registration_password') or '').strip():
+        try:
+            from core.codex_oauth import pop_pending_registration_password
+
+            _pending_pwd = pop_pending_registration_password(email)
+            if _pending_pwd:
+                extra['registration_password'] = _pending_pwd
+                logger.info('[注册密码] 已写入账号 extra（email=%s）', email)
+        except Exception:
+            pass
     # Remail 的 service token 只存在进程内上下文中。注册成功后把订单上下文
     # 一并保存到账号 extra_json，服务重启时查活即可恢复，不再依赖“同一进程
     # 中先领取邮箱”。普通账号列表不会返回 extra_json。
