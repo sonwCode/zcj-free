@@ -26,6 +26,16 @@ from core.session import BrowserSession, close_browser_session
 logger = logging.getLogger(__name__)
 
 
+#: 建号返回这些错误码时，账号往往已经存在（上一次尝试已建好），
+#: 应尝试直接读取现有会话，而不是判失败。参考 hyhang915/gptfree-register。
+_RECOVERABLE_CREATE_CODES = (
+    'user_already_exists',
+    'username_already_exists',
+    'account_already_exists',
+    'invalid_auth_step',
+)
+
+
 def _log_phase(name: str, ok: bool, detail: str = "") -> None:
     logger.info("[协议注册][%s] %s%s", name, "OK" if ok else "失败", ("：" + detail) if detail else "")
     _phase_pause()
@@ -62,6 +72,7 @@ def _protocol_extra(password: str, info: dict, email_source: str | None,
         "registration_password": password,
         "mailbox_probe": mailbox_probe or {},
         "sentinel": sentinel_provenance or {},
+        "create_recovered": bool((info or {}).get("__recovered__")),
         "registration_driver": "protocol",
         "session": info,
     }
@@ -286,6 +297,18 @@ def run_protocol_registration(
             except Exception as exc:
                 last_exc = exc
                 text = str(exc).lower()
+                # 可恢复错误：账号可能已经存在，先试着读现有会话。
+                if any(code in text for code in _RECOVERABLE_CREATE_CODES):
+                    try:
+                        from core.account_export import fetch_session as _fetch_session
+
+                        probe = _fetch_session(session) or {}
+                        if str(probe.get('accessToken') or '').strip():
+                            created = {'recovered': True, 'reason': 'existing_session'}
+                            _log_phase('创建账号', True, '已有会话，直接恢复')
+                            break
+                    except Exception as _rec_exc:
+                        logger.debug('[协议注册] 会话恢复失败：%s', str(_rec_exc)[:100])
                 if "registration_disallowed" not in text or attempt >= 3:
                     raise
                 wait_s = 2.0 * attempt
@@ -318,6 +341,9 @@ def run_protocol_registration(
         from core.account_export import fetch_session
 
         info = fetch_session(session) or {}
+        if isinstance(created, dict) and created.get('recovered'):
+            info['__recovered__'] = True
+            info['__recovered_reason__'] = str(created.get('reason') or '')[:60]
         access_token = str(info.get("accessToken") or info.get("access_token") or "")
         user = info.get("user") or {}
         if not access_token:
