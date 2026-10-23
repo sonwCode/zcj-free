@@ -435,8 +435,84 @@ create_account 成功 → 取 session/AT 失败 → 整轮判失败
 
 ---
 
-## 10. 其余项目
+## 10. ZRainbow1275/AutoTeam-F
 
-（后续轮次补齐：ZRainbow1275、basketikun、pirder、HengXin666、
-starmiaoa、xiaoguzuiniu、pixian5、fuckoai、88cjohn、OpenBrowser、
-upstream-ratio-watch、taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+规模：133 个 py、6 万行。最大模块 `src/autoteam/manager.py` 340KB、
+`codex_auth.py` 180KB、`api.py` 170KB。
+
+它最有价值的不是代码，而是 `.trellis/tasks/` 下的**研究工作流**：
+每个任务有 `prd.md` + `research/` + `implement.jsonl`，
+研究文档里存着上游源码摘录与逐行对照。
+
+### 10.1 Codex OAuth 的 session-token 注入配方
+
+`research/upstream-master-codex-oauth.md` 给了一条完整链路（Stage B）：
+
+```
+1. 启动 Chromium，goto chatgpt.com，先过 CF
+2. 注入 chatgpt.com 域 cookie：
+     __Secure-next-auth.session-token（>3800 字节要分片）
+     _account = <account_id>
+     oai-did  = <随机 uuid>
+3. page.evaluate fetch("/api/auth/session") 取 accessToken
+4. 新页面注入 **auth.openai.com 域** 同一组 cookie（同一 oai-did！）
+5. goto auth.openai.com/oauth/authorize?client_id=app_EMoamEEZ73f0CkXaXp7hrann
+        &response_type=code&redirect_uri=http://localhost:1455/auth/callback
+        &scope=openid email profile offline_access&state=...&code_challenge=...
+6. 监听 localhost:1455 回调拿 code → 换 Codex token
+```
+
+**它明确写了：上游没有纯 HTTP 路径**，必须真浏览器 + cookie 注入，
+关键差别是 `require_browser=True`。
+
+### 10.2 我们审计出的两处缺失（本轮修复）
+
+| 项 | 上游 | 我们（审计前） |
+|---|---|---|
+| session-token 分片（>3800B 切 .0/.1） | ✅ | ❌ 完全没有 |
+| 往 auth.openai.com 域注入 | ✅ | ❌ 没有 |
+| 两域共用同一 oai-did | ✅ | ❌ 没有 |
+
+### 10.3 实测出的重大发现
+
+本轮加了「抓取并落库 session-token」后实测一条新注册：
+
+```
+session_cookies 键: ['__Secure-next-auth.session-token.0',
+                    '__Secure-next-auth.session-token.1']
+重组后长度: 4151 字节
+```
+
+**我们的 session-token 实际是 4151 字节**——超过 Chrome 单 cookie 的 ~4KB 上限。
+
+这直接解释了第 2 轮"浏览器落地（seal）"实验为什么 `logged_in=False`：
+当时我们把 session cookie 当单个 cookie 注入，浏览器静默丢弃了它。
+**不是"注 Cookie 到不了登录态"，而是"cookie 太大被丢了"。**
+
+### 10.4 已落地
+
+`core/session_cookie.py`：
+- `split_session_token(token, limit=3800)` → `[('.0', chunk), ('.1', chunk)]`
+- `build_cookies(session_token, account_id, device_id, domain)`
+- `build_dual_domain_cookies(...)` → chatgpt.com + auth.openai.com，共用同一 oai-did
+- `inject(driver, cookies)` → CDP Network.setCookies
+- `capture_from_session(session)` / `rebuild_token(cookies)` → 抓取与拼回
+
+接入：协议注册落库时把 session-token 家族写进账号 `extra.session_cookies`。
+
+测试 `tests/test_session_cookie.py` **5 项全部 PASS**
+（短/长/超长分片、双域共用 oai-did、cookie 内容完整）。
+
+### 10.5 下一步（已具备前提）
+
+有了 `extra.session_cookies` 与分片工具，就可以实现
+"**用 cookie 直接授权 Codex**"：注入 chatgpt.com + auth.openai.com 两域
+→ 打开 OAuth authorize → 拿 code → 换 token，全程不需要密码/OTP/2FA。
+
+---
+
+## 11. 其余项目
+
+（后续轮次补齐：basketikun、pirder、HengXin666、starmiaoa、xiaoguzuiniu、
+pixian5、fuckoai、88cjohn、OpenBrowser、upstream-ratio-watch、taiguanren、
+MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
