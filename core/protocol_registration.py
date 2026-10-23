@@ -51,7 +51,8 @@ def _phase_pause() -> None:
 
 
 def _protocol_extra(password: str, info: dict, email_source: str | None,
-                    mailbox_probe: dict | None = None) -> dict:
+                    mailbox_probe: dict | None = None,
+                    sentinel_provenance: dict | None = None) -> dict:
     """账号 extra：保留注册密码、驱动标记，并把 Remail 订单上下文一并落库。
 
     落库后即使进程重启、本地取件缓存丢失，查活/补跑仍可用
@@ -60,6 +61,7 @@ def _protocol_extra(password: str, info: dict, email_source: str | None,
     extra = {
         "registration_password": password,
         "mailbox_probe": mailbox_probe or {},
+        "sentinel": sentinel_provenance or {},
         "registration_driver": "protocol",
         "session": info,
     }
@@ -141,6 +143,16 @@ def run_protocol_registration(
         "note": "协议注册不加载任何静态资源，仅接口请求",
     }
     try:
+        # 签名层溯源：记录本次注册使用的 sentinel 版本与哈希，并按需告警漂移。
+        _sentinel_prov: dict = {}
+        try:
+            from core.sentinel_provenance import log_drift_if_any, provenance
+
+            log_drift_if_any()
+            _sentinel_prov = provenance()
+        except Exception as _sp_exc:
+            logger.debug('[协议注册] 签名层溯源跳过：%s', str(_sp_exc)[:120])
+
         # 邮箱新颖性只读探测：不改变任何状态，只记录该地址此前是否已被 OpenAI 注册过。
         _mailbox_probe: dict = {}
         try:
@@ -320,7 +332,7 @@ def run_protocol_registration(
             email_source=_email_source,
             device_id=str(getattr(session, "device_id", "") or ""),
             proxy_used=str(getattr(session, "proxy", "") or ""),
-            extra=_protocol_extra(password, info, _email_source, _mailbox_probe),
+            extra=_protocol_extra(password, info, _email_source, _mailbox_probe, _sentinel_prov),
             codex_status="skipped",
         )
         _log_phase("落库", True, "account_id=%s" % account_id)
