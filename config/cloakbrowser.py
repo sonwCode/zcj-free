@@ -26,7 +26,7 @@ CLOAK_LICENSE_KEY: str = ""
 CLOAK_FINGERPRINT_SEED: str = ""
 
 # 持久化用户目录；留空则临时上下文。若要固定账号画像/缓存，可填如 "./cloak-profiles/default"。
-CLOAK_USER_DATA_DIR: str = ""
+CLOAK_USER_DATA_DIR: str = "/opt/turb-gpt-register/cloak-profiles"
 
 # 额外 Chromium 参数，例如 ["--fingerprint=12345"]。CLOAK_FINGERPRINT_SEED 会自动追加。
 CLOAK_EXTRA_ARGS: list = []

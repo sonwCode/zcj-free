@@ -304,6 +304,25 @@ def run_protocol_registration(
         except Exception as exc:
             _log_phase("暖号", False, str(exc)[:100])
 
+        # 浏览器落地：用真实指纹浏览器把号"坐实"，profile 持久保留
+        try:
+            from config import register as _reg_cfg2
+
+            if bool(getattr(_reg_cfg2, "PROTOCOL_BROWSER_SEAL", True)):
+                from core.account_seal import seal_account
+
+                sealed = seal_account(
+                    email,
+                    session,
+                    dwell_seconds=int(getattr(_reg_cfg2, "PROTOCOL_BROWSER_SEAL_DWELL_SECONDS", 45) or 45),
+                )
+                _log_phase("浏览器落地", bool(sealed.get("ok")),
+                           "profile=%s 注入=%s/%s 用时=%ss" % (
+                               sealed.get("profile"), sealed.get("cookies_added"),
+                               sealed.get("cookies_total"), sealed.get("duration_seconds")))
+        except Exception as exc:
+            _log_phase("浏览器落地", False, str(exc)[:100])
+
         # 与浏览器路径一致：注册成功后自动排队查套餐/资格
         try:
             from core import plan_check_service

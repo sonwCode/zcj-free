@@ -258,6 +258,30 @@ def _merge_phone_activation(previous: dict | None, current: dict | None) -> dict
     return merged
 
 
+# 浏览器注册时密码先于账号落库产生，先暂存，等 save 时再写进账号 extra。
+_PENDING_PASSWORDS: dict[str, str] = {}
+_PENDING_LOCK = __import__("threading").Lock()
+
+
+def remember_registration_password(email: str, password: str) -> bool:
+    """暂存本次注册使用的密码，等账号落库时写入 extra.registration_password。"""
+    key = str(email or "").strip().lower()
+    pwd = str(password or "").strip()
+    if not key or not pwd:
+        return False
+    with _PENDING_LOCK:
+        _PENDING_PASSWORDS[key] = pwd
+    logger.info("[注册密码] 已暂存，等待账号落库：%s", key)
+    return True
+
+
+def pop_pending_registration_password(email: str) -> str:
+    """取出并清除暂存密码；没有则返回空串。"""
+    key = str(email or "").strip().lower()
+    with _PENDING_LOCK:
+        return _PENDING_PASSWORDS.pop(key, "")
+
+
 def _account_registration_password(email: str) -> str:
     """读取账号的注册密码；不存在则返回空字符串。"""
     try:

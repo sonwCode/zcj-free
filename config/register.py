@@ -51,3 +51,8 @@ PROTOCOL_SERIAL_MIN_INTERVAL_SECONDS: int = 90
 # 每个账号尽量使用不同的代理出口，并记住最近用过的几个。
 PROTOCOL_ROTATE_EXIT: bool = True
 PROTOCOL_RECENT_EXIT_MEMORY: int = 6
+
+# 协议建号后是否用真实指纹浏览器"落地"一次（注入 Cookie、加载完整前端），
+# 每个账号使用独立且持久化的 profile 目录。
+PROTOCOL_BROWSER_SEAL: bool = True
+PROTOCOL_BROWSER_SEAL_DWELL_SECONDS: int = 45

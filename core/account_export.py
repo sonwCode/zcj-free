@@ -376,6 +376,15 @@ def _account_material_line(email: str, row: dict | None = None) -> str:
             try:
                 extra = json.loads(str(row.get("extra_json") or ""))
                 password = str(extra.get("registration_password") or "").strip()
+                if not password:
+                    try:
+                        from core.codex_oauth import pop_pending_registration_password
+
+                        password = pop_pending_registration_password(email)
+                        if password:
+                            extra["registration_password"] = password
+                    except Exception:
+                        password = ""
             except Exception:
                 password = ""
         if not password:
