@@ -273,6 +273,29 @@ def _registered_email_source(email: str) -> str | None:
     return _normalize_explicit_email_source((account or {}).get("email_source"))
 
 
+def _wait_from_source(source: str, email: str, after_ts: float, extra_kwargs: dict):
+    """按指定来源直接取码（不经过来源解析），用于来源兜底。"""
+    module_map = {
+        "gptmail": ("core.gptmail_client", "fetch_latest_otp"),
+        "cloudflare": ("core.cf_temp_mail_client", "fetch_latest_otp"),
+        "cloudflare_domain": ("core.qqmail_client", "fetch_latest_otp"),
+        "generic_api": ("core.generic_api_mail_client", "fetch_latest_otp"),
+        "imap": ("core.imap_mail_client", "fetch_latest_otp"),
+        "mailnest": ("core.mailnest_client", "fetch_latest_otp"),
+        "cloudmail": ("core.cloudmail_client", "fetch_latest_otp"),
+        "remail": ("core.remail_client", "fetch_latest_otp"),
+        "mailcode": ("core.mailcode_client", "fetch_latest_otp"),
+        "outlook": ("core.outlook_client", "fetch_latest_otp"),
+    }
+    entry = module_map.get(str(source or "").strip().lower())
+    if not entry:
+        raise ValueError("不支持的邮箱来源：%s" % source)
+    mod = __import__(entry[0], fromlist=["x"])
+    fetcher = getattr(mod, entry[1])
+    _check_stop_requested()
+    return fetcher(email, after_ts=after_ts, **extra_kwargs)
+
+
 def wait_for_otp(
     email: str,
     after_ts: float,
@@ -370,7 +393,21 @@ def wait_for_otp(
         from core.mailcode_client import fetch_latest_otp
         return _fetch(fetch_latest_otp)
     from core.outlook_client import fetch_latest_otp
-    return _fetch(fetch_latest_otp)
+    try:
+        return _fetch(fetch_latest_otp)
+    except Exception as exc:
+        # 该地址不在 Outlook 池（例如来自临时邮箱平台）时，换其它有上下文的来源再试一次。
+        if "账号上下文" not in str(exc) and type(exc).__name__ != "OutlookClientError":
+            raise
+        logger.warning("[OTP] Outlook 无该地址上下文，尝试改用其它邮箱来源：%s", email)
+        for fallback in parse_email_sources():
+            if fallback in ("outlook",):
+                continue
+            try:
+                return _wait_from_source(fallback, email, after_ts, extra_kwargs)
+            except Exception as exc2:
+                logger.debug("[OTP] 来源 %s 取码失败：%s", fallback, str(exc2)[:120])
+        raise
 
 
 def email_material_line(email: str, source: str | None = None) -> str:

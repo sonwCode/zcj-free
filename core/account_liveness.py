@@ -497,6 +497,11 @@ def _login_via_reauth(
     if dead_code:
         raise AccountUnusableError(f"账号已废弃（{dead_code}）", error_code=dead_code)
     human_delay("navigate")
+    # 有注册密码的账号优先走"密码 + TOTP"，不要依赖邮箱 OTP：
+    # 协议注册的邮箱在注册后取件上下文已释放，根本取不到验证码。
+    if _account_registration_password(email):
+        logger.info("[查活] 账号存在密码，改用密码 + TOTP 完成重认证：%s", email)
+        return _login_via_password_or_otp(session, email, otp_after_ts, email_source=email_source)
     logger.info("[查活] 已跟随 reauth authorize URL，开始等待邮箱 OTP")
     continue_url = _validate_reauth_with_retry(
         session,
@@ -662,11 +667,19 @@ def _validate_with_retry(
         try:
             if current_otp is None:
                 logger.info("[查活] 等待登录 OTP：%s（第 %s/%s 次）", email, attempt, max_otp_attempts)
-                current_otp = wait_for_otp(
-                    email,
-                    after_ts=otp_after_ts,
-                    email_source=email_source,
-                )
+                try:
+                    current_otp = wait_for_otp(
+                        email,
+                        after_ts=otp_after_ts,
+                        email_source=email_source,
+                    )
+                except AccountUnusableError:
+                    raise
+                except Exception as otp_exc:
+                    raise RuntimeError(
+                        "otp_unavailable: 邮箱取件不可用（上下文已释放或来源不匹配），"
+                        "无法完成邮箱验证：%s" % str(otp_exc)[:160]
+                    ) from otp_exc
             result = validate_email_otp(session, current_otp, sentinel_header=None, so_header=None)
             return result
         except EmailOtpInvalidError as exc:
@@ -841,7 +854,16 @@ def check_account_liveness(
         return result
 
     except AccountUnusableError as exc:
-        code = getattr(exc, "error_code", "") or detect_account_unusable_text(str(exc)) or "account_deactivated"
+        code = getattr(exc, "error_code", "") or detect_account_unusable_text(str(exc))
+        if not code:
+            # 没有真实错误码就不能判废：多半是取码/流程问题，按失败处理等下一轮重试。
+            logger.warning("[查活] 失败（未取到已废错误码，不判废）：%s %s", email, str(exc)[:200])
+            return {
+                "ok": False,
+                "status": "failed",
+                "checked_at": checked_at,
+                "error": f"AccountUnusableError(no_code): {str(exc)[:400]}",
+            }
         logger.warning("[查活] 已废号：%s %s", email, code)
         return {"ok": False, "status": "deactivated", "checked_at": checked_at, "error": code}
     except Exception as exc:

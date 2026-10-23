@@ -45,6 +45,14 @@ def run_protocol_registration(
 
         email = acquire_email()
     email = str(email).strip()
+    # 必须记录邮箱真实来源：查活/补跑要按来源取 OTP，
+    # 少了这一项会退化成 outlook，而该地址并不在 Outlook 池里 → 取码失败。
+    try:
+        from core.email_provider import resolve_email_source
+
+        _email_source = resolve_email_source(email)
+    except Exception:
+        _email_source = None
 
     session = None
     started_at = time.time()
@@ -192,6 +200,7 @@ def run_protocol_registration(
             user_id=str(user.get("id") or ""),
             user_name=str(user.get("name") or name),
             plan_type="free",
+            email_source=_email_source,
             device_id=str(getattr(session, "device_id", "") or ""),
             proxy_used=str(getattr(session, "proxy", "") or ""),
             extra={
