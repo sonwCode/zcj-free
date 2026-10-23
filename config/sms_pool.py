@@ -35,6 +35,8 @@ SMS_POOL_PREWARM_SIZE: int = 2
 
 # 并发上限：同时运行的号码池手机验证任务数。
 # 智能选号器参数（pool_selector）
+SMS_POOL_HOURLY_BUDGET_CNY: float = 0.0       # 近 1 小时实扣上限，0=不限制
+SMS_POOL_DAILY_BUDGET_CNY: float = 0.0        # 近 24 小时实扣上限，0=不限制
 SMS_POOL_MAX_EXPECTED_COST_USD: float = 0.0     # 每成功一个号的成本上限，0=不限制
 SMS_POOL_STATS_HALF_LIFE_HOURS: float = 12.0    # 成功率统计半衰期
 SMS_POOL_EXPLORE_Z: float = 2.0                 # 冷启动乐观系数（均值 + z*σ）
@@ -83,6 +85,8 @@ apply_env_overrides(globals(), {
     "SMS_POOL_REJECT_VOIP_NUMBERS": "bool",
     "SMS_POOL_PREWARM_SIZE": "int",
     "SMS_POOL_MAX_EXPECTED_COST_USD": "float",
+    "SMS_POOL_HOURLY_BUDGET_CNY": "float",
+    "SMS_POOL_DAILY_BUDGET_CNY": "float",
     "SMS_POOL_STATS_HALF_LIFE_HOURS": "float",
     "SMS_POOL_EXPLORE_Z": "float",
     "SMS_POOL_BURST_WINDOW_MIN": "int",

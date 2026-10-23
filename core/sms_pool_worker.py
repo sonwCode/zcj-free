@@ -320,7 +320,16 @@ def run_once() -> dict:
             logger.info("[号码池] 无合格账号，跳过采购")
             _write_poll_state(status="idle", providers=providers, provider_state=provider_state, last_result="无合格账号，跳过采购")
         else:
-            _write_poll_state(status="idle", providers=providers, provider_state=provider_state, last_result="预热池已满，本轮不采购")
+            _ready = int(capacity.get("ready") or 0)
+            _in_flight = int(capacity.get("in_flight") or 0)
+            if _ready <= 0:
+                _reason = "没有查活通过的账号（ready=0），本轮不采购"
+            elif _in_flight > 0:
+                _reason = "在途号码占满并发（in_flight=%d），本轮不采购" % _in_flight
+            else:
+                _reason = "预热池已满，本轮不采购"
+            _write_poll_state(status="idle", providers=providers, provider_state=provider_state,
+                              last_result=_reason)
     elif paused:
         logger.info("[号码池] 已暂停，跳过新采购")
         provider_state = {provider: {"status": "paused", "last_result": "已暂停，未请求平台"} for provider in providers}
