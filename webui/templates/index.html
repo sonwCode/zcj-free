@@ -4553,41 +4553,48 @@ function positionAccountsV2MoreMenu(wrap) {
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
 }
-function renderAccounts() {
-  const total = ACCOUNTS_TOTAL;
-  const rows = ACCOUNTS;
-  const rowHtmlV2 = (r) => `
-    <tr>
-      <td class="col-check"><input type="checkbox" class="account-row-check" data-account-id="${esc(r.id)}" ${ACCOUNT_SELECTED.has(Number(r.id)) ? 'checked' : ''}></td>
-      <td class="col-id">#${esc(r.id)}</td>
-      <td class="col-email" title="${esc(r.email || '-')}${r.original_email ? `\n原邮箱: ${esc(r.original_email)}` : ''}\n${esc(r.user_name || '-')}">
-        <div class="acc-v2-email">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>
+// 账号表的列定义：把 15 列从一整段模板字面量里拆出来。
+// 好处：增删列、调整顺序、将来按列导出 CSV，都只改这张表，不必再动整段 HTML。
+const ACCOUNT_COLUMNS_V2 = [
+  { cls: 'col-check', cell: (r) => `<input type="checkbox" class="account-row-check" data-account-id="${esc(r.id)}" ${ACCOUNT_SELECTED.has(Number(r.id)) ? 'checked' : ''}>` },
+  { cls: 'col-id', cell: (r) => `#${esc(r.id)}` },
+  { cls: 'col-email',
+    attrs: (r) => `title="${esc(r.email || '-')}${r.original_email ? `\n原邮箱: ${esc(r.original_email)}` : ''}\n${esc(r.user_name || '-')}"`,
+    cell: (r) => `<div class="acc-v2-email">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>
         ${r.original_email ? `<div class="acc-v2-email-history">原邮箱: ${esc(r.original_email)}</div>` : ''}
         <div class="acc-v2-email-user">${esc(r.user_name || '-')}</div>
-        ${['queued','running'].includes(r.email_change_status) ? '<div class="acc-v2-email-status">换绑中</div>' : (r.email_change_status === 'failed' ? `<div class="acc-v2-email-status" title="${esc(r.email_change_error || '')}">换绑失败: ${esc(r.email_change_error || '-')}</div>` : '')}
-      </td>
-      <td class="col-source">${esc(r.email_source || '-')}</td>
-      <td class="col-token">${_tokenCellV2(r)}</td>
-      <td class="col-password">${r.password ? `<span class="mono" title="${esc(r.password)}">${esc(short(r.password, 18))}</span>` : '<span class="acc-v2-muted">-</span>'}</td>
-      <td class="col-plan">${_planCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
-      <td class="col-qual" title="${esc(_qualInfo(r).trialTitle)}">${_qualInfo(r).trialHtml}</td>
-      <td class="col-qual" title="${esc(_qualInfo(r).promoTitle)}">${_qualInfo(r).promoHtml}</td>
-      <td class="col-qual" title="${esc(_qualInfo(r).checkTitle)}">${_qualInfo(r).checkHtml}</td>
-      <td class="col-note" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
-      <td class="col-small">${_totpCellV2(r)}</td>
-      <td class="col-status">${_codexCellV2(r)}</td>
-      <td class="col-time" title="${esc(formatDateTime(r.created_at))}">${esc(formatDateTime(r.created_at))}</td>
-      <td class="col-actions">
-        <div class="acc-v2-actions">
+        ${['queued','running'].includes(r.email_change_status) ? '<div class="acc-v2-email-status">换绑中</div>' : (r.email_change_status === 'failed' ? `<div class="acc-v2-email-status" title="${esc(r.email_change_error || '')}">换绑失败: ${esc(r.email_change_error || '-')}</div>` : '')}` },
+  { cls: 'col-source', cell: (r) => `${esc(r.email_source || '-')}` },
+  { cls: 'col-token', cell: (r) => `${_tokenCellV2(r)}` },
+  { cls: 'col-password', cell: (r) => `${r.password ? `<span class="mono" title="${esc(r.password)}">${esc(short(r.password, 18))}</span>` : '<span class="acc-v2-muted">-</span>'}` },
+  { cls: 'col-plan', cell: (r) => `${_planCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div>` },
+  { cls: 'col-qual', attrs: (r) => `title="${esc(_qualInfo(r).trialTitle)}"`, cell: (r) => `${_qualInfo(r).trialHtml}` },
+  { cls: 'col-qual', attrs: (r) => `title="${esc(_qualInfo(r).promoTitle)}"`, cell: (r) => `${_qualInfo(r).promoHtml}` },
+  { cls: 'col-qual', attrs: (r) => `title="${esc(_qualInfo(r).checkTitle)}"`, cell: (r) => `${_qualInfo(r).checkHtml}` },
+  { cls: 'col-note', attrs: (r) => `title="${esc(r.note || '')}"`, cell: (r) => `${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}` },
+  { cls: 'col-small', cell: (r) => `${_totpCellV2(r)}` },
+  { cls: 'col-status', cell: (r) => `${_codexCellV2(r)}` },
+  { cls: 'col-time', attrs: (r) => `title="${esc(formatDateTime(r.created_at))}"`, cell: (r) => `${esc(formatDateTime(r.created_at))}` },
+  { cls: 'col-actions', cell: (r) => `<div class="acc-v2-actions">
           <button type="button" class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button>
           <div class="acc-v2-more">
             <button type="button" class="acc-v2-more-btn" data-acc-more-toggle aria-haspopup="true" aria-expanded="false">更多</button>
             <div class="acc-v2-more-menu" role="menu">${_accountsV2MoreMenu(r)}</div>
           </div>
-        </div>
-      </td>
-    </tr>`;
+        </div>` },
+];
 
+function renderAccountRowV2(r) {
+  return '<tr>' + ACCOUNT_COLUMNS_V2.map((col) => {
+    const attrs = typeof col.attrs === 'function' ? ' ' + col.attrs(r) : '';
+    return `<td class="${col.cls}"${attrs}>${col.cell(r)}</td>`;
+  }).join('') + '</tr>';
+}
+
+function renderAccounts() {
+  const total = ACCOUNTS_TOTAL;
+  const rows = ACCOUNTS;
+  const rowHtmlV2 = renderAccountRowV2;
   const bodyV2 = $('#accountsBodyV2');
   if (bodyV2) {
     bodyV2.innerHTML = rows.map(rowHtmlV2).join('') || '<tr><td colspan="12" style="text-align:center;color:#909399;padding:28px;">暂无账号</td></tr>';

@@ -693,7 +693,53 @@ score=100 grade=A hosting=False flagged=False as=AS11612 Ready Telecom
 
 ---
 
-## 15. 其余项目
+## 15. starmiaoa/chatgpt-register-k12
 
-（后续轮次补齐：starmiaoa、xiaoguzuiniu、pixian5、fuckoai、88cjohn、OpenBrowser、
+规模：约 1.2 万行 Python。核心 `pipeline.py` 67KB、`register/mail_provider.py` 76KB、
+`login/login_flow.py` 37KB，另有 `workspace/joiner.py` 与 `webui/jobs.py`。
+
+### 15.1 workspace/joiner：用协议加入工作区
+
+```python
+join_workspace(access_token, workspace_id, route)
+  K12 浏览器路由 → POST {BASE}/backend-api/accounts/{workspace_id}/invites/request
+  标准路由       → POST {BASE}/backend-api/accounts/{workspace_id}/invites/{mode}
+  头部：authorization: Bearer <access_token>、oai-device-id、oai-language
+```
+
+启示：**工作区加入是纯协议可完成的**，不需要浏览器点选。
+我们 Codex 流程卡在 `choose-an-account` 时，可以用这套端点推进，
+而不是靠文本匹配点按钮。
+
+### 15.2 login_flow：三层 code 提取（本轮已落地）
+
+它不强依赖地址栏，而是在三个层次上找 OAuth code：
+
+```
+_extract_code_from_url(url)        解析查询串
+_extract_code_from_text(text)      在 HTML/JS 里找回调链接
+_extract_code_from_response(resp)  从 JSON 响应体找
+```
+
+规范化做了三件事，都容易漏：
+- HTML 转义 `&amp;` → `&`
+- JS 转义 `\\u0026` → `&`、`\\/` → `/`
+- **URL 解码可能套了两层**，要反复解码到稳定
+
+**已落地** `core/oauth_code.py`：`code_from_url` / `code_from_text` / `extract`，
+测试 `tests/test_oauth_code.py` **7 项全部 PASS**
+（明文 / HTML 转义 / JS 转义 / URL 编码 / 页面文本 / JSON 数据 / 无匹配返回空）。
+
+已接入 `codex_cookie_auth`：轮询时先看 URL，每 4 轮再扫一次页面文本，
+避免"重定向被拦截但页面已经渲染出回调链接"的情况被漏掉。
+
+### 15.3 webui/jobs.py
+
+任务队列与状态机，与我们的 registration_service 同构，无新增可迁移点。
+
+---
+
+## 16. 其余项目
+
+（后续轮次补齐：xiaoguzuiniu、pixian5、fuckoai、88cjohn、OpenBrowser、
 upstream-ratio-watch、taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）

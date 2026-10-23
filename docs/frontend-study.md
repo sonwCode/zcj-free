@@ -117,3 +117,67 @@ paginate 定义 True；调用点 2 处
 
 下一轮：把 `renderAccounts` 的行渲染拆成"列定义 + 行模板"，
 让账号表与 sms-pool 表共用同一套列渲染契约。
+## 第 3 轮：账号表列定义化（15 列拆出模板字面量）
+
+### 3.1 原状
+
+`renderAccounts()` 里有一段 31 行的模板字面量 `rowHtmlV2`，把 15 个
+`<td>` 全部硬写在一起：复选框、ID、邮箱（含三行子结构）、来源、Token、
+密码、套餐、三个资格列、备注、2FA、Codex、时间、操作菜单。
+
+想加一列要动整段字符串；想按列导出 CSV 得再抄一遍取值逻辑。
+
+### 3.2 做法
+
+拆成"列定义表 + 行渲染器"：
+
+```js
+const ACCOUNT_COLUMNS_V2 = [
+  { cls: 'col-check', cell: (r) => `<input type="checkbox" ...>` },
+  { cls: 'col-id', cell: (r) => `#${esc(r.id)}` },
+  { cls: 'col-email',
+    attrs: (r) => `title="..."`,      // 有额外属性的列单独给出
+    cell: (r) => `<div class="acc-v2-email">...</div>` },
+  ... 共 15 列
+];
+
+function renderAccountRowV2(r) {
+  return '<tr>' + ACCOUNT_COLUMNS_V2.map((col) => {
+    const attrs = typeof col.attrs === 'function' ? ' ' + col.attrs(r) : '';
+    return `<td class="${col.cls}"${attrs}>${col.cell(r)}</td>`;
+  }).join('') + '</tr>';
+}
+```
+
+`renderAccounts()` 主体缩到 6 行，只负责取数据、写 `innerHTML`、更新选择态与分页。
+
+### 3.3 验证（三层）
+
+1. **语法**：提取 3 个 `<script>` 块（245561 字节）→ `node --check` SYNTAX_OK
+2. **结构**：用 stub 在 node 里直接跑行渲染器
+   ```
+   td 数量: 15
+   列类名: col-check,col-id,col-email,col-source,col-token,col-password,
+          col-plan,col-qual,col-qual,col-qual,col-note,col-small,col-status,
+          col-time,col-actions
+   含复选框: true   含删除按钮: true
+   ```
+   与原模板的列顺序、类名完全一致。
+3. **部署**：文件 8049 行；列定义 1 处、行渲染器 1 个；服务 active；`/` 302 正常。
+
+### 3.4 过程中的一次事故（记录）
+
+第一次用 `indexOf` 找模板起止标记时，文件是 CRLF 而我按 \`\n\` 匹配，
+`startIdx = -1`，切片把文件写坏成两倍长度。已 `git checkout` 恢复，
+改为"按行定位 + 保留原 EOL"重做。
+
+教训：**在这类 400KB 单文件上做结构改动，必须按行定位并校验返回位置是否为正**，
+不能直接对 `indexOf` 结果做切片。
+
+### 3.5 收益
+
+- 新增/删除列、调整列顺序只改数据表，不再动 HTML；
+- 后续"按列导出 CSV"可以直接复用同一份 `cell` 取值逻辑；
+- 账号表与 sms-pool 表共用 `paginate`，下一步可让它们共用同一列渲染契约。
+
+下一轮（第 4 轮）：静态资源拆分（CSS/JS 外链 + 缓存头），首屏只加载所需。
