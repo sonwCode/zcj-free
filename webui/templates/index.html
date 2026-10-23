@@ -2682,6 +2682,9 @@
               <th class="col-token">Token</th>
               <th class="col-password">密码</th>
               <th class="col-plan">套餐</th>
+              <th class="col-qual">试用</th>
+              <th class="col-qual">优惠</th>
+              <th class="col-qual">最近检测</th>
               <th class="col-note">备注</th>
               <th class="col-small">2FA</th>
               <th class="col-status">Codex</th>
@@ -3049,6 +3052,66 @@
 .ui-confirm-actions button{min-height:34px;padding:0 16px;border-radius:8px;border:1px solid #d9e2ec;background:#fff;color:#344054;font-size:13px;font-weight:600;cursor:pointer;}
 .ui-confirm-actions button.ui-confirm-ok{background:#2563eb;border-color:#2563eb;color:#fff;}
 </style>
+<style>
+.col-qual{white-space:nowrap;font-size:12px;}
+.qual-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:1px;}
+.qual-dot--ok{background:#16a34a;}
+.qual-dot--warn{background:#f59e0b;}
+.qual-tag{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;font-weight:600;line-height:18px;}
+.qual-tag--ok{color:#15803d;background:#ecfdf3;border:1px solid #abefc6;}
+.qual-text-muted{color:#94a3b8;}
+</style>
+<script>
+function _qualInfo(r) {
+  var pr = {};
+  try {
+    pr = typeof r.plan_check_result_json === 'string'
+      ? JSON.parse(r.plan_check_result_json || '{}')
+      : (r.plan_check_result_json || {});
+  } catch (e) { pr = {}; }
+  var plan = String(r.current_plan_type || pr.current_plan_type || '').toLowerCase();
+  var checkedAt = String(r.plan_check_completed_at || pr.checked_at || '');
+  var err = String(r.plan_check_error || '');
+  var trialEligible = !!pr.plus_trial_eligible;
+  var offers = Array.isArray(pr.eligible_offer_ids) ? pr.eligible_offer_ids.length : 0;
+  var promos = (pr.eligible_promo_campaigns && typeof pr.eligible_promo_campaigns === 'object')
+    ? Object.keys(pr.eligible_promo_campaigns).length : 0;
+  var promoEligible = offers > 0 || promos > 0;
+  var NL = String.fromCharCode(10);
+  var trialHtml;
+  if (!plan && !checkedAt) { trialHtml = '<span class="qual-text-muted">信息不完整</span>'; }
+  else if (trialEligible) { trialHtml = '<span class="qual-dot qual-dot--ok"></span>可领Plus试用'; }
+  else { trialHtml = '<span class="qual-dot qual-dot--warn"></span>' + (plan === 'free' ? 'Free' : (plan || '未知')); }
+  var promoHtml;
+  if (!checkedAt) { promoHtml = '<span class="qual-text-muted">信息不完整</span>'; }
+  else if (promoEligible) { promoHtml = '<span class="qual-tag qual-tag--ok">可领试用</span>'; }
+  else { promoHtml = '<span class="qual-text-muted">无可用优惠</span>'; }
+  var checkHtml, checkTitle;
+  if (err) {
+    checkHtml = '<span class="qual-dot qual-dot--warn"></span>失败';
+    checkTitle = '最近一次资格检查失败：' + err;
+  } else if (!checkedAt) {
+    checkHtml = '<span class="qual-text-muted">未探测</span>';
+    checkTitle = '还没有做过资格检查';
+  } else {
+    var when = checkedAt.replace('T', ' ').slice(0, 16);
+    checkHtml = when.slice(5);
+    var tips = ['最近一次资格检查结果', '时间：' + when, '套餐：' + (plan || '-')];
+    tips.push('可领 Plus 试用：' + (trialEligible ? '是' : '否'));
+    if (pr.plus_trial_title) tips.push('活动：' + pr.plus_trial_title);
+    if (pr.plus_trial_discount_percentage) tips.push('折扣：' + pr.plus_trial_discount_percentage + '%');
+    tips.push('可用 offer：' + offers + ' 个');
+    tips.push('可用活动：' + promos + ' 个');
+    checkTitle = tips.join(NL);
+  }
+  var trialTitle = '试用资格：' + (trialEligible ? '可领 Plus 试用' : (checkedAt ? '不符合' : '尚未检测'))
+    + (pr.plus_trial_title ? '（' + pr.plus_trial_title + '）' : '');
+  var promoTitle = '优惠：' + (promoEligible ? ('可领 ' + offers + ' 个 offer / ' + promos + ' 个活动') : (checkedAt ? '无可用优惠' : '尚未检测'));
+  return { trialHtml: trialHtml, trialTitle: trialTitle,
+           promoHtml: promoHtml, promoTitle: promoTitle,
+           checkHtml: checkHtml, checkTitle: checkTitle };
+}
+</script>
 <script>
 // 同步二次确认：iframe 里原生 confirm() 会被静默拦截并直接返回 false，
 // 表现为“点按钮毫无反应”。这里改成两次点击确认：
@@ -4398,6 +4461,9 @@ function renderAccounts() {
       <td class="col-token">${_tokenCellV2(r)}</td>
       <td class="col-password">${r.password ? `<span class="mono" title="${esc(r.password)}">${esc(short(r.password, 18))}</span>` : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-plan">${_planCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
+      <td class="col-qual" title="${esc(_qualInfo(r).trialTitle)}">${_qualInfo(r).trialHtml}</td>
+      <td class="col-qual" title="${esc(_qualInfo(r).promoTitle)}">${_qualInfo(r).promoHtml}</td>
+      <td class="col-qual" title="${esc(_qualInfo(r).checkTitle)}">${_qualInfo(r).checkHtml}</td>
       <td class="col-note" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-small">${_totpCellV2(r)}</td>
       <td class="col-status">${_codexCellV2(r)}</td>
