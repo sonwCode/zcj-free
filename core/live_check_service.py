@@ -94,11 +94,23 @@ def complete_authenticated_live_check(*, account_id: int, expected_account: dict
     if not db.update_account_liveness(account_id, result, expected_account=expected_account, expected_run_id=run_id):
         return {"ok": False, "status": "failed", "error": "账号已删除或邮箱/AT 已变更，丢弃旧查活结果"}
     try:
-        from core.plan_check_service import check_account_plan_in_session
-        result["plan_result"] = check_account_plan_in_session(
-            account_id=account_id, email=expected_account["email"],
-            access_token=result["access_token"], session=session,
+        # 历史实现引用了不存在的 check_account_plan_in_session，
+        # 每次查活都在这里抛 ImportError，"自动查套餐"从未真正执行。
+        # 这里改为入队到套餐查询线程池：不阻塞查活、不重复登录、
+        # 结果由套餐模块统一落库（plan_check_status / plan_checked_at）。
+        from core.plan_check_service import enqueue_account_plan_check
+
+        queued = enqueue_account_plan_check(
+            account_id=account_id,
+            email=expected_account["email"],
+            access_token=result["access_token"],
+            trigger="live_check_auto",
+            proxy=None,
         )
+        ok = bool(queued.get("accepted") or queued.get("busy"))
+        result["plan_result"] = {"ok": ok, "queued": True, **queued}
+        if not ok:
+            logger.warning("[查活] 自动查套餐未入队：%s", str(queued.get("error") or queued)[:160])
     except Exception as exc:
         logger.exception("[查活] 自动查套餐异常: account_id=%s", account_id)
         result["plan_result"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}

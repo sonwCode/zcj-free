@@ -910,9 +910,23 @@ def check_account_liveness(
         # 直接调用底层查活时也自动查询；业务队列通过 hook 先落库新 AT，再统一占用套餐任务。
         try:
             from core.chatgpt_plan import check_account_plan
-            from core.plan_check_service import _wait_for_rate_slot
-            _wait_for_rate_slot()
-            result["plan_result"] = check_account_plan(access_token, session=session)
+            from core.plan_check_service import enqueue_account_plan_check
+
+            # 这个函数只拿到 email，账号 id 需要现查。
+            _acc_row = db.get_account_by_email(email) or {}
+            _acc_id = int(_acc_row.get("id") or 0)
+            if _acc_id:
+                queued = enqueue_account_plan_check(
+                    account_id=_acc_id,
+                    email=email,
+                    access_token=access_token,
+                    trigger="live_check_auto",
+                    proxy=None,
+                )
+            else:
+                queued = {"accepted": False, "error": "账号不存在，跳过套餐查询"}
+            ok = bool(queued.get("accepted") or queued.get("busy"))
+            result["plan_result"] = {"ok": ok, "queued": True, **queued}
         except Exception as exc:
             result["plan_result"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
         return result
