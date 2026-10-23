@@ -840,6 +840,92 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped": skipped,
         })
 
+    @app.post("/api/accounts/cleanup-dead")
+    def api_accounts_cleanup_dead():
+        """一键清理已废账号。
+
+        Body:
+          dry_run:           True 只统计不删除（默认 True，避免误删）
+          mode:              "delete"（默认）或 "archive"
+          older_than_days:   只清理最近一次查活早于 N 天的号；0/None=不限
+          only_token_revoked: True 时只清理错误里带 token_revoked 的号
+
+        判定为"已废"：live_check_status == "deactivated"。
+        不会碰 live / queued / running 的账号。
+        """
+        data = request.get_json(silent=True) or {}
+        dry_run = bool(data.get("dry_run", True))
+        mode = str(data.get("mode") or "delete").strip().lower()
+        if mode not in ("delete", "archive"):
+            return jsonify({"ok": False, "error": "mode 只能是 delete 或 archive"}), 400
+        try:
+            older_days = int(data.get("older_than_days") or 0)
+        except (TypeError, ValueError):
+            older_days = 0
+        only_revoked = bool(data.get("only_token_revoked", False))
+
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        accounts = db.list_accounts(limit=100000) or []
+        cutoff = None
+        if older_days > 0:
+            cutoff = _dt.now(_tz.utc) - _td(days=older_days)
+
+        candidates = []
+        for acc in accounts:
+            if str(acc.get("live_check_status") or "").strip().lower() != "deactivated":
+                continue
+            if only_revoked:
+                err = str(acc.get("live_check_error") or "").lower()
+                if "token_revoked" not in err and "account_deactivated" not in err:
+                    continue
+            if cutoff is not None:
+                checked_raw = str(acc.get("live_checked_at") or "").strip()
+                if not checked_raw:
+                    continue
+                try:
+                    checked_at = _dt.fromisoformat(checked_raw.replace("Z", "+00:00"))
+                    if checked_at.tzinfo is None:
+                        checked_at = checked_at.replace(tzinfo=_tz.utc)
+                except ValueError:
+                    continue
+                if checked_at > cutoff:
+                    continue
+            candidates.append(acc)
+
+        sample = [
+            {"id": int(a.get("id") or 0), "email": a.get("email"),
+             "error": str(a.get("live_check_error") or "")[:80]}
+            for a in candidates[:20]
+        ]
+        payload = {
+            "ok": True,
+            "dry_run": dry_run,
+            "mode": mode,
+            "count": len(candidates),
+            "sample": sample,
+        }
+        if dry_run or not candidates:
+            return jsonify(payload)
+
+        ids = [int(a.get("id") or 0) for a in candidates if int(a.get("id") or 0) > 0]
+        if mode == "archive":
+            archived, skipped = [], []
+            for acc_id in ids:
+                try:
+                    if db.archive_account(acc_id):
+                        archived.append(acc_id)
+                    else:
+                        skipped.append({"id": acc_id, "reason": "归档失败"})
+                except Exception as exc:
+                    skipped.append({"id": acc_id, "reason": str(exc)[:80]})
+            payload.update({"archived_count": len(archived), "skipped": skipped[:20]})
+        else:
+            deleted, skipped = db.delete_accounts(account_ids=ids)
+            payload.update({"deleted_count": len(deleted), "skipped": skipped[:20]})
+        logger.info("[清理已废] mode=%s 处理 %d 个账号", mode, len(ids))
+        return jsonify(payload)
+
     @app.post("/api/accounts/<int:acc_id>/note")
     def api_account_note(acc_id: int):
         """更新单个已注册账号备注。Body {note: "..."}，空字符串表示清空。"""

@@ -2378,6 +2378,8 @@
     .sms-pool-cooldown-chip .dot { width:6px; height:6px; border-radius:50%; background:#f79009; }
     .sms-pool-cooldown-chip small { color:#b26a00; opacity:.75; font-weight:500; }
     .sms-pool-cooldown-more { color:#98a2b3; font-size:12px; }
+.acc-v2-toggle--danger{border-color:#f0b4b4;color:#c0392b}
+.acc-v2-toggle--danger:hover{background:#fdecea}
 </style>
 </head>
 <body>
@@ -2597,6 +2599,7 @@
             </span>
           </label>
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
+          <button type="button" class="acc-v2-toggle acc-v2-toggle--danger" id="btnCleanupDeadV2" title="把查活已确认废号的账号一次性清理掉（先预览数量，再确认删除）">清理已废</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通套餐的账号">已开通套餐</button>
           <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且存在 eligible_promo_campaigns 套餐优惠的账号，不限 Plus">有套餐优惠</button>
           <label class="acc-v2-inline" title="指定 eligible_promo_campaigns 中的套餐类型；留空表示全部优惠类型">优惠类型
@@ -4033,6 +4036,45 @@ function getAccountsPlanFilter() {
   if (SHOW_FREE_ACCOUNTS_ONLY) return 'free_no_trial';
   return '';
 }
+// 一键清理已废账号：先预览数量，确认后批量删除。
+// 判定依据仅为 live_check_status === 'deactivated'，不会碰存活/查询中的账号。
+async function cleanupDeadAccounts() {
+  var NL = String.fromCharCode(10);
+  var btn = $('#btnCleanupDeadV2');
+  if (btn) btn.disabled = true;
+  try {
+    var preview = await api('/api/accounts/cleanup-dead', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: true }),
+    });
+    if (!preview || !preview.ok) { showToast('预览失败：' + ((preview && preview.error) || '未知错误')); return; }
+    var count = Number(preview.count || 0);
+    if (!count) { showToast('没有需要清理的已废账号'); return; }
+    var sample = (preview.sample || []).slice(0, 3).map(function (s) {
+      return '#' + s.id + ' ' + (s.email || '');
+    }).join('、');
+    var msg = '确认清理 ' + count + ' 个已废账号？' + NL + NL +
+      '判定依据：查活结果为「账号已废」' + NL +
+      (sample ? ('例如：' + sample + NL) : '') +
+      NL + '删除后不可恢复。';
+    if (!uiConfirmSync(msg)) return;
+    var r = await api('/api/accounts/cleanup-dead', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: false, mode: 'delete' }),
+    });
+    if (r && r.ok) {
+      showToast('已清理 ' + (r.deleted_count || 0) + ' 个已废账号');
+      if (typeof loadAccounts === 'function') await loadAccounts();
+    } else {
+      showToast('清理失败：' + ((r && r.error) || '未知错误'));
+    }
+  } catch (err) {
+    showToast('清理异常：' + (err && err.message ? err.message : err));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function loadAccounts() {
   if (accountsLoading) return;
   accountsLoading = true;
@@ -4943,6 +4985,11 @@ function setAccountsFilterToggle(el, on) {
 }
 async function applyAccountsArchivedFilter(on) {
   SHOW_ARCHIVED_ACCOUNTS = !!on;
+  const cleanupBtn = $('#btnCleanupDeadV2');
+  if (cleanupBtn && !cleanupBtn.dataset.bound) {
+    cleanupBtn.dataset.bound = '1';
+    cleanupBtn.addEventListener('click', cleanupDeadAccounts);
+  }
   setAccountsFilterToggle($('#showArchivedAccountsV2'), SHOW_ARCHIVED_ACCOUNTS);
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
