@@ -131,10 +131,38 @@ def run_protocol_registration(
         _log_phase("校验邮箱码", True)
 
         oa.navigate_about_you(session)
-        about_sentinel = oa.request_sentinel_token(session, "oauth_create_account")
-        about_header, about_so = oa.build_sentinel_header(session, about_sentinel, "oauth_create_account")
-        created = oa.create_account(session, name, birthday, about_header, about_so)
-        _log_phase("创建账号", True, str(created)[:80])
+
+        # registration_disallowed 是策略级拒绝：同一个 sentinel 几乎不会变通，
+        # 但刷新 sentinel（新 turnstile/poW）后有相当概率通过，重试最多 3 次。
+        # 参考 hyhang915/gptfree-register 的处理方式。
+        created = None
+        last_exc = None
+        for attempt in range(1, 4):
+            about_sentinel = oa.request_sentinel_token(session, "oauth_create_account")
+            about_header, about_so = oa.build_sentinel_header(
+                session, about_sentinel, "oauth_create_account"
+            )
+            try:
+                created = oa.create_account(session, name, birthday, about_header, about_so)
+                _log_phase("创建账号", True, str(created)[:80])
+                break
+            except Exception as exc:
+                last_exc = exc
+                text = str(exc).lower()
+                if "registration_disallowed" not in text or attempt >= 3:
+                    raise
+                wait_s = 2.0 * attempt
+                logger.warning(
+                    "[协议注册] registration_disallowed，刷新 sentinel 后重试 %s/3（%.0fs）",
+                    attempt + 1, wait_s,
+                )
+                time.sleep(wait_s)
+                try:
+                    oa.navigate_about_you(session)
+                except Exception:
+                    pass
+        if created is None and last_exc is not None:
+            raise last_exc
 
         # 完成 OAuth callback（continue_url 指向 chatgpt.com/api/auth/callback/openai?code=...），
         # 不跟这一步就拿不到 accessToken。
