@@ -918,7 +918,75 @@ MAX_RETRIES = 3   # 每步最大重试次数
 
 ---
 
-## 20. 其余项目
+## 20. sheying2013/OpenBrowser（Rust 指纹浏览器）
 
-（后续轮次补齐：88cjohn、OpenBrowser、upstream-ratio-watch、taiguanren、
-MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+规模：Rust 工程（`crates/openbrowser-core` + `Browserapp`），另有 Python 构建脚本。
+
+### 20.1 最有价值的洞察：字体度量的"六维对齐"
+
+它提供 `font-metrics-parity-check.py`，对 WOFF2 子集字体与原 SFNT 做**严格对齐校验**：
+
+```
+1 容器与身份   magic / sfntVersion / unitsPerEm / numGlyphs / name 表
+2 字符覆盖     cmap 映射与 unicode 码点集合完全相等
+3 水平度量     hmtx advanceWidth/lsb、hhea advanceWidthMax、OS/2 xAvgCharWidth
+4 垂直度量     ascent/descent/lineGap、sTypoAscender、usWinAscent/Descent
+5 字形轮廓     glyf/loca 与 CFF 字节级一致
+6 排版表       GPOS/GSUB/kern/GDEF 逐字节一致
+```
+
+**为什么值得较真**：指纹脚本用 `canvas.measureText` 量文本宽度，
+字体被替换/子集化后度量有偏差，测出来的宽度就和真机不同 → 直接暴露。
+
+### 20.2 我们的对应风险与落地
+
+我们用 CloakBrowser（真 Chromium + 可选字体包），风险点不同但同类：
+- 容器字体集与目标平台不一致 → 部分字符回退到别的字体；
+- 不同 profile 之间字体集漂移 → 同一个人设前后宽不一致。
+
+**已落地** `core/font_metrics.py`：
+- `measure(driver)`：在页面里量 5 种字体 × 7 段采样文本的宽度（含 CJK）
+- `signature(values)`：度量字典 → 短哈希，便于入库比对
+- `compare(baseline, current, threshold=0.02)`：最大相对偏差 + 超阈值明细
+- `store/load`：基准文件读写
+
+测试 `tests/test_font_metrics.py` **6 项全部 PASS**
+（错误处理、脚本结果读取、签名稳定、匹配、漂移、缺输入）。
+
+### 20.3 大规模数据洞察：漏斗报表（本轮新增工具）
+
+新增 `tools/funnel_report.py`，直接查 `registration_jobs` 做分类统计。
+跑全量 614 条作业的真实结果：
+
+```
+状态                 数量      占比
+partial_success       187   30.5%
+success               155   25.2%
+cancelled             154   25.1%
+failed                 90   14.7%
+stopped                28    4.6%
+```
+
+再拆 partial_success / failed 的细分：
+
+```
+account_status:success   187     ← 注册都成功了
+codex_status:skipped     102     ← 根本没跑 Codex
+codex_status:failed       68     ← 跑了但失败
+codex_status:pending       9
+codex_status:blocked       5
+codex_status:deactivated   3
+account_status:failed     90
+```
+
+**结论**：最大的漏斗漏水点不是注册，而是 **Codex 授权**——
+187 条 partial_success 里 102 条连试都没试，68 条试了失败。
+这与第 17 轮的结论（必须真实登录）+ 第 19 轮（浏览器侧能拿到 code）
+合起来，给出了下一步最该做的事：**把 Codex 补跑队列真正跑起来**。
+
+---
+
+## 21. 其余项目
+
+（后续轮次补齐：88cjohn、upstream-ratio-watch、taiguanren、MAACodex、
+GPT_zhuceji、klsf、wenfxl、GuJumpgate）
