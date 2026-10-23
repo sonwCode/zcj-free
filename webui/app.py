@@ -350,6 +350,8 @@ def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, runni
 
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
+    # 静态资源长缓存：URL 里带 ?v=<内容哈希>，内容变则 URL 变，可以放心长缓存。
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 604800  # 7 天
     _prepared_downloads: dict[str, dict] = {}
 
     @app.after_request

@@ -181,3 +181,56 @@ function renderAccountRowV2(r) {
 - 账号表与 sms-pool 表共用 `paginate`，下一步可让它们共用同一列渲染契约。
 
 下一轮（第 4 轮）：静态资源拆分（CSS/JS 外链 + 缓存头），首屏只加载所需。
+## 第 4 轮：静态资源外链化 + 长缓存
+
+### 4.1 之前的状态
+
+`index.html` 单文件 8031 行：
+- 3 个 `<style>` 块（128,562 字节 CSS）
+- 3 个 `<script>` 块（245,563 字节 JS）
+
+每次访问都要把这 374KB 一起下载，且**无法被浏览器缓存**
+（HTML 本身不可缓存，内联资源随 HTML 一起失效）。
+
+### 4.2 做法
+
+1. 抽出 `webui/static/app.css`（129,003 字节）与 `webui/static/app.js`（260,235 字节）；
+2. 模板里改为：
+   ```html
+   <link rel="stylesheet" href="/static/app.css?v=bd17de8f">   <!-- head 内 -->
+   ...
+   <script src="/static/app.js?v=be8a960a"></script>           <!-- </body> 前 -->
+   ```
+   版本号是内容 sha1 前 8 位，**内容变则 URL 变**，天然避免旧缓存；
+3. `webui/app.py` 加 `SEND_FILE_MAX_AGE_DEFAULT = 604800`（7 天）。
+
+### 4.3 一个必须注意的细节：脚本位置
+
+原来 3 个 `<script>` 分散在第 3074 / 3125 / 3179 行，中间夹着 HTML。
+合并成一个文件后如果仍放在第一处，会在部分 DOM 之前执行。
+本次把外链脚本放到 `</body>` 之前——**比原来更晚，只会更安全**。
+
+### 4.4 验证
+
+```
+模板: <style> 残留 0；<script> 只剩 1 个外链
+语法: node --check webui/static/app.js → OK
+结构: div 168/168、table 4/4、select 12/12、button 96/96 全部配对
+资源: /static/app.css 200 (129,003B)，/static/app.js 200
+缓存: Cache-Control: public, max-age=604800；Expires 7 天后
+首页: / 仍 302（鉴权正常）
+```
+
+### 4.5 收益
+
+- HTML 从 **419KB 降到 45KB**（首屏只解析结构，CSS/JS 走缓存）；
+- CSS/JS 首次加载后 7 天内不再重复下载；
+- 后续改样式/脚本不需要动模板（也不会让 HTML 缓存失效）。
+
+### 4.6 过程中的一次事故
+
+给 `app.py` 加配置时插到了函数体外，触发 `IndentationError`（line 355）。
+立即按行修正缩进并 `py_compile` 通过。教训同第 3 轮：**改大文件后必须立刻编译校验**。
+
+下一轮（第 5 轮）：交互细节对标（加载骨架屏、批量操作工具栏、快捷键），
+并把 sms-pool 表也迁到同一列渲染契约。

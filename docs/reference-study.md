@@ -844,7 +844,44 @@ Codex 授权必须在**同一个协议会话里完成真实登录**（邮箱 + O
 
 ---
 
-## 18. 其余项目
+## 18. pixian5/chatgpt_register_web
 
-（后续轮次补齐：pixian5、fuckoai、88cjohn、OpenBrowser、upstream-ratio-watch、
+规模：`chatgpt_register.py` 86KB、`register.py` 63KB、`web_app.py` 42KB，
+另有一个 `ref/config.json` 参考配置与 `qweather_mailer` 小工具。
+
+### 18.1 值得记的两个工程点
+
+**(a) 有界日志队列 + 同步/异步桥接**
+
+```python
+_reg_log_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+
+def _push_log_sync(queue, msg):
+    asyncio.run_coroutine_threadsafe(queue.put(msg), _event_loop)
+```
+
+后台线程产生的日志通过 `run_coroutine_threadsafe` 推入 asyncio 队列，
+队列有上限（1000）形成背压，不会因为日志暴涨吃光内存。
+我们目前是"前端每 5 秒轮询接口读文件尾部"，没有背压概念——
+不过我们已经有可见性感知轮询，优先级不高，记录备查。
+
+**(b) 按任务类型分开的并发度**
+
+```
+proxy_test_workers / probe_workers / delete_workers
+max_workers = max(1, min(max_workers, total_checks))
+```
+
+不同任务用不同并发，并且**永远夹在任务总数以内**，避免为 3 个代理开 50 个线程。
+这一点我们的批量探活可以对照检查。
+
+### 18.2 无可迁移的大块能力
+
+它的注册主体仍是浏览器自动化，与我们协议 + CloakBrowser 双路线的定位不同。
+
+---
+
+## 19. 其余项目
+
+（后续轮次补齐：fuckoai、88cjohn、OpenBrowser、upstream-ratio-watch、
 taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
