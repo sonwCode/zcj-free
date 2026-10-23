@@ -881,7 +881,44 @@ max_workers = max(1, min(max_workers, total_checks))
 
 ---
 
-## 19. 其余项目
+## 19. chengtx007/fuckoai
 
-（后续轮次补齐：fuckoai、88cjohn、OpenBrowser、upstream-ratio-watch、
-taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+规模：`server.py` 125KB（单文件服务）+ `uc_signup.py` 25KB + `control_panel.html`。
+
+### 19.1 uc_signup：undetected_chromedriver 注册 + OAuth CPA 回调
+
+流程：
+```
+goto chatgpt.com/auth/login?intent=signup  → 浏览器内完成注册
+→ 走 Codex OAuth（浏览器导航）
+→ 轮询 driver.current_url 直到命中 localhost:1455 或含 code=
+→ POST 到自己的 /api/codex-oauth/callback，把 callback_url 交给后端换 token
+```
+
+**关键点**：它并不在乎浏览器是否真的连上 localhost:1455——
+只要 URL 已经变成回调地址（哪怕页面是 ERR_CONNECTION_REFUSED），
+code 就在 URL 里。这与我们第 17 轮的结论一致：**不要用 requests 去跟随**，
+而是在浏览器里读 `current_url`。
+
+它也印证了 `localhost:1455` 这个 redirect_uri **本身没有被封**，
+被封的是"用 HTTP 客户端直接跟到死本地端口"这种请求形态。
+
+### 19.2 每步独立重试
+
+```python
+MAX_RETRIES = 3   # 每步最大重试次数
+```
+
+它把重试粒度放在"步骤"而不是"整轮"，与我们第 5 轮的可恢复成功思路一致。
+
+### 19.3 结论
+
+无可直接迁移的模块；但它的实现路径从第三个角度确认了我们的判断：
+**Codex 授权必须走真实登录（浏览器或协议），并在拿到 code 后自己换 token。**
+
+---
+
+## 20. 其余项目
+
+（后续轮次补齐：88cjohn、OpenBrowser、upstream-ratio-watch、taiguanren、
+MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）

@@ -2392,3 +2392,18 @@
 .qual-tag{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;font-weight:600;line-height:18px;}
 .qual-tag--ok{color:#15803d;background:#ecfdf3;border:1px solid #abefc6;}
 .qual-text-muted{color:#94a3b8;}
+
+/* 骨架屏：首次加载账号表时的占位行 */
+.sk-row td { padding: 10px 12px; }
+.sk-line {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, rgba(0,0,0,.06) 25%, rgba(0,0,0,.11) 37%, rgba(0,0,0,.06) 63%);
+  background-size: 400% 100%;
+  animation: sk-shimmer 1.4s ease infinite;
+}
+@keyframes sk-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+@media (prefers-reduced-motion: reduce) { .sk-line { animation: none; } }

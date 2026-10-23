@@ -234,3 +234,74 @@ function renderAccountRowV2(r) {
 
 下一轮（第 5 轮）：交互细节对标（加载骨架屏、批量操作工具栏、快捷键），
 并把 sms-pool 表也迁到同一列渲染契约。
+## 第 5 轮（收官）：列契约统一 + 骨架屏 + 快捷键
+
+### 5.1 sms-pool 候选表迁到同一套列契约
+
+账号表在第 3 轮已经"列定义化"，sms-pool 候选表仍是一段拼接字符串
+（6 列硬写在两行里）。本轮把它改成同样的形状：
+
+```js
+const SMS_POOL_ELIGIBLE_COLUMNS = [
+  { cls: 'sms-pool-mono', head: 'ID', headCls: 'sms-pool-col-id', cell: (it) => '#' + esc(it.id) },
+  { cls: 'sms-pool-email', head: '邮箱', cell: (it) => esc(it.email || '—') },
+  { cls: '', head: '套餐', cell: (it) => esc(it.plan_type || 'free') },
+  { cls: '', head: 'Codex', headCls: 'sms-pool-col-status', cell: (it) => smsPoolPill(...) },
+  { cls: '', head: '账号测活', headCls: 'sms-pool-col-status', cell: (it) => smsPoolLivePill(it) },
+  { cls: 'sms-pool-mono', head: '最近测活', headCls: 'sms-pool-col-time', cell: (it) => esc(smsPoolFmtTime(...)) },
+];
+function renderSmsPoolEligibleRow(item) { ... }
+function renderSmsPoolEligibleTable(rows) { ... }
+```
+
+调用点从两行拼接缩成两行调用。**表头与单元格由同一份定义生成，不会再错位。**
+
+### 5.2 加载骨架屏
+
+账号表首次加载时先渲染占位行，避免"空白一大片"：
+
+```js
+function skeletonRows(cols, rows) {
+  const n = Math.max(1, Math.min(Number(rows) || 6, 20));
+  const span = Math.max(1, Number(cols) || 1);
+  const one = '<tr class="sk-row"><td colspan="' + span + '"><div class="sk-line"></div></td></tr>';
+  return new Array(n).fill(one).join('');
+}
+```
+
+在 `loadAccounts` 里，仅当 `ACCOUNTS` 为空（真正首次加载）时插入 8 行骨架，
+避免翻页/刷新时闪烁。
+
+CSS 用渐变 + `background-position` 动画，并遵守 `prefers-reduced-motion`：
+
+```css
+@media (prefers-reduced-motion: reduce) { .sk-line { animation: none; } }
+```
+
+### 5.3 键盘快捷键
+
+```
+/        聚焦账号搜索框（正在输入时不劫持）
+Alt + R  刷新账号列表
+```
+
+### 5.4 验证
+
+```
+node --check webui/static/app.js → OK
+部署后 /static/app.js 200（262,126B）、/static/app.css 200（129,499B）
+出现次数：SMS_POOL_ELIGIBLE_COLUMNS 3、skeletonRows 1、sk-shimmer 2
+服务 active；/ 仍 302
+```
+
+### 5.5 五轮前端总结
+
+| 轮 | 内容 | 结果 |
+|---|---|---|
+| 1 | 现状盘点 + 可见性感知轮询 | 5 个轮询函数加守卫 |
+| 2 | 分页逻辑合流 | 通用 `paginate`，删两处重复算术 |
+| 3 | 账号表列定义化 | 15 列拆出模板，15/15 结构验证 |
+| 4 | 静态资源外链 + 长缓存 | HTML 419KB → 45KB，7 天缓存 |
+| 5 | 列契约统一 + 骨架屏 + 快捷键 | sms-pool 表同契约，首屏不再空白 |
+
+五轮都遵循同一原则：**不引入构建链**，用外链文件 + 小型模块约定达到可维护性。

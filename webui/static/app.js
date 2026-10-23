@@ -329,6 +329,13 @@ function jobsV2OpIcons() {
 function showToast(t) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),1400); }
 // 通用分页：把"算页数/夹住页码/切片"三件重复的事收在一处。
 // 之前 renderSmsPoolEligible 与 renderSmsPoolEvents 各写一遍同样的算术。
+// 加载骨架：账号表首次加载时先占位，避免"空白一大片"。
+function skeletonRows(cols, rows) {
+  const n = Math.max(1, Math.min(Number(rows) || 6, 20));
+  const span = Math.max(1, Number(cols) || 1);
+  const one = '<tr class="sk-row"><td colspan="' + span + '"><div class="sk-line"></div></td></tr>';
+  return new Array(n).fill(one).join('');
+}
 function paginate(list, page, size) {
   const items = Array.isArray(list) ? list : [];
   const per = Math.max(1, Math.floor(Number(size) || 20));
@@ -447,12 +454,35 @@ async function loadSmsPoolStatus() {
 }
 
 function filteredSmsPoolAccounts() { const q = String(smsPoolEl('smsPoolAccountSearch').value || '').trim().toLocaleLowerCase(); return q ? smsPoolState.eligible.filter(x => String(x.email || '').toLocaleLowerCase().includes(q) || String(x.id || '').includes(q)) : smsPoolState.eligible; }
+// sms-pool 候选表：与账号表同一套"列定义 + 行渲染"契约。
+const SMS_POOL_ELIGIBLE_COLUMNS = [
+  { cls: 'sms-pool-mono', head: 'ID', headCls: 'sms-pool-col-id', cell: (it) => '#' + esc(it.id) },
+  { cls: 'sms-pool-email', head: '邮箱', headCls: 'sms-pool-col-email', cell: (it) => esc(it.email || '—') },
+  { cls: '', head: '套餐', headCls: '', cell: (it) => esc(it.plan_type || 'free') },
+  { cls: '', head: 'Codex', headCls: 'sms-pool-col-status',
+    cell: (it) => smsPoolPill(it.codex_status || '未开始', it.codex_status === 'success' ? 'success' : '') },
+  { cls: '', head: '账号测活', headCls: 'sms-pool-col-status', cell: (it) => smsPoolLivePill(it) },
+  { cls: 'sms-pool-mono', head: '最近测活', headCls: 'sms-pool-col-time',
+    cell: (it) => esc(smsPoolFmtTime(it.live_checked_at)) },
+];
+
+function renderSmsPoolEligibleRow(item) {
+  const cells = SMS_POOL_ELIGIBLE_COLUMNS.map((col) =>
+    '<td' + (col.cls ? ' class="' + col.cls + '"' : '') + '>' + col.cell(item) + '</td>').join('');
+  return '<tr>' + cells + '</tr>';
+}
+
+function renderSmsPoolEligibleTable(rows) {
+  const head = SMS_POOL_ELIGIBLE_COLUMNS.map((col) =>
+    '<th' + (col.headCls ? ' class="' + col.headCls + '"' : '') + '>' + col.head + '</th>').join('');
+  return '<table><thead><tr>' + head + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
 function renderSmsPoolEligible() {
   const list = filteredSmsPoolAccounts(); smsPoolState.pageSize = Number(smsPoolEl('smsPoolPageSize').value) || 20; const pg = paginate(list, smsPoolState.page, smsPoolState.pageSize); smsPoolState.page = pg.page; const pages = pg.pages; const start = pg.start; const items = pg.items;
   smsPoolEl('smsPoolEligibleCount').textContent = list.length + ' 个候选'; smsPoolEl('smsPoolEligibleSummary').textContent = list.length ? '显示 ' + (start + 1) + '–' + Math.min(start + smsPoolState.pageSize, list.length) + ' 条，共 ' + list.length + ' 条' : '暂无候选账号'; smsPoolEl('smsPoolPageInfo').textContent = smsPoolState.page + ' / ' + pages; smsPoolEl('smsPoolPagePrev').disabled = smsPoolState.page <= 1; smsPoolEl('smsPoolPageNext').disabled = smsPoolState.page >= pages;
   if (!items.length) { smsPoolEl('smsPoolEligibleBox').innerHTML = '<div class="sms-pool-empty">' + (smsPoolState.eligible.length ? '没有匹配账号' : '暂无符合条件的 free 未接码账号') + '</div>'; return; }
-  const rows = items.map(item => '<tr><td class="sms-pool-mono">#' + esc(item.id) + '</td><td class="sms-pool-email">' + esc(item.email || '—') + '</td><td>' + esc(item.plan_type || 'free') + '</td><td>' + smsPoolPill(item.codex_status || '未开始', item.codex_status === 'success' ? 'success' : '') + '</td><td>' + smsPoolLivePill(item) + '</td><td class="sms-pool-mono">' + esc(smsPoolFmtTime(item.live_checked_at)) + '</td></tr>').join('');
-  smsPoolEl('smsPoolEligibleBox').innerHTML = '<table><thead><tr><th class="sms-pool-col-id">ID</th><th class="sms-pool-col-email">邮箱</th><th>套餐</th><th class="sms-pool-col-status">Codex</th><th class="sms-pool-col-status">账号测活</th><th class="sms-pool-col-time">最近测活</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  const rows = items.map(renderSmsPoolEligibleRow).join('');
+  smsPoolEl('smsPoolEligibleBox').innerHTML = renderSmsPoolEligibleTable(rows);
 }
 function renderSmsPoolPending() { const detail = smsPoolEl('smsPoolReviewDetails'); if (!smsPoolState.pending.length) { detail.hidden = true; return; } detail.hidden = false; smsPoolEl('smsPoolReviewSummary').textContent = '待核验账号 · ' + smsPoolState.pending.length; smsPoolEl('smsPoolReviewBox').innerHTML = '<table><thead><tr><th class="sms-pool-col-id">ID</th><th class="sms-pool-col-email">邮箱</th><th>原因</th></tr></thead><tbody>' + smsPoolState.pending.map(x => '<tr><td class="sms-pool-mono">#' + esc(x.id || '—') + '</td><td class="sms-pool-email">' + esc(x.email || '—') + '</td><td>' + esc(x.reason || '需核验') + '</td></tr>').join('') + '</tbody></table>'; }
 async function loadSmsPoolEligible() { const box = smsPoolEl('smsPoolEligibleBox'); if (!smsPoolState.eligibleLoaded) box.innerHTML = '<div class="sms-pool-loading">正在加载账号…</div>'; try { const data = await api('/api/sms-pool/eligible'); smsPoolState.eligible = data.eligible || []; smsPoolState.pending = data.pending_review || []; smsPoolState.eligibleLoaded = true; renderSmsPoolEligible(); renderSmsPoolPending(); } catch (error) { if (!smsPoolState.eligibleLoaded) box.innerHTML = '<div class="sms-pool-error">账号列表读取失败：' + esc(error.message) + '</div>'; else smsPoolNotice('账号列表刷新失败，保留上次数据：' + error.message, 'warn'); smsPoolEl('smsPoolEligibleCount').textContent = '读取失败'; } }
@@ -1032,6 +1062,10 @@ async function loadAccounts() {
   if (accountsLoading) return;
   accountsLoading = true;
   try {
+    if (!ACCOUNTS.length) {
+      const body = $('#accountsBodyV2');
+      if (body) body.innerHTML = skeletonRows(15, 8);
+    }
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = getAccountsPlanFilter();
     const codex = getAccountsCodexFilter();
@@ -4971,3 +5005,16 @@ async function viewSmsPoolReservationLog(reservationId) {
     if (btn) viewSmsPoolReservationLog(btn.getAttribute('data-sms-pool-reslog'));
   });
 })();
+
+// 键盘快捷键：/ 聚焦账号搜索；Alt+R 刷新列表。在输入框里时不劫持。
+document.addEventListener('keydown', (e) => {
+  const tag = (e.target && e.target.tagName || '').toLowerCase();
+  const typing = tag === 'input' || tag === 'textarea' || tag === 'select' || (e.target && e.target.isContentEditable);
+  if (e.key === '/' && !typing) {
+    const box = document.getElementById('qAccountsV2');
+    if (box) { e.preventDefault(); box.focus(); box.select(); }
+  }
+  if (e.altKey && (e.key === 'r' || e.key === 'R')) {
+    if (typeof loadAccounts === 'function') { e.preventDefault(); loadAccounts(); }
+  }
+});
