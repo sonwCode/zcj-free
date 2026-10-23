@@ -199,6 +199,30 @@ def _network_preflight_with_retry(
                 "[查活] 网络预检失败（%s/%s），保留当前 session/deviceId/CF Cookie 重试：%s",
                 attempt, max_attempts, str(exc)[:200],
             )
+            # 同一出口连续失败（典型是 SSL_ERROR_SYSCALL / CONNECT 407）说明这条
+            # 代理链路已经坏了，继续复用只会白等。第 2 次起换一个新出口，
+            # device_id / 指纹保持不变，避免被判定为换设备。
+            if attempt >= 2:
+                old_target = str(getattr(session, "proxy_target", "") or session.proxy or "")
+                try:
+                    close_browser_session(session)
+                except Exception:
+                    pass
+                new_proxy = None
+                try:
+                    from config.proxy import pick_proxy_excluding
+
+                    new_proxy = pick_proxy_excluding({old_target} if old_target else None)
+                except Exception as exc2:
+                    logger.debug("[查活] 选取备用出口失败：%s", str(exc2)[:120])
+                if new_proxy:
+                    logger.warning(
+                        "[查活] 出口连续失败，切换代理重试：%s",
+                        str(new_proxy).split("@")[-1][:60],
+                    )
+                    session = _new_fingerprint_pinned_session(email, new_proxy, state)
+                else:
+                    session = _new_fingerprint_pinned_session(email, proxy, state)
             time.sleep(2)
     raise RuntimeError(f"网络预检多次失败：{last_exc}")
 
@@ -463,6 +487,18 @@ def _validate_reauth_with_retry(
                     error_code=dead_code,
                 ) from exc
 
+            _text = str(exc)
+            if any(k in _text for k in ("验证码超时", "收件箱为空", "RemailError", "等待 Remail")) and attempt < max_otp_attempts:
+                last_exc = exc
+                logger.warning("[查活] reauth 未取到验证码，重发后再等（%s/%s）：%s", attempt, max_otp_attempts, _text[:160])
+                try:
+                    send_email_otp(session)
+                except Exception:
+                    pass
+                otp_after_ts = time.time()
+                current_otp = None
+                time.sleep(2)
+                continue
             status = _exception_status_code(exc)
             # reauth validate 的 403 可能是 Cloudflare/出口拦截；不要在同一已熔断
             # 会话上反复发送 OTP，交给上层的直连兜底处理。
@@ -502,7 +538,12 @@ def _login_via_reauth(
     if _account_registration_password(email):
         logger.info("[查活] 账号存在密码，改用密码 + TOTP 完成重认证：%s", email)
         return _login_via_password_or_otp(session, email, otp_after_ts, email_source=email_source)
-    logger.info("[查活] 已跟随 reauth authorize URL，开始等待邮箱 OTP")
+    logger.info("[查活] 已跟随 reauth authorize URL，主动触发发码后等待邮箱 OTP")
+    try:
+        send_email_otp(session)
+    except Exception as exc:
+        logger.warning("[查活] reauth 触发验证码发送失败（继续取码）：%s", str(exc)[:160])
+    otp_after_ts = time.time()
     continue_url = _validate_reauth_with_retry(
         session,
         email,
@@ -590,11 +631,17 @@ def _login_via_password_or_otp(
         )
 
     if "email-verification" in continue_url or page_type in {"email_verification", "email_otp_send"}:
-        logger.info("[查活] 密码登录后仍进入邮箱 OTP，继续完成邮箱验证：%s", email)
+        logger.info("[查活] 密码登录后仍进入邮箱 OTP，主动触发发码后继续：%s", email)
+        # 密码登录走到验证页时，验证码往往还没被发出去；
+        # 不主动发码就等，只会等到"收件箱为空"。
+        try:
+            send_email_otp(session)
+        except Exception as exc:
+            logger.warning("[查活] 触发邮箱验证码发送失败（继续尝试取码）：%s", str(exc)[:160])
         return _login_via_email_otp(
             session,
             email,
-            otp_after_ts,
+            time.time(),
             email_source=email_source,
         )
 
@@ -693,6 +740,23 @@ def _validate_with_retry(
             current_otp = None
             time.sleep(1)
         except Exception as exc:
+            # 取码超时（收件箱为空/验证码未到）也要重发后再等一次，
+            # 否则一次没发出去就直接判失败。
+            _text = str(exc)
+            _timeout_like = any(
+                key in _text for key in ("验证码超时", "收件箱为空", "RemailError", "等待 Remail")
+            )
+            if _timeout_like and attempt < max_otp_attempts:
+                last_exc = exc
+                logger.warning("[查活] 未取到验证码，重发后再等（%s/%s）：%s", attempt, max_otp_attempts, _text[:160])
+                try:
+                    send_email_otp(session)
+                except Exception:
+                    pass
+                otp_after_ts = time.time()
+                current_otp = None
+                time.sleep(2)
+                continue
             # 提交 OTP 后的网络抖动（连接断开/超时/代理波动）：同一会话重发验证码再验证一次。
             if attempt >= max_otp_attempts or not _is_retryable_network_error(exc):
                 raise
