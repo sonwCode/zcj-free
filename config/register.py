@@ -38,3 +38,7 @@ apply_env_overrides(globals(), {
     'PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL': 'bool',
     'POST_REGISTER_DWELL_SECONDS_RANGE': 'str',
 })
+
+# 协议注册成功后是否做一次"暖号"（完整 bootstrap + 会话初始化），
+# 让账号留下真实使用痕迹，降低被清理概率。
+PROTOCOL_WARMUP_AFTER_REGISTER: bool = True

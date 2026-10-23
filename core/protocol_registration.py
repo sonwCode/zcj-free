@@ -250,6 +250,23 @@ def run_protocol_registration(
         except Exception as exc:
             _log_phase("2FA 入队", False, str(exc)[:100])
 
+        # 暖号：用同一 device 指纹补一轮真实前端请求（完整 bootstrap、
+        # 会话初始化、会话列表），让新号带上使用痕迹。
+        try:
+            from config import register as _reg_cfg
+
+            if bool(getattr(_reg_cfg, "PROTOCOL_WARMUP_AFTER_REGISTER", True)):
+                from core.account_warmup import warmup_account
+
+                warmed = warmup_account(
+                    session,
+                    access_token,
+                    timezone_offset_min=str(getattr(session, "js_timezone_offset_min", lambda: "-")() or "-"),
+                )
+                _log_phase("暖号", bool(warmed.get("ok")), str(warmed.get("steps") or warmed.get("error") or "")[:110])
+        except Exception as exc:
+            _log_phase("暖号", False, str(exc)[:100])
+
         # 与浏览器路径一致：注册成功后自动排队查套餐/资格
         try:
             from core import plan_check_service
