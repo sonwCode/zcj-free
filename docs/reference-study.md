@@ -777,7 +777,74 @@ comm -23 <(find 它 -name "*.py" | sort) <(find 我们 -name "*.py" | sort)
 
 ---
 
-## 17. 其余项目
+## 17. 决定性结论：cookie 无法绕过 Codex OAuth 登录
+
+第 16 轮推断"把 Codex 授权并入协议会话"，本轮把它做实并拿到了**服务器原话**。
+
+### 17.1 先修掉一个真实 bug：跟随重定向导致误判封禁
+
+`_bootstrap_authorize` 用 `allow_redirects=True` 跟随 302，
+结果 requests 跟到 `http://localhost:1455`（本机没有监听），
+OpenAI 侧对这种"跟到死回调"的请求返回：
+
+```
+403 msg: localhost:1455 is ban
+```
+
+而这个 403 被我们的熔断器捕获 → 会话冷却 900s → 后续全部失败。
+看起来像"回调地址被封禁"，其实是**我们自己跟错了**。
+
+对照实验证明参数无关（六种参数组合全部 302）：
+```
+A 基线 302 / B prompt=none 302 / C prompt=login 302
+D codex_cli_simplified_flow 302 / E id_token_add_organizations 302 / F 两者都加 302
+```
+
+**修复**：`core/codex_inline.py` 自己发 GET 并设 `allow_redirects=False`，
+只读 `Location` 头。
+
+### 17.2 拿到决定性证据
+
+改成不跟随后重新跑，服务器直接给出：
+
+```
+302 → http://localhost:1455/auth/callback
+      ?error=login_required
+      &error_description=The Authorization Server requires End-User authentication
+```
+
+**含义**：`auth.openai.com` 的授权服务器要求**终端用户真实认证**。
+注入 chatgpt.com 的 session-token 不够——这不是"注入方式不对"，
+而是服务端的硬要求。
+
+这与两处独立记录完全吻合：
+- ZRainbow1275 PRD："session 无法直接用于主号 Codex OAuth，仍落在登录页"；
+- Haohuangsix 注释："复用已登录 session 会撞 /choose-an-account 卡死"。
+
+### 17.3 已落地
+
+`core/codex_inline.py`：
+- `_load_cookies_into_session(session, cookies)`：把账号的跨域 cookie 灌进协议会话
+- `authorize_from_session(session, prompt)`：**不跟随重定向**的引导 →
+  读 Location → 判断是否已带 code → 否则取 workspace_id → `workspace/select`
+- `codex_from_account(account)`：端到端（cookie → 授权 → `exchange_codex_token`）
+
+测试 `tests/test_codex_inline.py` **3 项全部 PASS**，其中
+`test_bootstrap_does_not_follow_redirects` 专门锁住这个 bug 不复发。
+
+### 17.4 由此确定的正确路线
+
+Codex 授权必须在**同一个协议会话里完成真实登录**（邮箱 + OTP [+ 手机]），
+然后 `workspace/select` → callback code → `exchange_codex_token`。
+我们现有的 `run_codex_oauth` 走的正是这条路，方向正确；
+
+不需要再尝试：
+- 用 session-token 直接过 OAuth（服务端拒绝）；
+- 浏览器点选 choose-an-account（React SPA 不可提交）。
+
+---
+
+## 18. 其余项目
 
 （后续轮次补齐：pixian5、fuckoai、88cjohn、OpenBrowser、upstream-ratio-watch、
 taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
