@@ -66,3 +66,10 @@ PROTOCOL_PHASE_PAUSE: str = ""
 # 重放浏览器 Datadog RUM beacon（HAR 路径），空=不重放
 PROTOCOL_DATADOG_HAR: str = ""
 PROTOCOL_DATADOG_LIMIT: int = 60
+
+# 协议注册前先探测出口边缘可用性，只在 clean 出口上建号
+PROTOCOL_PREFLIGHT_EXIT_PROBE: bool = True
+PROTOCOL_PREFLIGHT_PROBE_MAX: int = 6
+
+# 注册前只读探测该邮箱是否已被 OpenAI 注册过（不改变账号状态）
+PROTOCOL_MAILBOX_PROBE: bool = True

@@ -50,7 +50,8 @@ def _phase_pause() -> None:
     _time.sleep(_random.uniform(lo, max(lo, hi)))
 
 
-def _protocol_extra(password: str, info: dict, email_source: str | None) -> dict:
+def _protocol_extra(password: str, info: dict, email_source: str | None,
+                    mailbox_probe: dict | None = None) -> dict:
     """账号 extra：保留注册密码、驱动标记，并把 Remail 订单上下文一并落库。
 
     落库后即使进程重启、本地取件缓存丢失，查活/补跑仍可用
@@ -58,6 +59,7 @@ def _protocol_extra(password: str, info: dict, email_source: str | None) -> dict
     """
     extra = {
         "registration_password": password,
+        "mailbox_probe": mailbox_probe or {},
         "registration_driver": "protocol",
         "session": info,
     }
@@ -139,9 +141,44 @@ def run_protocol_registration(
         "note": "协议注册不加载任何静态资源，仅接口请求",
     }
     try:
+        # 邮箱新颖性只读探测：不改变任何状态，只记录该地址此前是否已被 OpenAI 注册过。
+        _mailbox_probe: dict = {}
+        try:
+            from config import register as _mp_cfg
+
+            if bool(getattr(_mp_cfg, 'PROTOCOL_MAILBOX_PROBE', True)):
+                from core.mailbox_probe import probe_mailbox
+
+                _mailbox_probe = probe_mailbox(email, attempts=3)
+                if _mailbox_probe.get('status') == 'registered':
+                    logger.warning('[协议注册] 该邮箱此前已被注册过（%s），继续按流程尝试', email)
+        except Exception as _mp_exc:
+            logger.debug('[协议注册] 邮箱探测跳过：%s', str(_mp_exc)[:120])
+
         # 一号一出口：未显式指定代理时，优先挑最近没用过的出口。
         if proxy is None:
             proxy = _pick_fresh_exit()
+            # 出口预检：只有边缘 clean 的出口才用来建号，避免整轮白跑。
+            try:
+                from config import register as _pf_cfg
+
+                if bool(getattr(_pf_cfg, 'PROTOCOL_PREFLIGHT_EXIT_PROBE', True)):
+                    from config.proxy import PROXY_POOL as _POOL
+                    from core.proxy_edge_probe import CLEAN, pick_clean_exit, probe_exit
+
+                    _verdict = probe_exit(proxy) if proxy else None
+                    if _verdict is not None and _verdict.status != CLEAN:
+                        _picked = pick_clean_exit(
+                            list(_POOL),
+                            exclude={proxy},
+                            max_probe=int(getattr(_pf_cfg, 'PROTOCOL_PREFLIGHT_PROBE_MAX', 6) or 6),
+                        )
+                        if _picked is not None:
+                            logger.info('[协议注册] 出口 %s 判定 %s，改用 %s',
+                                        "***", _verdict.status, '***')
+                            proxy = _picked.proxy
+            except Exception as _pf_exc:
+                logger.debug('[协议注册] 出口预检跳过：%s', str(_pf_exc)[:120])
         session = BrowserSession(proxy=proxy)
         _remember_exit(getattr(session, "proxy", "") or proxy)
         oa.network_preflight(session)
@@ -283,7 +320,7 @@ def run_protocol_registration(
             email_source=_email_source,
             device_id=str(getattr(session, "device_id", "") or ""),
             proxy_used=str(getattr(session, "proxy", "") or ""),
-            extra=_protocol_extra(password, info, _email_source),
+            extra=_protocol_extra(password, info, _email_source, _mailbox_probe),
             codex_status="skipped",
         )
         _log_phase("落库", True, "account_id=%s" % account_id)
