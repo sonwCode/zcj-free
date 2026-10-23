@@ -4036,40 +4036,36 @@ function getAccountsPlanFilter() {
   if (SHOW_FREE_ACCOUNTS_ONLY) return 'free_no_trial';
   return '';
 }
-// 一键清理已废账号：先预览数量，确认后批量删除。
-// 判定依据仅为 live_check_status === 'deactivated'，不会碰存活/查询中的账号。
-// 一键清理查活已废账号：先实探所有账号的 token，再预览数量，确认后删除。
-// 判定依据：用保存的 access_token 请求 /backend-api/me，401/已吊销即视为已死；
-// 返回 200 的正常账号绝不会被删除。
+// 一键清理已废账号：直接用查活已经写进库里的结论（live_check_status=deactivated）。
+// 不再额外探活，避免把正常号误判成死号。
 async function cleanupDeadAccounts() {
   var NL = String.fromCharCode(10);
   var btn = $('#btnCleanupDeadV2');
-  if (btn) { btn.disabled = true; btn.textContent = '探活中…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '统计中…'; }
   try {
     var preview = await api('/api/accounts/cleanup-dead', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dry_run: true, verify: true }),
+      body: JSON.stringify({ dry_run: true, verify: false }),
     });
-    if (!preview || !preview.ok) { showToast('探活失败：' + ((preview && preview.error) || '未知错误')); return; }
+    if (!preview || !preview.ok) { showToast('统计失败：' + ((preview && preview.error) || '未知错误')); return; }
     var count = Number(preview.count || 0);
-    var scanned = Number(preview.scanned || 0);
     var alive = Number(preview.alive || 0);
-    if (!count) { showToast('扫描 ' + scanned + ' 个账号，未发现失效账号（正常 ' + alive + ' 个）'); return; }
-    var sample = (preview.sample || []).slice(0, 3).map(function (s) {
+    if (!count) { showToast('没有查活已废的账号（正常 ' + alive + ' 个）'); return; }
+    var sample = (preview.sample || []).slice(0, 5).map(function (s) {
       return '#' + s.id + ' ' + (s.email || '');
     }).join('、');
-    var msg = '扫描 ' + scanned + ' 个账号，发现 ' + count + ' 个已失效' + NL + NL +
-      '判定依据：用保存的 token 实探，服务端返回 401/已吊销' + NL +
-      '正常账号 ' + alive + ' 个，不会被删除' + NL +
+    var msg = '将清理 ' + count + ' 个已废账号' + NL + NL +
+      '依据：你查活得出的结论（账号已废）' + NL +
+      '其余 ' + alive + ' 个正常账号不会被删除' + NL +
       (sample ? ('例如：' + sample + NL) : '') +
       NL + '删除后不可恢复。';
     if (!uiConfirmSync(msg)) return;
     var r = await api('/api/accounts/cleanup-dead', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dry_run: false, mode: 'delete', verify: true }),
+      body: JSON.stringify({ dry_run: false, mode: 'delete', verify: false }),
     });
     if (r && r.ok) {
-      showToast('已清理 ' + (r.deleted_count || 0) + ' 个失效账号');
+      showToast('已清理 ' + (r.deleted_count || 0) + ' 个已废账号');
       if (typeof loadAccounts === 'function') await loadAccounts();
     } else {
       showToast('清理失败：' + ((r && r.error) || '未知错误'));

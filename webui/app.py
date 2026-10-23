@@ -862,7 +862,9 @@ def create_app(auth_code: str | None = None) -> Flask:
         mode = str(data.get("mode") or "delete").strip().lower()
         if mode not in ("delete", "archive"):
             return jsonify({"ok": False, "error": "mode 只能是 delete 或 archive"}), 400
-        verify = bool(data.get("verify", True))
+        # 默认不探活：直接采用查活已经写进库里的结论（用户要求）。
+        # 需要额外核对时才显式传 verify=true。
+        verify = bool(data.get("verify", False))
         try:
             older_days = int(data.get("older_than_days") or 0)
         except (TypeError, ValueError):
