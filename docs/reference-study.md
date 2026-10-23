@@ -1015,7 +1015,59 @@ redirect_uri = f"http://localhost:{CODEX_CALLBACK_PORT}/auth/callback"
 
 ---
 
-## 22. 其余项目
+## 22. Regert888/upstream-ratio-watch
 
-（后续轮次补齐：upstream-ratio-watch、taiguanren、MAACodex、
-GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+规模：单文件 `app.py` 77KB + 静态页。用途是监控上游 AI 服务分组倍率变化
+（NewAPI 与 sub2api 站点），不是注册工具。
+
+### 22.1 值得借鉴的两个机制
+
+**(a) 每站点独立采集间隔 + 线程调度**
+
+```python
+interval_minutes INTEGER NOT NULL DEFAULT 3
+STOP_EVENT = threading.Event()
+DB_LOCK = threading.RLock()
+```
+
+每个站点可配不同采集间隔，`STOP_EVENT` 用于优雅停机，
+`DB_LOCK` 让 sqlite 在多线程下安全（`check_same_thread=False` + 显式锁）。
+
+**(b) 变化即推送：企业微信 webhook + QQ 群机器人**
+
+它把"数值变了"这件事主动推出去，而不是等人打开面板。
+
+### 22.2 我们的缺口与落地
+
+我们一直有"查活"，但**结果只落在库里**——账号批量失效没人知道，
+要等人工打开界面才发现。
+
+**已落地** `core/alerting.py`：
+- `build_wecom / build_generic / build_telegram`：三种渠道 payload
+- `should_send(key, min_interval)`：**跨进程节流**（状态落盘 `alert_state.json`），
+  同一个 key 在窗口内只发一次，避免重复轰炸
+- `send(text, webhook, channel, sender=None)`：`sender` 可注入便于测试
+- `dead_ratio_exceeded(total, dead, threshold)`：比例超阈值才报，且样本 < 5 不报
+
+**已落地** `tools/alert_dead_ratio.py`（可放 cron）：
+```
+样本 25，已废 5，比例 20.0%（阈值 30%）
+未超阈值，不告警
+```
+
+配置 `config/alerting.py`：`ALERT_WEBHOOK`（留空即不发送）、
+`ALERT_CHANNEL`（wecom / generic / telegram）、`ALERT_TELEGRAM_CHAT_ID`。
+
+测试 `tests/test_alerting.py` **7 项全部 PASS**
+（wecom/telegram payload、节流两次、不同 key 互不影响、无 webhook、注入 sender、阈值与小样本）。
+
+### 22.3 结论
+
+它本身不是注册项目，但"定时采集 + 变化告警"这一层是我们确实缺的运维能力，
+本轮补齐。监测对象从"上游倍率"换成"账号存活"，形态完全一致。
+
+---
+
+## 23. 其余项目
+
+（后续轮次补齐：taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
