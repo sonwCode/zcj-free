@@ -4982,6 +4982,13 @@ function syncAccountsSelectAll(checked) {
     closeAccountsV2MoreMenus();
   });
   window.addEventListener('scroll', () => closeAccountsV2MoreMenus(), true);
+  // 清理已废：用事件委托绑定，避免按钮晚于初始化渲染导致监听丢失。
+  document.addEventListener('click', (e) => {
+    const cleanupBtn = e.target.closest && e.target.closest('#btnCleanupDeadV2');
+    if (!cleanupBtn || cleanupBtn.disabled) return;
+    e.preventDefault();
+    cleanupDeadAccounts();
+  });
   window.addEventListener('resize', () => closeAccountsV2MoreMenus());
 })();
 function setAccountsFilterToggle(el, on) {
@@ -4991,11 +4998,6 @@ function setAccountsFilterToggle(el, on) {
 }
 async function applyAccountsArchivedFilter(on) {
   SHOW_ARCHIVED_ACCOUNTS = !!on;
-  const cleanupBtn = $('#btnCleanupDeadV2');
-  if (cleanupBtn && !cleanupBtn.dataset.bound) {
-    cleanupBtn.dataset.bound = '1';
-    cleanupBtn.addEventListener('click', cleanupDeadAccounts);
-  }
   setAccountsFilterToggle($('#showArchivedAccountsV2'), SHOW_ARCHIVED_ACCOUNTS);
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;

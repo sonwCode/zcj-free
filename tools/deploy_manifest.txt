@@ -25,5 +25,5 @@ b8321f84  core/cloakbrowser_registration.py
 ad5af30a  core/chatgpt_plan.py
 cf2477d3  core/plan_check_service.py
 dacc4673  webui/app.py
-1f746a55  webui/templates/index.html
+f3f1f086  webui/templates/index.html
 cd3c430f  main.py
