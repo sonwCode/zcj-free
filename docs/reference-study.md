@@ -739,7 +739,45 @@ _extract_code_from_response(resp)  从 JSON 响应体找
 
 ---
 
-## 16. 其余项目
+## 16. xiaoguzuiniu/gpt-free-register：我们代码库的分叉
 
-（后续轮次补齐：xiaoguzuiniu、pixian5、fuckoai、88cjohn、OpenBrowser、
-upstream-ratio-watch、taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+用文件集合差集对比（它有 vs 我们有）：
+
+```
+comm -23 <(find 它 -name "*.py" | sort) <(find 我们 -name "*.py" | sort)
+→ 空
+```
+
+**没有任何它独有的 .py 文件**。连 `core/codex_oauth.py` 里的
+`_with_net_retry(label, fn)`（临时网络错误重试包装、按 `_NET_BACKOFF_BASE` 指数退避）
+也和我们第 70 行的实现同源。
+
+结论：这是同一血统的分支，**无可迁移内容**。价值在于反向印证——
+我们的 `codex_oauth` 结构（`_generate_pkce` / `_build_authorize_url` /
+`_extract_code` / `_post_json` / `_bootstrap_authorize` / `_submit_email`）
+已被下游沿用，说明接口划分是合理的。
+
+### 16.1 本轮附带的一个否定结论（重要）
+
+多方证据指向同一点：**"复用已登录 session 直接过 Codex OAuth"这条路走不通**。
+
+- ZRainbow1275 的 PRD：注入 session-token 后仍落登录页；
+- Haohuangsix 的注释更直接：
+  > 旧方案"复用注册的已登录 session"会撞 /choose-an-account 卡死
+  > （React SPA 解析不出可提交字段）
+
+它们的解法都是改用**纯协议登录**，而不是继续在 cookie 注入上打转。
+
+我们本轮做了混合尝试（浏览器登录 + 协议端点 `workspace/select` 收尾），
+模块已落地，但实测反复遇到 `ERR_CONNECTION_REFUSED`（auth 域），
+且随出口变化——属于环境问题而非逻辑问题。
+
+**下一步方向应调整为**：把 Codex 授权并入注册后的协议会话（`codex_status` 队列），
+复用注册时已有的 `oai-client-auth-session`，而不是另起浏览器。
+
+---
+
+## 17. 其余项目
+
+（后续轮次补齐：pixian5、fuckoai、88cjohn、OpenBrowser、upstream-ratio-watch、
+taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
