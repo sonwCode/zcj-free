@@ -2969,6 +2969,23 @@ def create_app(auth_code: str | None = None) -> Flask:
         if count < 1 or count > 200:
             return jsonify({"ok": False, "error": "count 需在 1~200 之间"}), 400
 
+        # driver：本次任务使用的注册驱动（protocol/cloak/...）；空=跟随配置。
+        driver_req = str(data.get("driver") or "").strip().lower()
+        if driver_req:
+            allowed = {"protocol", "api", "http", "cloak", "cloakbrowser", "roxy", "browser_use", "skyvern"}
+            if driver_req not in allowed:
+                return jsonify({"ok": False, "error": "不支持的注册方式：%s" % driver_req}), 400
+            try:
+                from webui import config_editor as _ce
+
+                _ce.update_config({"REGISTRATION_DRIVER": driver_req})
+                import config as _config_pkg
+
+                _config_pkg.reload_all()
+                logger.info("[注册] 本次任务切换注册方式：%s", driver_req)
+            except Exception as exc:
+                logger.warning("[注册] 切换注册方式失败，沿用配置：%s", exc)
+
         # workers 控制本次新提交任务使用的线程池；若和上次不同，服务层会为新任务切换到新池。
         try:
             workers = max(1, min(16, int(data.get("workers", 3))))
