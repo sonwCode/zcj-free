@@ -254,6 +254,20 @@ def run_registration(
             f"不支持的 REGISTRATION_DRIVER={driver_mode!r}，可选 protocol / roxy / cloak / browser_use / skyvern"
         )
 
+    # 协议注册（新实现）：curl_cffi 走完整个 signup，不加载任何静态资源。
+    # 顺序：CSRF/signin 建事务 → authorize/continue(signup) → user/register(密码)
+    #       → email-otp/send → validate → about-you/create_account → callback → session
+    if driver_mode in ("protocol", "api", "http"):
+        from core.protocol_registration import run_protocol_registration
+
+        return run_protocol_registration(
+            email=email,
+            name=name,
+            birthday=birthday or generate_random_birthday(),
+            proxy=proxy,
+            job_id=None,
+        )
+
     # 纯协议驱动没有“邮箱输入框”可等待，因此在创建 BrowserSession 前领取。
     if not str(email or "").strip():
         from core.email_provider import has_email_source_override
