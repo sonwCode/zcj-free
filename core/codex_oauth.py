@@ -2145,6 +2145,32 @@ def _save_cpa_local_record(
             auth_json, effective_email, plan, phone_activation=phone_activation
         )
 
+    # CPA 常异步落盘：callback 返回 status=ok 后，auth 文件可能过几秒才出现。
+    # 这里短轮询 3 轮，能拿到就直接保存为可用凭证，避免停在"未导出"。
+    try:
+        for _round in range(1, 4):
+            _meta = find_cpa_codex_auth_file(email=email)
+            if _meta:
+                _text, _name, _meta2 = download_cpa_codex_auth_text(
+                    cpa_name=str(_meta.get("name") or "") or None, email=email,
+                )
+                _parsed = json.loads(_text)
+                if isinstance(_parsed, dict) and _parsed.get("access_token"):
+                    _plan = str(_parsed.get("plan_type") or _parsed.get("chatgpt_plan_type") or "")
+                    logger.info(
+                        "[Codex][CPA] 提交后回查到凭证（第 %s 轮），保存为可用凭证：%s", _round, email,
+                    )
+                    return save_codex_credential(
+                        _parsed, str(_parsed.get("email") or email), _plan,
+                        phone_activation=phone_activation,
+                    )
+            _stop_sleep(2)
+        logger.warning(
+            "[Codex][CPA] 提交成功但 CPA 未生成凭证（已回查 3 轮）：%s —— 需在 CPA 面板确认授权状态", email,
+        )
+    except Exception as exc:
+        logger.debug("[Codex][CPA] 回查凭证失败：%s", str(exc)[:160])
+
     if not bool(getattr(_cfg, "CPA_SAVE_CALLBACK_RECEIPT", True)):
         return None
 
@@ -2184,6 +2210,32 @@ def _save_sub2_local_record(
         return save_codex_credential(
             auth_json, effective_email, plan, phone_activation=phone_activation
         )
+
+    # CPA 常异步落盘：callback 返回 status=ok 后，auth 文件可能过几秒才出现。
+    # 这里短轮询 3 轮，能拿到就直接保存为可用凭证，避免停在"未导出"。
+    try:
+        for _round in range(1, 4):
+            _meta = find_cpa_codex_auth_file(email=email)
+            if _meta:
+                _text, _name, _meta2 = download_cpa_codex_auth_text(
+                    cpa_name=str(_meta.get("name") or "") or None, email=email,
+                )
+                _parsed = json.loads(_text)
+                if isinstance(_parsed, dict) and _parsed.get("access_token"):
+                    _plan = str(_parsed.get("plan_type") or _parsed.get("chatgpt_plan_type") or "")
+                    logger.info(
+                        "[Codex][CPA] 提交后回查到凭证（第 %s 轮），保存为可用凭证：%s", _round, email,
+                    )
+                    return save_codex_credential(
+                        _parsed, str(_parsed.get("email") or email), _plan,
+                        phone_activation=phone_activation,
+                    )
+            _stop_sleep(2)
+        logger.warning(
+            "[Codex][CPA] 提交成功但 CPA 未生成凭证（已回查 3 轮）：%s —— 需在 CPA 面板确认授权状态", email,
+        )
+    except Exception as exc:
+        logger.debug("[Codex][CPA] 回查凭证失败：%s", str(exc)[:160])
 
     if not bool(getattr(_cfg, "CPA_SAVE_CALLBACK_RECEIPT", True)):
         return None
