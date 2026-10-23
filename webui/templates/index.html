@@ -3086,9 +3086,9 @@ function _qualInfo(r) {
   var promoEligible = offers > 0 || promos > 0;
   var NL = String.fromCharCode(10);
   var trialHtml;
-  if (!plan && !checkedAt) { trialHtml = '<span class="qual-text-muted">信息不完整</span>'; }
-  else if (trialEligible) { trialHtml = '<span class="qual-dot qual-dot--ok"></span>可领Plus试用'; }
-  else { trialHtml = '<span class="qual-dot qual-dot--warn"></span>' + (plan === 'free' ? 'Free' : (plan || '未知')); }
+  if (trialEligible) { trialHtml = '<span class="qual-dot qual-dot--ok"></span>可领Plus试用'; }
+  else if (checkedAt) { trialHtml = '<span class="qual-text-muted">无试用资格</span>'; }
+  else { trialHtml = '<span class="qual-text-muted">信息不完整</span>'; }
   var promoHtml;
   if (!checkedAt) { promoHtml = '<span class="qual-text-muted">信息不完整</span>'; }
   else if (promoEligible) { promoHtml = '<span class="qual-tag qual-tag--ok">可领试用</span>'; }

@@ -203,6 +203,25 @@ def run_protocol_registration(
         )
         _log_phase("落库", True, "account_id=%s" % account_id)
 
+        # 与浏览器路径一致：注册成功后自动开启 2FA（若配置开启）
+        try:
+            from config import twofa as _twofa_cfg
+
+            if bool(getattr(_twofa_cfg, "ENABLE_2FA", False)):
+                from core.twofa_service import enqueue_account_totp_setup
+
+                queued = enqueue_account_totp_setup(
+                    account_id=int(account_id),
+                    email=email,
+                    access_token=access_token,
+                    trigger="registration_auto",
+                    proxy=str(getattr(session, "proxy", "") or "") or None,
+                )
+                _log_phase("2FA 入队", bool(queued.get("accepted") or queued.get("busy")),
+                           str(queued.get("error") or queued.get("status") or "")[:80])
+        except Exception as exc:
+            _log_phase("2FA 入队", False, str(exc)[:100])
+
         # 与浏览器路径一致：注册成功后自动排队查套餐/资格
         try:
             from core import plan_check_service
