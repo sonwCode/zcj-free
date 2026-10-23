@@ -487,13 +487,34 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             ):
                 _protocol_gate_enter(log_logger)
                 try:
-                    result = run_registration(
-                        email=email,
-                        name=name,
-                        birthday=birthday,
-                        on_email_acquired=_on_email_acquired,
-                        exclude_emails=excluded_emails,
-                    )
+                    _edge_enabled = True
+                    _edge_attempts = 2
+                    try:
+                        from config import register as _edge_cfg
+
+                        _edge_enabled = bool(getattr(_edge_cfg, 'EDGE_RETRY_ENABLED', True))
+                        _edge_attempts = int(getattr(_edge_cfg, 'EDGE_RETRY_MAX_ATTEMPTS', 2) or 2)
+                    except Exception:
+                        pass
+                    _reg_kwargs = {
+                        'email': email,
+                        'name': name,
+                        'birthday': birthday,
+                        'on_email_acquired': _on_email_acquired,
+                        'exclude_emails': excluded_emails,
+                    }
+                    if _edge_enabled:
+                        from core.edge_retry import run_with_edge_retry
+
+                        def _on_rotate(attempt, old_proxy, new_proxy):
+                            log_logger.warning(
+                                '[Job %s] CF 边缘挑战，换出口重试（第 %s 次）', job_id, attempt + 1)
+                        result = run_with_edge_retry(
+                            run_registration, _reg_kwargs,
+                            max_attempts=_edge_attempts, on_rotate=_on_rotate,
+                        )
+                    else:
+                        result = run_registration(**_reg_kwargs)
                 finally:
                     _protocol_gate_leave()
             result_dict = result if isinstance(result, dict) else {}

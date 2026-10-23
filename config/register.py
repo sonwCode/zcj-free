@@ -73,3 +73,7 @@ PROTOCOL_PREFLIGHT_PROBE_MAX: int = 6
 
 # 注册前只读探测该邮箱是否已被 OpenAI 注册过（不改变账号状态）
 PROTOCOL_MAILBOX_PROBE: bool = True
+
+# 命中 Cloudflare 边缘挑战时，换出口重试注册
+EDGE_RETRY_ENABLED: bool = True
+EDGE_RETRY_MAX_ATTEMPTS: int = 2
