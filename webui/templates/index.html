@@ -3448,13 +3448,13 @@ async function startRegistrationFromInputs(countEl, workersEl, startBtn) {
   const workers = parseInt((workersEl?.value || '3'), 10);
   const emailSource = ($('#regEmailSourceV2')?.value || 'auto');
   const activeCount = Number(JOB_STATUS_COUNTS.active || 0);
+  // 不要用原生 confirm()：页面可能运行在 iframe 里，Chrome 会静默拦截 modal
+  // （confirm 直接返回 false），表现就是"点了开始注册毫无反应"。
   if (activeCount > 0) {
-    const ok = confirm(
-      `当前任务表里已有 ${activeCount} 个任务在跑或排队，` +
-      `这次会再加 ${count} 个，合计 ${activeCount + count} 个，确定继续？\n\n` +
-      `（如果只是想跑这 ${count} 个，建议先点"取消所有排队"清掉残留再提交）`
-    );
-    if (!ok) return;
+    const warnEl0 = $('#regWarnV2');
+    if (warnEl0) warnEl0.innerHTML = '<div class="banner info">当前已有 ' + activeCount
+      + ' 个任务在跑或排队，本次再提交 ' + count + ' 个（合计 ' + (activeCount + count)
+      + '）。如需清空残留可点"取消所有排队"。</div>';
   }
   if (startBtn) startBtn.disabled = true;
   const restoreBtn = () => {
