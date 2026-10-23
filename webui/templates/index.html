@@ -3041,6 +3041,34 @@
   <a id="qrOpenLink" class="qr-link" href="#" target="_blank" rel="noopener noreferrer"></a>
 </div>
 
+<style>
+.ui-confirm-overlay{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.45);padding:20px;}
+.ui-confirm-box{width:min(560px,94vw);background:#fff;border-radius:12px;box-shadow:0 24px 60px -20px rgba(15,23,42,.45);}
+.ui-confirm-msg{padding:18px 20px;color:#1f2937;font-size:14px;line-height:1.65;white-space:pre-wrap;max-height:60vh;overflow:auto;}
+.ui-confirm-actions{display:flex;justify-content:flex-end;gap:10px;padding:12px 18px;border-top:1px solid #eef0f4;background:#fafbfc;}
+.ui-confirm-actions button{min-height:34px;padding:0 16px;border-radius:8px;border:1px solid #d9e2ec;background:#fff;color:#344054;font-size:13px;font-weight:600;cursor:pointer;}
+.ui-confirm-actions button.ui-confirm-ok{background:#2563eb;border-color:#2563eb;color:#fff;}
+</style>
+<script>
+// 同步二次确认：iframe 里原生 confirm() 会被静默拦截并直接返回 false，
+// 表现为“点按钮毫无反应”。这里改成两次点击确认：
+// 第一次提示并返回 false，4 秒内再点同一操作即通过。
+(function () {
+  var armed = new Map();
+  window.uiConfirmSync = function (message) {
+    var msg = String(message == null ? '' : message);
+    var now = Date.now();
+    var last = armed.get(msg) || 0;
+    if (now - last < 4000) { armed.delete(msg); return true; }
+    armed.set(msg, now);
+    armed.forEach(function (ts, key) { if (now - ts > 4000) armed.delete(key); });
+    var first = msg.split(String.fromCharCode(10))[0].slice(0, 60);
+    if (typeof showToast === 'function') { showToast('请再次点击以确认：' + first); }
+    else { console.warn('[confirm] 请再次点击以确认：' + msg); }
+    return false;
+  };
+})();
+</script>
 <script>
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -3428,7 +3456,7 @@ function renderSmsPoolPoll(poll) {
 async function saveSmsPoolConfig(key, value) { smsPoolState.busy = true; smsPoolEl('smsPoolBtnToggle').disabled = true; smsPoolEl('smsPoolBtnPause').disabled = true; try { const result = await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({updates:{[key]:value}})}); smsPoolNotice(result.note || '配置已更新。'); await loadSmsPoolStatus(); } catch (error) { smsPoolNotice('保存配置失败：' + error.message, 'err'); } finally { smsPoolState.busy = false; } }
 async function triggerSmsPoolLiveCheck() { const button = smsPoolEl('smsPoolBtnLiveCheck'); button.disabled = true; smsPoolEl('smsPoolLiveCheckFeedback').textContent = '正在加入后台查活队列…'; try { const result = await api('/api/sms-pool/live-check', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({limit:100})}); smsPoolEl('smsPoolLiveCheckFeedback').textContent = '已提交 ' + (result.queued || 0) + ' 个查活任务；失效账号会自动从候选中排除。'; await loadSmsPoolEligible(); } catch (error) { smsPoolEl('smsPoolLiveCheckFeedback').textContent = '提交查活失败：' + error.message; } finally { button.disabled = false; } }
 async function refreshSmsPool() { if (smsPoolState.busy || smsPoolState.refreshing) return; smsPoolState.refreshing = true; try { await Promise.all([loadSmsPoolStatus(), loadSmsPoolEligible(), loadSmsPoolReservations()]); } finally { smsPoolState.refreshing = false; } }
-function initSmsPoolTab() { if (!smsPoolState.initialized) { smsPoolState.initialized = true; smsPoolEl('smsPoolBtnRefresh').addEventListener('click', refreshSmsPool); smsPoolEl('smsPoolBtnPause').addEventListener('click', () => { if (smsPoolState.status) saveSmsPoolConfig('SMS_POOL_PAUSED', !smsPoolState.status.paused); }); smsPoolEl('smsPoolBtnToggle').addEventListener('click', () => { const s = smsPoolState.status; if (!s) return; if (s.enabled) { if (confirm('关闭后将停止后续轮询和采购；已经锁定号码的补跑会继续执行。确定关闭吗？')) saveSmsPoolConfig('SMS_POOL_ENABLED', false); } else if (confirm('启用后会开始按当前人民币单号上限轮询并采购号码，确定启用吗？')) saveSmsPoolConfig('SMS_POOL_ENABLED', true); }); smsPoolEl('smsPoolLiveCheckToggle').addEventListener('change', e => saveSmsPoolConfig('SMS_POOL_LIVE_CHECK_ENABLED', e.target.checked)); smsPoolEl('smsPoolLiveCheckInterval').addEventListener('change', e => saveSmsPoolConfig('SMS_POOL_LIVE_CHECK_INTERVAL', Number(e.target.value))); smsPoolEl('smsPoolBtnLiveCheck').addEventListener('click', triggerSmsPoolLiveCheck); smsPoolEl('smsPoolAccountSearch').addEventListener('input', () => { smsPoolState.page = 1; renderSmsPoolEligible(); }); smsPoolEl('smsPoolPageSize').addEventListener('change', () => { smsPoolState.page = 1; renderSmsPoolEligible(); }); smsPoolEl('smsPoolPagePrev').addEventListener('click', () => { smsPoolState.page = Math.max(1, smsPoolState.page - 1); renderSmsPoolEligible(); }); smsPoolEl('smsPoolPageNext').addEventListener('click', () => { smsPoolState.page += 1; renderSmsPoolEligible(); }); smsPoolEl('smsPoolReservationsPageSize').addEventListener('change', () => { smsPoolState.reservationPage = 1; loadSmsPoolReservations(); }); smsPoolEl('smsPoolReservationsPrev').addEventListener('click', () => { smsPoolState.reservationPage = Math.max(1, smsPoolState.reservationPage - 1); loadSmsPoolReservations(); }); smsPoolEl('smsPoolReservationsNext').addEventListener('click', () => { smsPoolState.reservationPage += 1; loadSmsPoolReservations(); }); smsPoolEl('smsPoolEventsPageSize').addEventListener('change', () => { smsPoolState.eventPage = 1; renderSmsPoolEvents(smsPoolState.events); }); smsPoolEl('smsPoolEventsPrev').addEventListener('click', () => { smsPoolState.eventPage = Math.max(1, smsPoolState.eventPage - 1); renderSmsPoolEvents(smsPoolState.events); }); smsPoolEl('smsPoolEventsNext').addEventListener('click', () => { smsPoolState.eventPage += 1; renderSmsPoolEvents(smsPoolState.events); }); } refreshSmsPool(); if (!smsPoolState.timer) smsPoolState.timer = setInterval(() => { if (!smsPoolEl('tab-sms_pool').classList.contains('hidden')) refreshSmsPool(); }, 15000); }
+function initSmsPoolTab() { if (!smsPoolState.initialized) { smsPoolState.initialized = true; smsPoolEl('smsPoolBtnRefresh').addEventListener('click', refreshSmsPool); smsPoolEl('smsPoolBtnPause').addEventListener('click', () => { if (smsPoolState.status) saveSmsPoolConfig('SMS_POOL_PAUSED', !smsPoolState.status.paused); }); smsPoolEl('smsPoolBtnToggle').addEventListener('click', () => { const s = smsPoolState.status; if (!s) return; if (s.enabled) { if (uiConfirmSync('关闭后将停止后续轮询和采购；已经锁定号码的补跑会继续执行。确定关闭吗？')) saveSmsPoolConfig('SMS_POOL_ENABLED', false); } else if (uiConfirmSync('启用后会开始按当前人民币单号上限轮询并采购号码，确定启用吗？')) saveSmsPoolConfig('SMS_POOL_ENABLED', true); }); smsPoolEl('smsPoolLiveCheckToggle').addEventListener('change', e => saveSmsPoolConfig('SMS_POOL_LIVE_CHECK_ENABLED', e.target.checked)); smsPoolEl('smsPoolLiveCheckInterval').addEventListener('change', e => saveSmsPoolConfig('SMS_POOL_LIVE_CHECK_INTERVAL', Number(e.target.value))); smsPoolEl('smsPoolBtnLiveCheck').addEventListener('click', triggerSmsPoolLiveCheck); smsPoolEl('smsPoolAccountSearch').addEventListener('input', () => { smsPoolState.page = 1; renderSmsPoolEligible(); }); smsPoolEl('smsPoolPageSize').addEventListener('change', () => { smsPoolState.page = 1; renderSmsPoolEligible(); }); smsPoolEl('smsPoolPagePrev').addEventListener('click', () => { smsPoolState.page = Math.max(1, smsPoolState.page - 1); renderSmsPoolEligible(); }); smsPoolEl('smsPoolPageNext').addEventListener('click', () => { smsPoolState.page += 1; renderSmsPoolEligible(); }); smsPoolEl('smsPoolReservationsPageSize').addEventListener('change', () => { smsPoolState.reservationPage = 1; loadSmsPoolReservations(); }); smsPoolEl('smsPoolReservationsPrev').addEventListener('click', () => { smsPoolState.reservationPage = Math.max(1, smsPoolState.reservationPage - 1); loadSmsPoolReservations(); }); smsPoolEl('smsPoolReservationsNext').addEventListener('click', () => { smsPoolState.reservationPage += 1; loadSmsPoolReservations(); }); smsPoolEl('smsPoolEventsPageSize').addEventListener('change', () => { smsPoolState.eventPage = 1; renderSmsPoolEvents(smsPoolState.events); }); smsPoolEl('smsPoolEventsPrev').addEventListener('click', () => { smsPoolState.eventPage = Math.max(1, smsPoolState.eventPage - 1); renderSmsPoolEvents(smsPoolState.events); }); smsPoolEl('smsPoolEventsNext').addEventListener('click', () => { smsPoolState.eventPage += 1; renderSmsPoolEvents(smsPoolState.events); }); } refreshSmsPool(); if (!smsPoolState.timer) smsPoolState.timer = setInterval(() => { if (!smsPoolEl('tab-sms_pool').classList.contains('hidden')) refreshSmsPool(); }, 15000); }
 
 // ---------- 概览 ----------
 async function loadSummary() {
@@ -3492,7 +3520,7 @@ async function cancelAllPendingJobs(btn) {
   const msg = pendingCount > 0
     ? `确定取消 ${pendingCount} 个排队中的任务吗？已运行中的任务不受影响。`
     : '当前页没有排队任务；仍要请求后端取消所有排队任务吗？';
-  if (!confirm(msg)) return;
+  if (!uiConfirmSync(msg)) return;
   if (btn) btn.disabled = true;
   try {
     const r = await api('/api/jobs/cancel-pending', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
@@ -3747,7 +3775,7 @@ async function stopJob(jobId, btn) {
   const job = JOBS.find(j => Number(j.id) === Number(jobId));
   const statusText = job?.status || '-';
   const emailText = job?.email || '未分配邮箱';
-  if (!confirm(`确定停止任务 #${jobId}？\n\n状态：${statusText}\n邮箱：${emailText}\n\n排队任务会直接取消；运行中的任务会发送停止信号，并在当前步骤检查点退出。`)) return;
+  if (!uiConfirmSync(`确定停止任务 #${jobId}？\n\n状态：${statusText}\n邮箱：${emailText}\n\n排队任务会直接取消；运行中的任务会发送停止信号，并在当前步骤检查点退出。`)) return;
   btn.disabled = true;
   try {
     const r = await api(`/api/jobs/${jobId}/stop`, { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
@@ -3764,7 +3792,7 @@ async function deleteJob(jobId, btn) {
   const job = JOBS.find(j => Number(j.id) === Number(jobId));
   const statusText = job?.status || '-';
   const emailText = job?.email || '未分配邮箱';
-  if (!confirm(`确定删除任务 #${jobId}？\n\n状态：${statusText}\n邮箱：${emailText}\n\n会同时删除该任务日志。排队任务删除后将不会执行。`)) return;
+  if (!uiConfirmSync(`确定删除任务 #${jobId}？\n\n状态：${statusText}\n邮箱：${emailText}\n\n会同时删除该任务日志。排队任务删除后将不会执行。`)) return;
   btn.disabled = true;
   try {
     const r = await api(`/api/jobs/${jobId}/delete`, { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
@@ -3783,7 +3811,7 @@ async function deleteSelectedJobs() {
   if (ids.length === 0) { showToast('请先选择任务'); return; }
   const msg = `确定删除选中的 ${ids.length} 个任务吗？\n\n` +
               `会同时删除对应日志。排队/运行中的任务会由后端逐条校验，不能删除的会自动跳过。`;
-  if (!confirm(msg)) return;
+  if (!uiConfirmSync(msg)) return;
 
   const bulkDel = $('#btnDeleteSelectedJobsV2');
   if (bulkDel) bulkDel.disabled = true;
@@ -3808,7 +3836,7 @@ async function retryJob(jobId, btn) {
   const job = JOBS.find(j => Number(j.id) === Number(jobId));
   if (!job || !job.retryable) { showToast('该任务当前不可重试'); return; }
   const actionText = job.retry_action === 'codex' ? '仅补跑 Codex 授权' : '创建新的完整注册任务';
-  if (!confirm(`确定${job.retry_label || '重试'}任务 #${jobId}？\n\n${actionText}\n原任务记录和日志会保留。`)) return;
+  if (!uiConfirmSync(`确定${job.retry_label || '重试'}任务 #${jobId}？\n\n${actionText}\n原任务记录和日志会保留。`)) return;
   btn.disabled = true;
   try {
     const r = await api(`/api/jobs/${jobId}/retry`, {
@@ -3827,7 +3855,7 @@ async function retryJob(jobId, btn) {
 
 async function retrySelectedJobs() {
   const ids = Array.from(JOB_SELECTED);
-  if (!confirm(`确定重试选中的 ${ids.length} 个任务吗？\n\n后端会逐条校验；已创建账号的任务只补跑 Codex，其余任务重新入队注册，不能重试的会自动跳过。`)) return;
+  if (!uiConfirmSync(`确定重试选中的 ${ids.length} 个任务吗？\n\n后端会逐条校验；已创建账号的任务只补跑 Codex，其余任务重新入队注册，不能重试的会自动跳过。`)) return;
   const btn = $('#btnRetrySelectedJobsV2');
   if (btn) btn.disabled = true;
   try {
@@ -4717,7 +4745,7 @@ async function onAccountsBodyClick(e) {
   const stopCodexBtn = e.target.closest('[data-codex-stop]');
   if (stopCodexBtn) {
     const email = stopCodexBtn.dataset.codexStop;
-    if (!confirm(`确定停止该账号的 Codex 补跑吗？\n\n${email}\n\n会发送停止信号并将状态标记为“已停止”。`)) return;
+    if (!uiConfirmSync(`确定停止该账号的 Codex 补跑吗？\n\n${email}\n\n会发送停止信号并将状态标记为“已停止”。`)) return;
     stopCodexBtn.disabled = true;
     try {
       const r = await api('/api/codex/stop', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email}) });
@@ -4734,7 +4762,7 @@ async function onAccountsBodyClick(e) {
   const resetBtn = e.target.closest('[data-codex-reset-retrying]');
   if (resetBtn) {
     const email = resetBtn.dataset.codexResetRetrying;
-    if (!confirm(`确定重置该账号的 Codex「补跑中」状态吗？\n\n${email}\n\n重置后状态会变为“失败”，可再次点击“补跑 Codex”。`)) return;
+    if (!uiConfirmSync(`确定重置该账号的 Codex「补跑中」状态吗？\n\n${email}\n\n重置后状态会变为“失败”，可再次点击“补跑 Codex”。`)) return;
     resetBtn.disabled = true;
     try {
       const r = await api('/api/codex/reset-retrying', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, status:'failed'}) });
@@ -4754,7 +4782,7 @@ async function onAccountsBodyClick(e) {
   const btn = e.target.closest('[data-codex-retry]');
   if (!btn) return;
   const email = btn.dataset.codexRetry;
-  if (!confirm(`重新跑 Codex 授权？\n\n${email}\n\n将消耗：\n  • 1 封邮箱 OTP（自动收）\n  • 1 个接码短信（价格按当前 SMSBower 配置，实际以供应商返回为准）\n\n补跑会在后台进行（~1-2 分钟），完成后状态自动更新。`)) return;
+  if (!uiConfirmSync(`重新跑 Codex 授权？\n\n${email}\n\n将消耗：\n  • 1 封邮箱 OTP（自动收）\n  • 1 个接码短信（价格按当前 SMSBower 配置，实际以供应商返回为准）\n\n补跑会在后台进行（~1-2 分钟），完成后状态自动更新。`)) return;
   btn.disabled = true;
   try {
     const r = await api('/api/codex/retry', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email}) });
@@ -4967,7 +4995,7 @@ async function showAccountTotpCode(id, btn) {
 async function setupAccountTotp(id, btn) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
   const email = acc?.email || '';
-  if (!confirm(`确定为该账号开启 2FA？\n\n${email}\n\n完成后会把 TOTP 密钥写回账号信息。`)) return;
+  if (!uiConfirmSync(`确定为该账号开启 2FA？\n\n${email}\n\n完成后会把 TOTP 密钥写回账号信息。`)) return;
   if (btn) btn.disabled = true;
   try {
     const r = await api(`/api/accounts/${encodeURIComponent(id)}/totp-setup`, {
@@ -4989,7 +5017,7 @@ async function setupAccountTotp(id, btn) {
 async function setupSelectedTotp() {
   const ids = Array.from(ACCOUNT_SELECTED).map(Number);
   if (!ids.length) { showToast('请先选择账号'); return; }
-  if (!confirm(`确定为选中的 ${ids.length} 个账号批量开启 2FA？\n\n任务会在后台排队执行，完成后自动把 TOTP 密钥写回账号信息。\n已经开启、没有 Token 或正在设置中的账号会自动跳过。`)) return;
+  if (!uiConfirmSync(`确定为选中的 ${ids.length} 个账号批量开启 2FA？\n\n任务会在后台排队执行，完成后自动把 TOTP 密钥写回账号信息。\n已经开启、没有 Token 或正在设置中的账号会自动跳过。`)) return;
 
   const btn = document.getElementById('btnSetupSelectedTotpV2');
   if (!btn) return;
@@ -5267,7 +5295,7 @@ async function downloadSelectedCpa() {
   const missingCodex = selectedAccounts.filter(a => (a.codex_status || '') !== 'success').length;
   let msg = `确定从 CPA 下载选中的 ${ids.length} 个账号的 CPA/Codex JSON 吗？\n\n会按账号邮箱匹配 CPA auth-files，成功的文件会打包成 ZIP。`;
   if (missingCodex) msg += `\n\n其中 ${missingCodex} 个账号本地 Codex 状态不是 success，若 CPA 端没有文件会写入 manifest 错误清单。`;
-  if (!confirm(msg)) return;
+  if (!uiConfirmSync(msg)) return;
   const btn = $('#btnDownloadSelectedCpaV2');
   const old = btn.textContent;
   btn.disabled = true;
@@ -5328,7 +5356,7 @@ async function extractOneLink(id, btn) {
     showToast('仅支持 free(可Plus试用) 账号提链');
     return;
   }
-  if (!confirm(`确定为该账号提链吗？\n\n${acc.email || ('#' + id)}\n\n提链类型按配置使用 PIX/UPI/KAKAO_PAY/IDEAL，成功会消耗 1 次 CDK。`)) return;
+  if (!uiConfirmSync(`确定为该账号提链吗？\n\n${acc.email || ('#' + id)}\n\n提链类型按配置使用 PIX/UPI/KAKAO_PAY/IDEAL，成功会消耗 1 次 CDK。`)) return;
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '提链中…';
@@ -5353,7 +5381,7 @@ async function extractSelectedLinks() {
   const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
   const eligible = selected.filter(a => (a.current_plan_type || a.plan_type || '').toString().toLowerCase() === 'free' && !!a.plus_trial_eligible);
   if (!eligible.length) { showToast('选中账号里没有 free(可Plus试用)'); return; }
-  if (!confirm(`确定批量提链 ${eligible.length} 个 free(可Plus试用) 账号吗？\n\n非可试用账号会自动跳过。成功会按账号消耗 CDK 次数。`)) return;
+  if (!uiConfirmSync(`确定批量提链 ${eligible.length} 个 free(可Plus试用) 账号吗？\n\n非可试用账号会自动跳过。成功会按账号消耗 CDK 次数。`)) return;
   const btn = $('#btnExtractSelectedLinksV2');
   const old = btn.textContent;
   btn.disabled = true;
@@ -5379,7 +5407,7 @@ async function generateOneCodexAgent(id, btn) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
   if (!acc) { showToast('账号不存在'); return; }
   if (!acc.has_access_token) { showToast('该账号没有 access_token'); return; }
-  if (!confirm(`确定为该账号生成 Codex Agent Token 吗？\n\n${acc.email || ('#' + id)}\n\n会调用 auth.openai.com 注册 agent_identity，并保存到本地账号记录。`)) return;
+  if (!uiConfirmSync(`确定为该账号生成 Codex Agent Token 吗？\n\n${acc.email || ('#' + id)}\n\n会调用 auth.openai.com 注册 agent_identity，并保存到本地账号记录。`)) return;
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '生成中…';
@@ -5404,7 +5432,7 @@ async function generateSelectedCodexAgents() {
   const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
   const eligible = selected.filter(a => a.has_access_token);
   if (!eligible.length) { showToast('选中账号里没有可用 access_token'); return; }
-  if (!confirm(`确定批量生成 ${eligible.length} 个 Codex Agent Token 吗？\n\n缺少 access_token 的账号会自动跳过。`)) return;
+  if (!uiConfirmSync(`确定批量生成 ${eligible.length} 个 Codex Agent Token 吗？\n\n缺少 access_token 的账号会自动跳过。`)) return;
   const btn = $('#btnGenerateSelectedAgentV2');
   const old = btn.textContent;
   btn.disabled = true;
@@ -5430,7 +5458,7 @@ async function uploadOneCodexAgentSub2(id, btn) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
   if (!acc) { showToast('账号不存在'); return; }
   if ((acc.codex_agent_status || '') !== 'success') { showToast('该账号还没有生成 Agent Token'); return; }
-  if (!confirm(`确定上传该账号 Agent Token 到 sub2api 吗？\n\n${acc.email || ('#' + id)}`)) return;
+  if (!uiConfirmSync(`确定上传该账号 Agent Token 到 sub2api 吗？\n\n${acc.email || ('#' + id)}`)) return;
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '上传中…';
@@ -5451,7 +5479,7 @@ async function uploadSelectedCodexAgentSub2() {
   const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
   const ready = selected.filter(a => (a.codex_agent_status || '') === 'success');
   if (!ready.length) { showToast('选中账号里没有已生成的 Agent Token'); return; }
-  if (!confirm(`确定上传选中的 ${ready.length} 个 Agent Token 到 sub2api 吗？\n\n未生成成功的账号会自动跳过。`)) return;
+  if (!uiConfirmSync(`确定上传选中的 ${ready.length} 个 Agent Token 到 sub2api 吗？\n\n未生成成功的账号会自动跳过。`)) return;
   const btn = $('#btnUploadSelectedAgentSub2V2');
   const old = btn.textContent;
   btn.disabled = true;
@@ -5505,7 +5533,7 @@ function downloadSelectedCodexAgents() {
   const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
   const ready = selected.filter(a => (a.codex_agent_status || '') === 'success');
   if (!ready.length) { showToast('选中账号里没有已生成的 Agent Token'); return; }
-  if (!confirm(`确定下载选中的 ${ready.length} 个 Codex Agent Token 吗？\n\n未生成成功的账号会自动跳过，文件会打包 ZIP。`)) return;
+  if (!uiConfirmSync(`确定下载选中的 ${ready.length} 个 Codex Agent Token 吗？\n\n未生成成功的账号会自动跳过，文件会打包 ZIP。`)) return;
   const btn = $('#btnDownloadSelectedAgentV2');
   const old = btn.textContent;
   btn.disabled = true;
@@ -5573,7 +5601,7 @@ async function checkSelectedLive(idsArg = null, btnArg = null) {
 会重新登录邮箱 OTP；登录成功且未封号则标记正常，并刷新最新 AT/accessToken。
 
 并发线程数：${workers}`;
-  if (!confirm(msg)) return;
+  if (!uiConfirmSync(msg)) return;
   const firstAcc = ACCOUNTS.find(a => Number(a.id) === Number(ids[0]));
   const btn = btnArg || $('#btnCheckSelectedLiveV2');
   const old = btn ? btn.textContent : '';
@@ -5611,7 +5639,7 @@ async function checkSelectedCodexOauth(idsArg = null, btnArg = null) {
   const msg = idsArg
     ? '确定检测这个账号的 Codex OAuth 凭证吗？'
     : `确定检测选中的 ${ids.length} 个账号的 Codex OAuth 凭证吗？`;
-  if (!confirm(`${msg}\n\n检测只会读取 Codex usage，不触发邮箱 OTP、短信或模型请求。`)) return;
+  if (!uiConfirmSync(`${msg}\n\n检测只会读取 Codex usage，不触发邮箱 OTP、短信或模型请求。`)) return;
   const btn = btnArg || $('#btnCheckSelectedCodexOauthV2');
   const old = btn ? btn.textContent : '';
   if (btn) {
@@ -5641,7 +5669,7 @@ async function checkSelectedCodexOauth(idsArg = null, btnArg = null) {
 }
 
 async function deleteAccount(id, email, btn) {
-  if (!confirm(`确定删除账号 #${id}？\n\n${email || ''}\n\n会从本地账号列表、注册成功邮箱和 token 文件中移除。`)) return;
+  if (!uiConfirmSync(`确定删除账号 #${id}？\n\n${email || ''}\n\n会从本地账号列表、注册成功邮箱和 token 文件中移除。`)) return;
   btn.disabled = true;
   try {
     await api(`/api/accounts/${id}/delete`, { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
@@ -5658,7 +5686,7 @@ async function archiveOneAccount(id, archived, btn) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
   const email = acc?.email || '';
   const action = archived ? '归档' : '恢复';
-  if (!confirm(`确定${action}账号 #${id}？\n\n${email}\n\n${archived ? '归档后默认账号列表不会查询/显示它，可勾选“查看归档”单独查看。' : '恢复后会回到默认账号列表。'}`)) return;
+  if (!uiConfirmSync(`确定${action}账号 #${id}？\n\n${email}\n\n${archived ? '归档后默认账号列表不会查询/显示它，可勾选“查看归档”单独查看。' : '恢复后会回到默认账号列表。'}`)) return;
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = `${action}中…`;
@@ -5683,7 +5711,7 @@ async function archiveSelectedAccounts() {
   if (ids.length === 0) { showToast('请先选择账号'); return; }
   const archived = !SHOW_ARCHIVED_ACCOUNTS;
   const action = archived ? '归档' : '恢复';
-  if (!confirm(`确定${action}选中的 ${ids.length} 个账号吗？\n\n${archived ? '归档后默认账号列表不会查询/显示这些账号，可勾选“查看归档”单独查看。' : '恢复后这些账号会回到默认账号列表。'}`)) return;
+  if (!uiConfirmSync(`确定${action}选中的 ${ids.length} 个账号吗？\n\n${archived ? '归档后默认账号列表不会查询/显示这些账号，可勾选“查看归档”单独查看。' : '恢复后这些账号会回到默认账号列表。'}`)) return;
   const btn = $('#btnArchiveSelectedAccountsV2');
   const old = btn.textContent;
   btn.disabled = true;
@@ -5709,7 +5737,7 @@ async function archiveSelectedAccounts() {
 async function deleteSelectedAccounts() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  if (!confirm(`确定删除选中的 ${ids.length} 个账号吗？\n\n会从本地账号列表、注册成功邮箱和 token 文件中移除。`)) return;
+  if (!uiConfirmSync(`确定删除选中的 ${ids.length} 个账号吗？\n\n会从本地账号列表、注册成功邮箱和 token 文件中移除。`)) return;
   const _delBtn = $('#btnDeleteSelectedAccountsV2'); if (_delBtn) _delBtn.disabled = true;
   try {
     const r = await api('/api/accounts/delete-bulk', {
@@ -5779,7 +5807,7 @@ async function stopSelectedCodex() {
   const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
   const retrying = selectedAccounts.filter(a => (a.codex_status || '') === 'retrying');
   if (retrying.length === 0) { showToast('选中账号里没有正在补跑的 Codex'); return; }
-  if (!confirm(`确定停止选中的 ${retrying.length} 个 Codex 补跑吗？\n\n会发送停止信号，并将状态标记为“已停止”。`)) return;
+  if (!uiConfirmSync(`确定停止选中的 ${retrying.length} 个 Codex 补跑吗？\n\n会发送停止信号，并将状态标记为“已停止”。`)) return;
   const btn = $('#btnStopSelectedCodexV2');
   if (!btn) return;
   btn.disabled = true;
@@ -5816,7 +5844,7 @@ async function retrySelectedCodex() {
   if (retryingCount || deactivatedCount) msg += `
 
 其中：补跑中 ${retryingCount} 个、已废号 ${deactivatedCount} 个会自动跳过。`;
-  if (!confirm(msg)) return;
+  if (!uiConfirmSync(msg)) return;
   const btn = $('#btnRetrySelectedCodexV2');
   if (!btn) return;
   btn.disabled = true;
@@ -6104,7 +6132,7 @@ async function onOutlookBodyClick(e) {
   const source = t.dataset.source || getPoolSource();
   try {
     if (poolAct === 'delete') {
-      if (!confirm(`确定从邮箱池删除 ${email}？此操作不可撤销。`)) return;
+      if (!uiConfirmSync(`确定从邮箱池删除 ${email}？此操作不可撤销。`)) return;
       const r = await api('/api/outlook/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, source}) });
       if (!r.deleted) {
         showToast('删除失败：邮箱不存在或来源不匹配');
@@ -6309,7 +6337,7 @@ async function bulkMarkOutlookStatus(status) {
   if (items.length === 0) { showToast('请先选择邮箱'); return; }
   const labelMap = {available:'未使用/可用', disabled:'停用', failed:'失败'};
   const label = labelMap[status] || status;
-  if (!confirm(`确定把选中的 ${items.length} 个邮箱标记为${label}吗？`)) return;
+  if (!uiConfirmSync(`确定把选中的 ${items.length} 个邮箱标记为${label}吗？`)) return;
   const btnId = status === 'disabled'
     ? 'btnDisableSelectedOutlookV2'
     : status === 'failed'
@@ -6339,7 +6367,7 @@ async function deleteSelectedOutlook() {
     return {source, email: rest.join('|')};
   });
   if (items.length === 0) { showToast('请先选择邮箱'); return; }
-  if (!confirm(`确定从邮箱池删除选中的 ${items.length} 个邮箱吗？\n\n此操作不可撤销。`)) return;
+  if (!uiConfirmSync(`确定从邮箱池删除选中的 ${items.length} 个邮箱吗？\n\n此操作不可撤销。`)) return;
   const delBtn = document.getElementById('btnDeleteSelectedOutlookV2'); if (delBtn) delBtn.disabled = true;
   try {
     const r = await api('/api/outlook/delete-bulk', {
@@ -6543,7 +6571,7 @@ async function onCodexBodyClick(e) {
   const del = e.target.closest('[data-codex-delete]');
   if (del) {
     const fname = del.dataset.codexDelete;
-    if (!confirm(`确定删除 Codex 凭证？\n\n${fname}\n\n会删除本地 JSON 文件，并清理导出标记。此操作不可撤销。`)) return;
+    if (!uiConfirmSync(`确定删除 Codex 凭证？\n\n${fname}\n\n会删除本地 JSON 文件，并清理导出标记。此操作不可撤销。`)) return;
     del.disabled = true;
     try {
       await api('/api/codex/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filename: fname}) });
@@ -6559,7 +6587,7 @@ async function onCodexBodyClick(e) {
   const rs = e.target.closest('[data-codex-reset]');
   if (rs) {
     const fname = rs.dataset.codexReset;
-    if (!confirm(`把 ${fname} 标记重置为未导出？`)) return;
+    if (!uiConfirmSync(`把 ${fname} 标记重置为未导出？`)) return;
     try {
       await api('/api/codex/reset-export', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filename: fname}) });
       showToast('已重置');
@@ -6586,7 +6614,7 @@ async function codexArchiveSelected() {
   if (CODEX_SELECTED.size === 0) return;
   const filenames = Array.from(CODEX_SELECTED);
   const archived = !CODEX_SHOW_ARCHIVED;
-  if (!confirm(`${archived ? '归档' : '恢复'}选中的 ${filenames.length} 个 Codex 授权凭证？`)) return;
+  if (!uiConfirmSync(`${archived ? '归档' : '恢复'}选中的 ${filenames.length} 个 Codex 授权凭证？`)) return;
   try {
     const r = await api('/api/codex/archive-bulk', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -6614,7 +6642,7 @@ async function codexDownloadBulkLocal() {
   const note = `选中 ${filenames.length} 个凭证，打包到一个 JSON 文件下载。\n\n` +
                `⚠ 这个聚合格式 CPA 不能直接读，主要用于备份/迁移。\n` +
                `要给 CPA 用请用每行的"下载 JSON"单个下载。\n\n继续？`;
-  if (!confirm(note)) return;
+  if (!uiConfirmSync(note)) return;
   const btn = $('#btnCodexDownloadBulkV2');
   if (btn) btn.disabled = true;
   try {
@@ -6651,7 +6679,7 @@ async function codexDownloadBulkCpa() {
   const note = `选中 ${filenames.length} 个本地记录，将按邮箱到 CPA auth-files 查找并下载真实 Codex JSON。\n\n` +
                `下载结果会打包成 ZIP，解压后每个 JSON 可直接放入 CPA auth-dir。\n` +
                `如 CPA 中找不到对应邮箱，会在 zip 的 manifest.json 记录错误。\n\n继续？`;
-  if (!confirm(note)) return;
+  if (!uiConfirmSync(note)) return;
   const btn = $('#btnCodexDownloadBulkCpaV2');
   if (btn) btn.disabled = true;
   try {
@@ -6686,7 +6714,7 @@ async function codexDownloadBulkCpa() {
 async function codexDeleteBulk() {
   if (CODEX_SELECTED.size === 0) return;
   const filenames = Array.from(CODEX_SELECTED);
-  if (!confirm(`确定删除选中的 ${filenames.length} 个 Codex 凭证吗？\n\n会删除 SQLite 中的凭证记录。此操作不可撤销。`)) return;
+  if (!uiConfirmSync(`确定删除选中的 ${filenames.length} 个 Codex 凭证吗？\n\n会删除 SQLite 中的凭证记录。此操作不可撤销。`)) return;
   const btn = $('#btnCodexDeleteBulkV2');
   if (btn) btn.disabled = true;
   try {
