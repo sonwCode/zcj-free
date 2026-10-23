@@ -207,7 +207,15 @@ def _run_cloak_registration_impl(
     """CloakBrowser 自动化注册入口。"""
     # 方案 1：每个任务生成唯一 profile，完全隔离浏览器指纹
     import time
-    if job_id is not None:
+    shared_profile = str(getattr(_cfg, "CLOAK_SHARED_PROFILE", "") or "").strip()
+    if job_id is not None and shared_profile:
+        # 同一进程内复用同一个 profile，Chrome 的 HTTP 缓存才能跨任务命中。
+        # 每个进程独立命名，避免多 worker 抢同一个 profile 目录（Chrome 会加锁）。
+        import os as _os
+
+        unique_profile = "%s-p%s" % (shared_profile, _os.getpid() % 1000)
+        logger.info("[Cloak注册] 复用缓存 profile：%s（同进程内共享 HTTP 缓存）", unique_profile)
+    elif job_id is not None:
         unique_profile = f"reg_job{job_id}_{int(time.time())}"
         logger.info("[Cloak注册] 使用独立 profile 隔离指纹：%s", unique_profile)
     else:
@@ -610,6 +618,16 @@ def _run_cloak_registration_impl(
         post_register_dwell(email, label="Cloak注册")
         if driver and not driver_quit:
             driver_quit = True
+            # 关闭前：清身份数据（保留 HTTP 缓存）并快照为模板
+            try:
+                from core import cloak_profile_cache as _pc
+
+                if _pc.enabled() and unique_profile:
+                    _user_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+                    if _user_dir:
+                        _pc.finalize(driver, Path(_user_dir).expanduser() / unique_profile)
+            except Exception as exc:
+                logger.debug("[Cloak缓存] 快照失败（忽略）：%s", str(exc)[:120])
             logger.info("[Cloak注册] 成功路径开始有界优雅关闭浏览器")
             try:
                 if not close_cloak_driver(driver, timeout_seconds=_CLOAK_CLEANUP_TIMEOUT_SECONDS):
@@ -730,6 +748,16 @@ def _run_cloak_registration_impl(
             # 成功路径统计已完成，直接硬回收浏览器，避免再次触碰可能阻塞的 Playwright API。
             if driver and not driver_quit:
                 driver_quit = True
+                # 硬回收前先清身份数据并把缓存快照成模板（失败也不影响流程）
+                try:
+                    from core import cloak_profile_cache as _pc
+
+                    if _pc.enabled() and unique_profile:
+                        _user_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+                        if _user_dir:
+                            _pc.finalize(driver, Path(_user_dir).expanduser() / unique_profile)
+                except Exception as exc:
+                    logger.debug("[Cloak缓存] 快照失败（忽略）：%s", str(exc)[:120])
                 try:
                     logger.info("[Cloak注册] 成功路径硬回收浏览器，跳过可能阻塞的 tracker/context stop")
                     driver.force_kill()
