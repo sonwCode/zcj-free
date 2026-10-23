@@ -3399,6 +3399,17 @@ function jobsV2OpIcons() {
   };
 }
 function showToast(t) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),1400); }
+// 页面不可见时所有轮询直接跳过（省流量、省服务端）；回到前台立刻补一次，
+// 避免"切回来看到的还是旧日志"。
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') return;
+  const pollers = [() => typeof pollLog === 'function' && pollLog(),
+                   () => typeof pollRetryLog === 'function' && pollRetryLog(),
+                   () => typeof pollLiveLog === 'function' && pollLiveLog(),
+                   () => typeof pollTotpLog === 'function' && pollTotpLog(),
+                   () => typeof pollEmailChangeLog === 'function' && pollEmailChangeLog()];
+  pollers.forEach((fn) => { try { fn(); } catch (e) { /* 忽略单点失败 */ } });
+});
 async function copyText(text) {
   if (!text) return;
   try {
@@ -3996,6 +4007,7 @@ function openLog(jobId) {
 }
 async function pollLog() {
   if (activeLogJob == null) return;
+  if (document.visibilityState === 'hidden') return;
   try {
     const r = await api(`/api/jobs/${activeLogJob}/log`);
     const c = $('#logContent');
@@ -4622,6 +4634,7 @@ function openRetryLog(email) {
 }
 async function pollRetryLog() {
   if (!retryLogEmail) return;
+  if (document.visibilityState === 'hidden') return;
   try {
     const r = await api(`/api/codex/retry-log?email=${encodeURIComponent(retryLogEmail)}`);
     const c = $('#retryLogContent');
@@ -4651,6 +4664,7 @@ function openLiveLog(email) {
 }
 async function pollLiveLog() {
   if (!liveLogEmail) return;
+  if (document.visibilityState === 'hidden') return;
   try {
     const r = await api(`/api/accounts/live-check-log?email=${encodeURIComponent(liveLogEmail)}`);
     const c = $('#liveLogContent');
@@ -4680,6 +4694,7 @@ function openTotpLog(email) {
 }
 async function pollTotpLog() {
   if (!totpLogEmail) return;
+  if (document.visibilityState === 'hidden') return;
   try {
     const r = await api(`/api/accounts/totp-setup-log?email=${encodeURIComponent(totpLogEmail)}`);
     const c = $('#totpLogContent');
@@ -4714,6 +4729,7 @@ function openEmailChangeLog(accountId) {
 }
 async function pollEmailChangeLog() {
   if (!emailChangeLogAccountId) return;
+  if (document.visibilityState === 'hidden') return;
   try {
     const r = await api(`/api/accounts/${encodeURIComponent(emailChangeLogAccountId)}/change-email-log`);
     const content = $('#emailChangeLogContent');
