@@ -570,8 +570,68 @@ session_cookies: ['__Secure-next-auth.session-token.0',
 
 ---
 
-## 12. 其余项目
+## 12. pirder/codex_me 与 auth.openai.com cookie 的突破
 
-（后续轮次补齐：pirder、HengXin666、starmiaoa、xiaoguzuiniu、
-pixian5、fuckoai、88cjohn、OpenBrowser、upstream-ratio-watch、taiguanren、
-MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+### 12.1 pirder/codex_me（1.5 万行）
+
+Go/Python 混合的浏览器自动化注册器，核心函数值得记：
+
+| 函数 | 作用 |
+|---|---|
+| `_recover_browser_tab` / `_navigate_with_tab_recovery` | 标签页断连后的自动恢复（导航重试 2 次） |
+| `sign_up_chatgpt_account` / `login_chatgpt_account` | 浏览器内的注册与登录 |
+| `disable_chatgpt_model_training` | 关闭"改进模型"开关（账号卫生动作） |
+| `_submit_otp_code` | OTP 提交（含 15s 等待与重试） |
+
+它的"标签页恢复"思路对我们有参考：浏览器会话崩了不重跑整轮，而是恢复标签再导航。
+
+### 12.2 本轮突破：跨域 cookie 抓取
+
+上一轮推断"auth.openai.com 侧会话需要单独抓"。查活时我们手上正是**已登录的
+auth.openai.com 会话**，于是新增 `session_cookie.capture_all(session)`：
+
+实测（#25 查活成功后）：
+
+```
+跨域cookie 数: 31
+域: ['.auth.openai.com', '.chatgpt.com', '.openai.com',
+     '.sentinel.openai.com', 'auth.openai.com', 'chatgpt.com']
+```
+
+**31 个 cookie、6 个域**，含 `auth.openai.com` 侧的 `__Secure-next-auth.*`
+与 `login_session`。已写入账号 `extra.auth_cookies`，查活即刷新。
+
+### 12.3 cookie 授权 Codex：从"登录页"推进到"选账号页"
+
+用上面这份 cookie 注入后重跑，落地页发生了关键变化：
+
+```
+修复前: https://auth.openai.com/log-in          ← 完全没登录态
+第一版: https://auth.openai.com/choose-an-account  ← 登录态生效，卡在选账号
+```
+
+说明**跨域 cookie 注入是正确的**，只差一步"选账号/工作区"的推进。
+
+两点已实现：
+1. `_advance_account_page(driver)`：在 choose-an-account / workspace 页
+   点一次可推进的按钮（按文本匹配 personal/continue/select…）；
+2. **发现 `prompt=login` 会强制重新输密码**：`_build_authorize_url` 默认
+   `prompt="login"`，即使已登录也会跳 `log-in/password`。cookie 路径必须
+   改成 `prompt=none`（已加 `CODEX_AUTHORIZE_PROMPT` 配置，默认 none）。
+
+### 12.4 当前阻塞
+
+改为 `prompt=none` 后连续两次遇到
+`Page.goto: net::ERR_CONNECTION_REFUSED`（auth.openai.com）——
+这是出口/代理侧的传输失败，不是逻辑问题。下一轮换干净出口重试即可。
+
+**结论（阶段性）**：cookie 授权 Codex 的路径已经证明可行到"登录态生效"，
+剩两步：选账号页推进 + prompt=none 生效后的回调捕获。
+
+---
+
+## 13. 其余项目
+
+（后续轮次补齐：HengXin666、starmiaoa、xiaoguzuiniu、pixian5、fuckoai、
+88cjohn、OpenBrowser、upstream-ratio-watch、taiguanren、MAACodex、
+GPT_zhuceji、klsf、wenfxl、GuJumpgate）
