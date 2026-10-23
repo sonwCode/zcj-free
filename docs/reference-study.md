@@ -311,8 +311,72 @@ FAILURE_CLASSES 的元组顺序即匹配优先序。标记字符串是线上数�
 
 ---
 
-## 8. 其余项目
+## 8. AuuCoder/gptGrok2api
 
-（后续轮次补齐：sky3100、AuuCoder、ZRainbow1275、basketikun、pirder、HengXin666、
+规模：342 个 py 文件、11.3 万行，多平台（OpenAI + Grok）。最大模块：
+`services/register_service.py` 190KB、`services/openai_backend_api.py` 151KB、
+`services/register/openai_register.py` 142KB。
+
+### 8.1 独立的 captcha-solver 体系
+
+它有 9 个 solver 目录，每个都是"输入 URL/proxy → 输出可用凭证"的独立服务：
+
+```
+awswaf / botguard / cloudflare / datadome / hcaptcha /
+perimeterx / recaptcha / turnstile / xai_browser
+```
+
+### 8.2 cloudflare solver 的做法（本轮核心借鉴）
+
+README 写得很清楚：**它不伪造 token，而是把 full-page interstitial 真过一遍**：
+
+- 导航到真实 URL，**轮询 cookie jar 直到 `cf_clearance` 出现且挑战标记消失**；
+- Managed Challenge：best-effort 点击 `challenges.cloudflare.com` iframe 里的 Turnstile；
+- JS Challenge：自动通过，无需点击；
+- 统一返回 `solved: bool`，不按类型分支。
+
+### 8.3 我们的问题与修复
+
+我们此前 `_raise_if_cloudflare_challenge()` **一见标记就抛异常**：
+
+```
+看到 "Just a moment" → 立刻 raise CloudflareChallengeError
+→ 上层换出口重跑整轮
+```
+
+而真实浏览器往往再等 5 秒就自己过了。等于把"等一等就好"误判成"出口坏了"。
+
+**已落地** `core/cf_clearance.py`：
+- `looks_like_challenge(state)`：按 url/title/text/errors 匹配 6 个标记
+- `click_turnstile_if_present(driver)`：定位 iframe → 取中心坐标 → CDP 派发 mousePressed/mouseReleased
+- `wait_for_clearance(driver, state_getter, deadline_s, poll_s, try_click)`：
+  轮询直到挑战消失或超时，返回最后一次状态（不抛异常）
+
+接入：`roxy_registration._raise_if_cloudflare_challenge` 改为**先等待再判定**，
+配置 `CF_CLEARANCE_WAIT_SECONDS`（默认 45）、`CF_CLEARANCE_TRY_CLICK`（默认 True）。
+
+测试 `tests/test_cf_clearance.py` **4 项全部 PASS**
+（立即通过 / 等待后通过 / 超时放弃 / 标记识别）。
+
+### 8.4 profile 占用回收（来自 2951461586）
+
+浏览器持久 profile 的经典坑：父进程被杀后浏览器仍占着目录，
+下一次启动报 `profile is already in use`，且不告诉你是谁占着。
+
+它的两条判断：**看 lock 文件没用**（parent.lock 正常退出也会留），
+唯一可移植答案是**找命令行里引用了该目录的活进程**。
+
+**已落地** `core/profile_reclaim.py` + `tools/reclaim_profiles.py`：
+- `find_holders(profile)`：扫 /proc/*/cmdline 匹配路径
+- `reclaim(profile, terminate)`：终止仅限"看起来像浏览器"的进程（镜像名保护）
+- `reclaim_stale(root, terminate)`：整目录扫描
+
+实测：24 个 profile，全部空闲（0 被占用）。
+
+---
+
+## 9. 其余项目
+
+（后续轮次补齐：sky3100、ZRainbow1275、basketikun、pirder、HengXin666、
 starmiaoa、xiaoguzuiniu、pixian5、fuckoai、88cjohn、OpenBrowser、
 upstream-ratio-watch、taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
