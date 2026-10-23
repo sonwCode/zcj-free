@@ -28,6 +28,26 @@ logger = logging.getLogger(__name__)
 
 def _log_phase(name: str, ok: bool, detail: str = "") -> None:
     logger.info("[协议注册][%s] %s%s", name, "OK" if ok else "失败", ("：" + detail) if detail else "")
+    _phase_pause()
+
+
+def _phase_pause() -> None:
+    """阶段之间停顿，模拟真人节奏；只影响时间，不改控制流。"""
+    try:
+        from config import register as _rc
+
+        raw = str(getattr(_rc, 'PROTOCOL_PHASE_PAUSE', '') or '').strip()
+        if not raw:
+            return
+        lo_s, hi_s = (raw.split(',') + [raw])[:2]
+        lo, hi = float(lo_s), float(hi_s)
+    except Exception:
+        return
+    import random as _random
+
+    import time as _time
+
+    _time.sleep(_random.uniform(lo, max(lo, hi)))
 
 
 def _protocol_extra(password: str, info: dict, email_source: str | None) -> dict:
@@ -303,6 +323,19 @@ def run_protocol_registration(
                 _log_phase("暖号", bool(warmed.get("ok")), str(warmed.get("steps") or warmed.get("error") or "")[:110])
         except Exception as exc:
             _log_phase("暖号", False, str(exc)[:100])
+
+        # Datadog RUM 重放：补齐浏览器注册必然产生的遥测信号
+        try:
+            from config import register as _dd_cfg
+
+            _har = str(getattr(_dd_cfg, 'PROTOCOL_DATADOG_HAR', '') or '').strip()
+            if _har:
+                from core.datadog_replay import replay as _dd_replay
+
+                _dd = _dd_replay(session, _har, limit=int(getattr(_dd_cfg, 'PROTOCOL_DATADOG_LIMIT', 60) or 60))
+                _log_phase("DD重放", bool(_dd.get('ok')), "%s/%s" % (_dd.get('sent'), _dd.get('total')))
+        except Exception as exc:
+            _log_phase("DD重放", False, str(exc)[:100])
 
         # 浏览器落地：用真实指纹浏览器把号"坐实"，profile 持久保留
         try:

@@ -265,9 +265,46 @@ def _run_cloak_registration_impl(
         logger.info("[Cloak注册] 开始：%s，profile=%s", email, opened.profile_id)
 
         otp_after_ts = time.time()
+        lean_entry = False
+        try:
+            from config import cloakbrowser as _lean_cfg
+
+            lean_entry = bool(getattr(_lean_cfg, 'CLOAK_LEAN_ENTRY', False))
+        except Exception:
+            lean_entry = False
+        if lean_entry:
+            # 精简入口：协议侧构造 authorize URL + 注入同源 Cookie，
+            # 让浏览器直接落在 auth.openai.com，跳过 chatgpt.com 前端应用包。
+            from core.chatgpt_auth import get_csrf_token, signin_openai
+            from core.session import BrowserSession
+
+            api_session = BrowserSession(proxy=proxy)
+            csrf = get_csrf_token(api_session)
+            auth_url = signin_openai(api_session, csrf, email)
+            jar = getattr(getattr(api_session, 'session', None), 'cookies', None)
+            jar = getattr(jar, 'jar', None)
+            payload = []
+            for ck in list(jar or []):
+                try:
+                    dom = str(getattr(ck, 'domain', '') or '')
+                    payload.append({
+                        'name': str(ck.name), 'value': str(ck.value),
+                        'path': str(getattr(ck, 'path', '/') or '/'),
+                        'domain': dom if dom.startswith('.') else ('.' + dom.lstrip('.') if dom else '.chatgpt.com'),
+                    })
+                except Exception:
+                    continue
+            if payload:
+                try:
+                    driver.execute_cdp_cmd('Network.setCookies', {'cookies': payload})
+                except Exception as _ck_exc:
+                    logger.warning('[Cloak注册] 精简入口 Cookie 注入失败：%s', str(_ck_exc)[:120])
+            logger.info('[Cloak注册] 精简入口：API 构造 authorize URL 后直达 auth.openai.com（cookies=%d）', len(payload))
+            _safe_get(driver, auth_url, timeout=60, attempts=2, accept_hosts=('auth.openai.com',))
         logger.info("[Cloak注册] 打开登录页：https://chatgpt.com/auth/login")
         try:
-            _safe_get(driver, "https://chatgpt.com/auth/login", timeout=60, attempts=2, accept_hosts=("chatgpt.com",))
+            if not lean_entry:
+                _safe_get(driver, "https://chatgpt.com/auth/login", timeout=60, attempts=2, accept_hosts=("chatgpt.com",))
         except Exception as exc:
             if proxy is None and _is_cloak_proxy_bootstrap_error(exc):
                 failed_target = str(

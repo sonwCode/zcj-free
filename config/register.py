@@ -56,3 +56,13 @@ PROTOCOL_RECENT_EXIT_MEMORY: int = 6
 # 每个账号使用独立且持久化的 profile 目录。
 PROTOCOL_BROWSER_SEAL: bool = False
 PROTOCOL_BROWSER_SEAL_DWELL_SECONDS: int = 45
+
+# 协议注册的真人节奏：各阶段之间插入随机停顿（秒区间），0 表示不停顿
+PROTOCOL_HUMAN_PACING: bool = False
+PROTOCOL_PACING_STEP_RANGE: str = "4,9"
+
+# 每个阶段完成后停顿的秒区间（模拟真人节奏），空=不停顿
+PROTOCOL_PHASE_PAUSE: str = ""
+# 重放浏览器 Datadog RUM beacon（HAR 路径），空=不重放
+PROTOCOL_DATADOG_HAR: str = ""
+PROTOCOL_DATADOG_LIMIT: int = 60

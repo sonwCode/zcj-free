@@ -55,3 +55,10 @@ CLOAK_BLOCK_RESOURCES: bool = True
 # 注册时是否拦截 chatgpt.com 的前端应用包（Next.js chunks / css / map）。
 # 这些是 SPA 资源，注册用不到，但能占单号流量的 60% 以上。
 CLOAK_BLOCK_APP_BUNDLES: bool = False
+
+# 精简入口：用 API 构造 authorize URL 并注入 Cookie，直接进 auth.openai.com，
+# 跳过 chatgpt.com/auth/login 的整个前端应用包（约省 13MB）。
+CLOAK_LEAN_ENTRY: bool = False
+
+# 录制注册过程 HAR（用于比对协议请求头/参数），空=不录制
+CLOAK_RECORD_HAR_DIR: str = ""

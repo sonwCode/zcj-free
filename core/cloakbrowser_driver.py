@@ -761,6 +761,12 @@ def build_cloak_driver(
             context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
 
         if user_data_dir:
+            _har_dir = str(getattr(_cfg, 'CLOAK_RECORD_HAR_DIR', '') or '').strip()
+            if _har_dir:
+                from pathlib import Path as _P
+                _P(_har_dir).mkdir(parents=True, exist_ok=True)
+                opts['record_har_path'] = str(_P(_har_dir) / (run_profile + '.har'))
+                opts['record_har_content'] = 'embed'
             context = launch_persistent_context(user_data_dir, **opts)
             page = context.new_page()
             browser = getattr(context, "browser", None) or context
@@ -768,6 +774,41 @@ def build_cloak_driver(
             browser = launch(**opts)
             context = browser.new_context(**context_kwargs)
             page = context.new_page()
+
+        # 流量裁剪：拦截图片/媒体/字体与埋点域名，减少单号流量。
+        try:
+            if bool(getattr(_cfg, 'CLOAK_BLOCK_RESOURCES', True)):
+                _types = {x.strip().lower() for x in str(getattr(_cfg, 'CLOAK_BLOCK_RESOURCE_TYPES', '') or '').split(',') if x.strip()}
+                _hosts = [h.strip().lower() for h in str(getattr(_cfg, 'CLOAK_BLOCK_HOSTS', '') or '').split(',') if h.strip()]
+                _block_bundles = bool(getattr(_cfg, 'CLOAK_BLOCK_APP_BUNDLES', True))
+
+                def _route_handler(route, request):
+                    try:
+                        rtype = str(getattr(request, 'resource_type', '') or '').lower()
+                        url = str(getattr(request, 'url', '') or '').lower()
+                        if rtype in _types or any(h in url for h in _hosts):
+                            route.abort()
+                            return
+                        # chatgpt.com 的 SPA 资源：注册流程不需要，直接丢弃
+                        _abort_counter['n'] += 1
+                        if _abort_counter['n'] % 100 == 0:
+                            logger.warning('[Cloak] 已拦截 %d 个请求（bundle %d）', _abort_counter['n'], _abort_counter['bundle'])
+                        if _block_bundles and ('chatgpt.com' in url or 'oaistatic.com' in url) \
+                                and (rtype == 'script' or rtype == 'stylesheet' \
+                                     or url.endswith('.map') or url.endswith('.js') \
+                                     or url.endswith('.css')):
+                            route.abort()
+                            return
+                    except Exception:
+                        pass
+                    route.continue_()
+
+                _abort_counter = {'n': 0, 'bundle': 0}
+                context.route('**/*', _route_handler)
+                logger.warning('[Cloak] 流量裁剪已启用 types=%s hosts=%d block_bundles=%s', sorted(_types), len(_hosts), _block_bundles)
+                logger.info('[Cloak] 流量裁剪已启用 types=%s hosts=%d 个', sorted(_types), len(_hosts))
+        except Exception as exc:
+            logger.warning('[Cloak] 流量裁剪启用失败：%s', str(exc)[:120])
 
         driver = CloakSeleniumDriver(
             browser=browser,
