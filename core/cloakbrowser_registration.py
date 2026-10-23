@@ -252,6 +252,16 @@ def _run_cloak_registration_impl(
         if traffic_tracker is not None:
             traffic_tracker.attach_data_saver(data_saver)
         data_saver.install_playwright(driver.context)
+        try:
+            from config import cloakbrowser as _cb_cfg
+            from core.resource_blocker import install as _install_blocker
+            if bool(getattr(_cb_cfg, 'CLOAK_BLOCK_RESOURCES', True)):
+                _block_stats = _install_blocker(
+                    driver.context,
+                    block_bundles=bool(getattr(_cb_cfg, 'CLOAK_BLOCK_APP_BUNDLES', False)),
+                )
+        except Exception as exc:
+            logger.warning('[Cloak注册] 资源拦截挂载失败：%s', str(exc)[:120])
         logger.info("[Cloak注册] 开始：%s，profile=%s", email, opened.profile_id)
 
         otp_after_ts = time.time()

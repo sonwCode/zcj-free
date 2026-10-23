@@ -45,3 +45,13 @@ CLOAK_KEEP_BROWSER_OPEN: bool = False
 
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {'CLOAK_HEADLESS': 'bool', 'CLOAK_HUMANIZE': 'bool', 'CLOAK_GEOIP': 'bool', 'CLOAK_LOCALE': 'str', 'CLOAK_TIMEZONE': 'str', 'CLOAK_USE_PROXY': 'bool', 'CLOAK_LICENSE_KEY': 'str', 'CLOAK_FINGERPRINT_SEED': 'str', 'CLOAK_USER_DATA_DIR': 'str', 'CLOAK_SELENIUM_TIMEOUT': 'int', 'CLOAK_PROXY_BOOTSTRAP_RETRIES': 'int', 'CLOAK_DIRECT_FALLBACK_ON_PROXY_FAILURE': 'bool', 'CLOAK_KEEP_BROWSER_OPEN': 'bool'})
+
+# 注册浏览器流量裁剪：拦截无用资源，降低单号流量。
+# 只拦"不携带账号信号"的东西：图片/媒体/字体、埋点与统计域名。
+CLOAK_BLOCK_RESOURCE_TYPES: str = "image,media,font"
+CLOAK_BLOCK_HOSTS: str = "browser-intake-datadoghq.com,ab.chatgpt.com,statsig,sentry.io,segment.io,google-analytics.com"
+CLOAK_BLOCK_RESOURCES: bool = True
+
+# 注册时是否拦截 chatgpt.com 的前端应用包（Next.js chunks / css / map）。
+# 这些是 SPA 资源，注册用不到，但能占单号流量的 60% 以上。
+CLOAK_BLOCK_APP_BUNDLES: bool = False
