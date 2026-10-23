@@ -767,6 +767,30 @@ def build_cloak_driver(
                 _P(_har_dir).mkdir(parents=True, exist_ok=True)
                 opts['record_har_path'] = str(_P(_har_dir) / (run_profile + '.har'))
                 opts['record_har_content'] = 'embed'
+            # 缓存预热：只复制 HTTP 缓存，不复制 Cookie/身份，避免账号关联'
+            try:
+                _seed_root = str(getattr(_cfg, 'CLOAK_CACHE_SEED_DIR', '') or '').strip()
+                if _seed_root and profile_dir is not None:
+                    import shutil as _shutil
+                    _subdirs = str(getattr(_cfg, 'CLOAK_CACHE_SEED_SUBDIRS', '') or '').split(',')
+                    _copied = 0
+                    for _sub in _subdirs:
+                        _sub = _sub.strip()
+                        if not _sub:
+                            continue
+                        _src = Path(_seed_root) / _sub
+                        _dst = Path(profile_dir) / _sub
+                        if not _src.exists():
+                            continue
+                        _dst.parent.mkdir(parents=True, exist_ok=True)
+                        if _dst.exists():
+                            continue
+                        _shutil.copytree(_src, _dst, dirs_exist_ok=True)
+                        _copied += 1
+                    if _copied:
+                        logger.warning('[Cloak] 缓存预热完成：复制 %d 个缓存目录（模板=%s）', _copied, _seed_root)
+            except Exception as _seed_exc:
+                logger.warning('[Cloak] 缓存预热失败：%s', str(_seed_exc)[:140])
             context = launch_persistent_context(user_data_dir, **opts)
             page = context.new_page()
             browser = getattr(context, "browser", None) or context

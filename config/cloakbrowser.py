@@ -50,7 +50,7 @@ apply_env_overrides(globals(), {'CLOAK_HEADLESS': 'bool', 'CLOAK_HUMANIZE': 'boo
 # 只拦"不携带账号信号"的东西：图片/媒体/字体、埋点与统计域名。
 CLOAK_BLOCK_RESOURCE_TYPES: str = "image,media,font"
 CLOAK_BLOCK_HOSTS: str = "browser-intake-datadoghq.com,ab.chatgpt.com,statsig,sentry.io,segment.io,google-analytics.com"
-CLOAK_BLOCK_RESOURCES: bool = True
+CLOAK_BLOCK_RESOURCES: bool = False
 
 # 注册时是否拦截 chatgpt.com 的前端应用包（Next.js chunks / css / map）。
 # 这些是 SPA 资源，注册用不到，但能占单号流量的 60% 以上。
@@ -62,3 +62,9 @@ CLOAK_LEAN_ENTRY: bool = False
 
 # 录制注册过程 HAR（用于比对协议请求头/参数），空=不录制
 CLOAK_RECORD_HAR_DIR: str = ""
+
+# 缓存预热：把模板 profile 的 HTTP 缓存复制到新 profile，
+# 避免每个号重复下载 chatgpt.com 的应用包（约 13MB）。空=不启用。
+CLOAK_CACHE_SEED_DIR: str = ""  # 实测收益不稳定，默认关闭；要试就指向 cloak-cache-template
+# 复制哪些缓存子目录（相对 profile 根）
+CLOAK_CACHE_SEED_SUBDIRS: str = "Default/Cache,Default/Code Cache,Default/GPUCache"
