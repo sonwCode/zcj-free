@@ -511,8 +511,67 @@ session_cookies 键: ['__Secure-next-auth.session-token.0',
 
 ---
 
-## 11. 其余项目
+## 11. basketikun/chatgpt2api 与 cookie 授权 Codex 的边界
 
-（后续轮次补齐：basketikun、pirder、HengXin666、starmiaoa、xiaoguzuiniu、
+### 11.1 basketikun/chatgpt2api（2.3 万行）
+
+服务化封装：把注册/查询能力包成 HTTP API。设计上对我们参考价值有限
+（我们已有 WebUI + Flask），但它的"能力即端点"划分方式清晰。
+
+### 11.2 本轮真正落地的两件事
+
+**(a) 账号 extra 合并写接口**（`core/account_extra.py`）
+
+`db.py` 只有若干专用 `update_account_xxx`，没有通用 extra 更新口。
+实现最小合并写入（读 payload → 合并 extra_json → 写回），实测可写可读。
+
+**(b) 查活时自动抓取 session cookie**（`core/account_liveness.py`）
+
+查活成功时手上就有已登录会话，顺手把
+`__Secure-next-auth.session-token`（含分片）存进 `extra.session_cookies`。
+
+实测（#25 marywhite179701）：
+
+```
+查活: {"ok": true, "status": "live"}
+session_cookies: ['__Secure-next-auth.session-token.0',
+                  '__Secure-next-auth.session-token.1']
+```
+
+意义：**每次查活都会刷新 cookie**，为后续 cookie 方式授权 Codex 提供素材，
+且不额外消耗任何请求。
+
+### 11.3 尝试：用 cookie 直接授权 Codex（未成功，与上游同墙）
+
+`core/codex_cookie_auth.py` 按上游配方实现完整链路：
+注入两域 cookie（分片 + 同 oai-did）→ 打开 Codex OAuth authorize →
+轮询 localhost:1455 回调 → `exchange_codex_token` 换 token。
+
+实测（活号 #25，cookie 有效）：
+
+```
+[Cloak] 启动 CloakBrowser profile=codex-marywhite179701-outlook.com
+[Cookie] 已注入 3 个 cookie（chatgpt.com）
+[Cookie] 已注入 4 个 cookie（auth.openai.com）
+结果: {"ok": false, "error": "未拿到 OAuth code（超时）",
+        "landing": "https://auth.openai.com/log-in"}
+```
+
+**注意**：这与 ZRainbow1275 那份 PRD 里记录的现象完全一致
+（"session 无法直接用于主号 Codex OAuth，仍落在登录页"），
+也就是说**这是一个未解问题，不是我没抄到位**。
+
+推断：`auth.openai.com` 侧的会话不是靠 chatgpt.com 的 session-token 建立，
+而是在 OAuth 登录成功后被服务端单独签发；直接注入 chatgpt cookie 不足以通过。
+
+结论：该模块保留但**默认不启用**（需要人工显式调用），
+下一步要做的是"注册/查活时把 auth.openai.com 侧的 cookie 也抓下来"，
+而不是继续在注入方式上打转。
+
+---
+
+## 12. 其余项目
+
+（后续轮次补齐：pirder、HengXin666、starmiaoa、xiaoguzuiniu、
 pixian5、fuckoai、88cjohn、OpenBrowser、upstream-ratio-watch、taiguanren、
 MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
