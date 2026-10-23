@@ -3113,21 +3113,55 @@ function _qualInfo(r) {
 }
 </script>
 <script>
-// 同步二次确认：iframe 里原生 confirm() 会被静默拦截并直接返回 false，
-// 表现为“点按钮毫无反应”。这里改成两次点击确认：
-// 第一次提示并返回 false，4 秒内再点同一操作即通过。
+// 确认弹窗：iframe 里原生 confirm() 会被静默拦截（直接 false），
+// 而调用点是同步的 if (!confirm(x)) return; 结构，无法 await。
+// 实现：首次点击弹出真实弹窗并返回 false；点"确定"后记录放行标记，
+// 并自动重放刚才那次点击，让同一个 handler 第二次执行时通过。
 (function () {
   var armed = new Map();
+  var lastTarget = null;
+  document.addEventListener('click', function (e) {
+    var tgt = e.target;
+    if (tgt && tgt.closest && tgt.closest('.ui-confirm-overlay')) return;
+    lastTarget = tgt;
+  }, true);
   window.uiConfirmSync = function (message) {
     var msg = String(message == null ? '' : message);
     var now = Date.now();
-    var last = armed.get(msg) || 0;
-    if (now - last < 4000) { armed.delete(msg); return true; }
-    armed.set(msg, now);
-    armed.forEach(function (ts, key) { if (now - ts > 4000) armed.delete(key); });
-    var first = msg.split(String.fromCharCode(10))[0].slice(0, 60);
-    if (typeof showToast === 'function') { showToast('请再次点击以确认：' + first); }
-    else { console.warn('[confirm] 请再次点击以确认：' + msg); }
+    if ((armed.get(msg) || 0) > 0 && now - armed.get(msg) < 8000) {
+      armed.delete(msg);
+      return true;
+    }
+    var overlay = document.createElement('div');
+    overlay.className = 'ui-confirm-overlay';
+    overlay.innerHTML = '<div class="ui-confirm-box" role="dialog" aria-modal="true">'
+      + '<div class="ui-confirm-msg"></div>'
+      + '<div class="ui-confirm-actions">'
+      + '<button type="button" class="ui-confirm-cancel">取消</button>'
+      + '<button type="button" class="ui-confirm-ok">确定</button>'
+      + '</div></div>';
+    overlay.querySelector('.ui-confirm-msg').textContent = msg;
+    var okBtn = overlay.querySelector('.ui-confirm-ok');
+    okBtn.style.background = '#dc2626';
+    okBtn.style.borderColor = '#dc2626';
+    function close() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      document.removeEventListener('keydown', onKey);
+    }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    overlay.querySelector('.ui-confirm-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    okBtn.addEventListener('click', function () {
+      armed.set(msg, Date.now());
+      close();
+      var el = lastTarget;
+      if (el && el.isConnected) {
+        try { el.click(); } catch (err) { console.warn('[confirm] 重放点击失败', err); }
+      }
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    okBtn.focus();
     return false;
   };
 })();
