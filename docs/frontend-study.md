@@ -305,3 +305,30 @@ node --check webui/static/app.js → OK
 | 5 | 列契约统一 + 骨架屏 + 快捷键 | sms-pool 表同契约，首屏不再空白 |
 
 五轮都遵循同一原则：**不引入构建链**，用外链文件 + 小型模块约定达到可维护性。
+## 第 6 轮（加分）：注册漏斗可视化 + Codex 补跑入口
+
+第 20 轮的漏斗报表暴露了一个事实：614 条作业里 187 条 partial_success，
+其中 **102 条 Codex 连试都没试**。这个信息藏在数据库里，界面上看不到。
+
+本轮把它搬到界面上：
+
+```html
+<div class="funnel-card-v2" id="funnelCardV2" hidden>
+  <div class="funnel-title">注册漏斗</div>
+  <div class="funnel-stats" id="funnelStatsV2"></div>
+  <button id="btnCodexBackfillV2">补跑 Codex</button>
+</div>
+```
+
+数据来自新增的 `GET /api/funnel`，一行显示：
+
+```
+总计 614 · 成功 155 (25.2%) · 部分成功 187 (30.5%) ·
+失败 90 · Codex 未跑 102 / 失败 68
+```
+
+按钮走 `POST /api/codex/backfill`，每次入队 10 个（上限 50），
+与注册队列解耦，不影响注册节奏。
+
+验证：模板 funnelCardV2 1 处、app.js loadFunnelV2 3 处、css 类 1 处；
+资源 200；服务 active。

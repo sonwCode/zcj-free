@@ -201,7 +201,12 @@
   <div id="tab-accounts" class="hidden">
     <h1 class="register-title">账号</h1>
     <section class="accounts-panel-v2" id="accountsPanelV2" aria-label="账号列表">
-      <div class="accounts-filter-v2" id="accountsFilterV2">
+      <div class="funnel-card-v2" id="funnelCardV2" hidden>
+  <div class="funnel-title">注册漏斗</div>
+  <div class="funnel-stats" id="funnelStatsV2"></div>
+  <button type="button" class="funnel-action" id="btnCodexBackfillV2" title="把未跑/失败的账号批量加入 Codex 补跑队列（每次 10 个）">补跑 Codex</button>
+</div>
+<div class="accounts-filter-v2" id="accountsFilterV2">
         <div class="acc-v2-btn-group acc-v2-search-wrap">
           <input id="qAccountsV2" type="search" placeholder="搜索邮箱、token、来源…" autocomplete="off">
         </div>

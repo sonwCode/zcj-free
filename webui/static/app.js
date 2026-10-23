@@ -1059,6 +1059,7 @@ async function cleanupDeadAccounts() {
 }
 
 async function loadAccounts() {
+  loadFunnelV2();
   if (accountsLoading) return;
   accountsLoading = true;
   try {
@@ -5016,5 +5017,47 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.altKey && (e.key === 'r' || e.key === 'R')) {
     if (typeof loadAccounts === 'function') { e.preventDefault(); loadAccounts(); }
+  }
+});
+
+// 注册漏斗：把 /api/funnel 的统计显示出来，并提供 Codex 批量补跑入口。
+async function loadFunnelV2() {
+  const card = $('#funnelCardV2');
+  const stats = $('#funnelStatsV2');
+  if (!card || !stats) return;
+  try {
+    const d = await api('/api/funnel?limit=500');
+    if (!d || d.ok === false) { card.hidden = true; return; }
+    const status = d.status || {};
+    const sub = d.sub_status || {};
+    const total = Number(d.total || 0) || 1;
+    const pct = (n) => ((Number(n || 0) * 100) / total).toFixed(1) + '%';
+    const parts = [
+      '总计 ' + total,
+      '成功 ' + (status.success || 0) + ' (' + pct(status.success) + ')',
+      '部分成功 ' + (status.partial_success || 0) + ' (' + pct(status.partial_success) + ')',
+      '失败 ' + (status.failed || 0),
+      'Codex 未跑 ' + (sub['codex_status:skipped'] || 0) + ' / 失败 ' + (sub['codex_status:failed'] || 0),
+    ];
+    stats.textContent = parts.join(' · ');
+    card.hidden = false;
+  } catch (e) { card.hidden = true; }
+}
+
+document.addEventListener('click', async (event) => {
+  const btn = event.target.closest('#btnCodexBackfillV2');
+  if (!btn) return;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = '入队中…';
+  try {
+    const r = await api('/api/codex/backfill', {method: 'POST', body: JSON.stringify({limit: 10})});
+    showToast('已入队 ' + ((r && r.queued) ? r.queued.length : 0) + ' 个，忙碌 ' + ((r && r.busy) || 0));
+    loadFunnelV2();
+  } catch (e) {
+    showToast('补跑失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
   }
 });

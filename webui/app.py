@@ -350,8 +350,8 @@ def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, runni
 
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
-    # 静态资源长缓存：URL 里带 ?v=<内容哈希>，内容变则 URL 变，可以放心长缓存。
-    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 604800  # 7 天
+    # 静态资源长缓存：URL 里带 ?v=<内容哈希>，内容变则 URL 变，因此可以放心长缓存。
+    app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 604800  # 7 天
     _prepared_downloads: dict[str, dict] = {}
 
     @app.after_request
@@ -1279,6 +1279,65 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped": skipped,
             "queue": live_check_service.queue_settings(),
         }), 202
+
+    @app.get("/api/funnel")
+    def api_funnel():
+        """注册漏斗：按状态与 Codex 细分统计。"""
+        try:
+            limit = int(request.args.get("limit") or 500)
+        except (TypeError, ValueError):
+            limit = 500
+        try:
+            root = str(__import__('pathlib').Path(__file__).resolve().parent.parent)
+            _sys = __import__('sys')
+            if root not in _sys.path:
+                _sys.path.insert(0, root)
+            from tools.funnel_report import build as _build_funnel
+
+            return jsonify({"ok": True, **_build_funnel(limit)})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}), 500
+
+    @app.post("/api/codex/backfill")
+    def api_codex_backfill():
+        """把 Codex 未跑/失败的账号批量入队补跑（与注册队列解耦）。"""
+        data = request.get_json(silent=True) or {}
+        try:
+            limit = int(data.get("limit") or 10)
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 50))
+        raw_statuses = data.get("statuses") or ["skipped", "not_started", "failed"]
+        if not isinstance(raw_statuses, list):
+            return jsonify({"ok": False, "error": "statuses 必须是数组"}), 400
+        wanted = {str(s).strip().lower() for s in raw_statuses if str(s).strip()}
+        from core.codex_agent_service import enqueue_account_codex_agent
+
+        queued, busy, failed, seen = [], 0, [], 0
+        for acc in db.list_accounts(limit=5000, archived=None):
+            if len(queued) + busy + len(failed) >= limit:
+                break
+            status = str(acc.get("codex_status") or "").strip().lower()
+            if status not in wanted or not acc.get("access_token"):
+                continue
+            seen += 1
+            try:
+                result = enqueue_account_codex_agent(
+                    account_id=int(acc.get("id")),
+                    email=str(acc.get("email") or ""),
+                    access_token=str(acc.get("access_token") or ""),
+                    trigger="backfill",
+                )
+                if result.get("accepted"):
+                    queued.append(int(acc.get("id")))
+                elif result.get("busy"):
+                    busy += 1
+                else:
+                    failed.append({"id": acc.get("id"), "error": str(result.get("error") or "")[:100]})
+            except Exception as exc:
+                failed.append({"id": acc.get("id"), "error": f"{type(exc).__name__}: {str(exc)[:80]}"})
+        return jsonify({"ok": True, "matched": seen, "queued": queued,
+                        "busy": busy, "failed": failed[:10]})
 
     @app.post("/api/accounts/check-codex-oauth-bulk")
     def api_accounts_check_codex_oauth_bulk():

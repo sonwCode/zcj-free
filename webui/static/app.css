@@ -2407,3 +2407,18 @@
   100% { background-position: 0 50%; }
 }
 @media (prefers-reduced-motion: reduce) { .sk-line { animation: none; } }
+
+/* 注册漏斗卡片 */
+.funnel-card-v2 {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 12px; margin: 8px 0;
+  border: 1px solid rgba(0,0,0,.08); border-radius: 8px;
+  background: rgba(0,0,0,.02); font-size: 12px;
+}
+.funnel-title { font-weight: 600; }
+.funnel-stats { color: #606266; }
+.funnel-action {
+  margin-left: auto; padding: 4px 10px; border-radius: 6px;
+  border: 1px solid rgba(0,0,0,.14); background: #fff; cursor: pointer; font-size: 12px;
+}
+.funnel-action:disabled { opacity: .6; cursor: default; }

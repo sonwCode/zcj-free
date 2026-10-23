@@ -986,7 +986,36 @@ account_status:failed     90
 
 ---
 
-## 21. 其余项目
+## 21. 88cjohn/AutoTeam
 
-（后续轮次补齐：88cjohn、upstream-ratio-watch、taiguanren、MAACodex、
+规模：`manager.py` 42KB、`codex_auth.py` 25KB、`invite.py` 13KB、`cpa_sync.py` 4KB。
+
+### 21.1 与我们的实现高度同构
+
+```python
+CODEX_CALLBACK_PORT = 1455
+redirect_uri = f"http://localhost:{CODEX_CALLBACK_PORT}/auth/callback"
+# PKCE: code_verifier + S256 code_challenge
+```
+
+与我们 `config/codex.py` 完全一致（同一个 redirect_uri、同样是 S256 PKCE）。
+
+它的独有点是 `cpa_sync.py`：把本地 `auths/*.json` 推送到 CLIProxyAPI
+（带 `Authorization: Bearer <KEY>`），保持两边一致。
+我们的 CPA 相关能力已经具备（下载/上传接口），无缺口。
+
+### 21.2 结论
+
+第三个独立实现印证了同一条事实链：
+- `localhost:1455` 这个 redirect_uri 本身有效；
+- 关键在**必须完成真实登录**，然后走 `workspace/select` 拿 code；
+- 拿不到 code 时不要用 HTTP 客户端去跟随死端口（会触发 403）。
+
+无可迁移新增项。
+
+---
+
+## 22. 其余项目
+
+（后续轮次补齐：upstream-ratio-watch、taiguanren、MAACodex、
 GPT_zhuceji、klsf、wenfxl、GuJumpgate）
