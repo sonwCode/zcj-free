@@ -30,6 +30,29 @@ def _log_phase(name: str, ok: bool, detail: str = "") -> None:
     logger.info("[协议注册][%s] %s%s", name, "OK" if ok else "失败", ("：" + detail) if detail else "")
 
 
+def _protocol_extra(password: str, info: dict, email_source: str | None) -> dict:
+    """账号 extra：保留注册密码、驱动标记，并把 Remail 订单上下文一并落库。
+
+    落库后即使进程重启、本地取件缓存丢失，查活/补跑仍可用
+    remail_client.restore_account_context() 恢复订单继续收验证码。
+    """
+    extra = {
+        "registration_password": password,
+        "registration_driver": "protocol",
+        "session": info,
+    }
+    if str(email_source or "").strip().lower() == "remail":
+        try:
+            from core.remail_client import get_account_context_metadata
+
+            meta = get_account_context_metadata(str(info.get("email") or ""))
+            if meta:
+                extra["email_service"] = meta
+        except Exception:
+            pass
+    return extra
+
+
 def run_protocol_registration(
     email: str,
     name: str,
@@ -203,11 +226,7 @@ def run_protocol_registration(
             email_source=_email_source,
             device_id=str(getattr(session, "device_id", "") or ""),
             proxy_used=str(getattr(session, "proxy", "") or ""),
-            extra={
-                "registration_password": password,
-                "registration_driver": "protocol",
-                "session": info,
-            },
+            extra=_protocol_extra(password, info, _email_source),
             codex_status="skipped",
         )
         _log_phase("落库", True, "account_id=%s" % account_id)

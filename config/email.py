@@ -12,6 +12,9 @@ from config.env_loader import env_str, apply_env_overrides
 
 # True: REGISTER_EMAIL 留空时从 Outlook 账号池自动获取邮箱，OTP 自动收取
 # False: 走人工输入邮箱 + 人工填 OTP 的流程
+# 注册成功后保留邮箱取件上下文（True=查活/补跑仍可继续收码）
+EMAIL_KEEP_CONTEXT_ON_SUCCESS: bool = True
+
 USE_EMAIL_SERVICE = False
 
 # 可选值（也可以用英文逗号配置多个，按顺序兜底，例如 "outlook,generic_api,mailnest,remail"）：

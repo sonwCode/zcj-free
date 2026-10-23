@@ -219,6 +219,16 @@ def resolve_email_source(email: str) -> str:
     from core.remail_client import get_account_context as get_remail_context
     if get_remail_context(email):
         return "remail"
+    # 进程重启/上下文释放后，本地缓存为空，但 Remail 服务端仍保留订单。
+    # 这里尝试按邮箱恢复，避免把 remail 邮箱误判成 outlook 导致取码失败。
+    try:
+        from core.remail_client import restore_account_context as _restore_remail
+
+        if _restore_remail(email):
+            logger.info("[邮箱来源] 已从 Remail 服务端恢复取件上下文：%s", email)
+            return "remail"
+    except Exception as exc:
+        logger.debug("[邮箱来源] Remail 恢复失败：%s", str(exc)[:120])
     from core.mailcode_client import get_account_context as get_mailcode_context
     if get_mailcode_context(email):
         return "mailcode"
@@ -426,8 +436,28 @@ def email_material_line(email: str, source: str | None = None) -> str:
     return str(email or "")
 
 
+# 注册成功后是否保留邮箱取件上下文。保留后查活/补跑还能继续收验证码；
+# 置 False 则沿用旧行为（成功即释放，之后无法取码）。
+_KEEP_CONTEXT_STATUSES = {"used", "success", "registered", "ok"}
+
+
+def _keep_context_on_success() -> bool:
+    try:
+        from config import email as _email_cfg
+
+        return bool(getattr(_email_cfg, "EMAIL_KEEP_CONTEXT_ON_SUCCESS", True))
+    except Exception:
+        return True
+
+
 def release_email(email: str, status: str = "available", note: str | None = None) -> str:
     """按邮箱实际来源回收状态，返回来源名。"""
+    if str(status or "").strip().lower() in _KEEP_CONTEXT_STATUSES and _keep_context_on_success():
+        source = resolve_email_source(email)
+        logger.info(
+            "[邮箱来源] 注册成功保留取件上下文（不释放）：%s source=%s", email, source
+        )
+        return source
     source = resolve_email_source(email)
     if source == "gptmail":
         from core.gptmail_client import release_account
