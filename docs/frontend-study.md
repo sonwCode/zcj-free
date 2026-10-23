@@ -61,3 +61,59 @@ if (document.visibilityState === 'hidden') return;
 
 原则：**不引入构建链**（部署是单机 systemd + scp，引 Node 构建会显著复杂化），
 而是用"外链文件 + 小型模块约定"达到同等可维护性。
+## 第 2 轮：分页逻辑合流（真删重复代码）
+
+### 2.1 发现
+
+`renderSmsPoolEligible` 与 `renderSmsPoolEvents` 各自写了一遍同样的算术：
+
+```js
+const pages = Math.max(1, Math.ceil(list.length / size));
+page = Math.min(page, pages);
+const start = (page - 1) * size;
+const items = list.slice(start, start + size);
+```
+
+事件列表还多一份"夹住页码 + 计算汇总区间"的变体。
+
+### 2.2 落地
+
+新增通用分页器（放在工具函数区）：
+
+```js
+function paginate(list, page, size) {
+  const items = Array.isArray(list) ? list : [];
+  const per = Math.max(1, Math.floor(Number(size) || 20));
+  const pages = Math.max(1, Math.ceil(items.length / per));
+  const current = Math.min(Math.max(1, Math.floor(Number(page) || 1)), pages);
+  const start = (current - 1) * per;
+  return { items: items.slice(start, start + per), page: current, pages, per, start,
+           end: Math.min(start + per, items.length), total: items.length };
+}
+```
+
+两处调用点改为：
+
+```js
+const pg = paginate(list, smsPoolState.page, smsPoolState.pageSize);
+smsPoolState.page = pg.page;
+const pages = pg.pages, start = pg.start, items = pg.items;
+```
+
+事件列表同理（替换了 308 字符的重复算术）。
+
+### 2.3 验证
+
+```
+提取 3 个 <script> 块（总长 240051 字节）→ node --check：SYNTAX_OK
+paginate 定义 True；调用点 2 处
+服务重启后 active；/ 返回 302（正常跳登录）
+```
+
+### 2.4 为什么先做这个
+
+账号表（`renderAccounts`，含勾选/徽章/Token 单元格）高度定制，
+整体合流风险大；先合流结构简单、重复度高的两处，建立模式后再迁移大表。
+
+下一轮：把 `renderAccounts` 的行渲染拆成"列定义 + 行模板"，
+让账号表与 sms-pool 表共用同一套列渲染契约。

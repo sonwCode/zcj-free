@@ -630,8 +630,70 @@ auth.openai.com 会话**，于是新增 `session_cookie.capture_all(session)`：
 
 ---
 
-## 13. 其余项目
+## 14. HengXin666/gpt-web-cf-make 与出口纯净度
 
-（后续轮次补齐：HengXin666、starmiaoa、xiaoguzuiniu、pixian5、fuckoai、
-88cjohn、OpenBrowser、upstream-ratio-watch、taiguanren、MAACodex、
-GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+规模：73 个 py、1.3 万行。核心是 `py/proxy_pool/`（代理池服务）+
+`py/services/proxy_usage_service.py`（用量统计）+ `py/cgpt/turnstile.py`。
+
+### 14.1 它的代理池设计
+
+```
+ProxyPoolService
+  _start_auto_refresh / _auto_refresh_loop   订阅式自动刷新节点
+  import_subscription / sync_subscription    从订阅链接导入节点
+  test_node / test_nodes_batch               单点/批量探活
+  test_node_purity                           严格纯净度检测（流式 NDJSON）
+```
+
+### 14.2 纯净度评分模型（本轮核心借鉴）
+
+它的 `_score()` 权重：
+
+| 扣分项 | 分值 |
+|---|---|
+| IP 为数据中心（hosting） | -20 |
+| IP 被标记为代理（proxy） | -15 |
+| TLS 指纹异常 | -15 |
+| IPv6 泄露 | -5 |
+| DNS 泄露 | -10 |
+| 每个 AI 端点不可达 | -10 |
+
+数据源：`ip-api.com`（hosting/mobile/proxy/as/org）、`api64.ipify.org`（IPv6）、
+`api.ipify.org`（IPv4）、以及 TLS 检测源（peet.ws / ja3er / httpbin）。
+
+**关键洞察**：这与我们的 `proxy_edge_probe` 是**两个不同的轴**——
+edge 判"通不通"，purity 判"脏不脏"。一个机房出口今天可能全部返回 200，
+明天账号就被批量封，因为 `hosting=True` 本身就是最强的风控信号。
+
+### 14.3 已落地：core/exit_purity.py
+
+- `ip_profile(proxy)`：查 ip-api（hosting / proxy / mobile / as / country）
+- `ipv6_leak(proxy)`：比对 IPv4 与 IPv6 出口是否一致
+- `score(profile, leak)`：按上表权重打分 → score + grade(A/B/C/D) + 扣分明细
+- `check_exit(proxy)`：完整检测
+
+测试 `tests/test_exit_purity.py` **6 项全部 PASS**
+（住宅满分 / 机房 -20 / 代理标记 -15 / IPv6 泄漏 -5 / 查询失败归零 / 叠加）。
+
+### 14.4 实测出的重要负结果
+
+对池里前三条出口实测：
+
+```
+score=100 grade=A hosting=False flagged=False as=AS12208 TruVista Commu
+score=100 grade=A hosting=False flagged=False as=AS7922  Comcast Cable
+score=100 grade=A hosting=False flagged=False as=AS11612 Ready Telecom
+```
+
+**三条全是住宅 ISP、无代理标记、评分满分。**
+
+结论：我们的账号死亡**不是 IP 脏导致的**，可以排除"机房 IP"这条假设。
+这与前面几轮的结论一致——问题在行为序列（`so` 行为数据）与 token 信任度，
+而不在出口声誉。
+
+---
+
+## 15. 其余项目
+
+（后续轮次补齐：starmiaoa、xiaoguzuiniu、pixian5、fuckoai、88cjohn、OpenBrowser、
+upstream-ratio-watch、taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
