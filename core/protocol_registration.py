@@ -53,6 +53,39 @@ def _protocol_extra(password: str, info: dict, email_source: str | None) -> dict
     return extra
 
 
+_RECENT_EXITS: list[str] = []
+_RECENT_EXITS_LOCK = __import__("threading").Lock()
+
+
+def _pick_fresh_exit(exclude: set[str] | None = None) -> str | None:
+    """挑一个最近没用过的出口，避免同一 IP 连续建号。"""
+    try:
+        from config import register as _rc
+        from config.proxy import pick_proxy_excluding
+
+        if not bool(getattr(_rc, "PROTOCOL_ROTATE_EXIT", True)):
+            return None
+        with _RECENT_EXITS_LOCK:
+            recent = list(_RECENT_EXITS)
+            keep = int(getattr(_rc, "PROTOCOL_RECENT_EXIT_MEMORY", 6) or 6)
+            recent = recent[-keep:]
+        banned = set(recent) | set(exclude or set())
+        picked = pick_proxy_excluding(banned)
+        return str(picked or "").strip() or None
+    except Exception:
+        return None
+
+
+def _remember_exit(proxy: str | None) -> None:
+    value = str(proxy or "").strip()
+    if not value:
+        return
+    with _RECENT_EXITS_LOCK:
+        _RECENT_EXITS.append(value)
+        if len(_RECENT_EXITS) > 24:
+            del _RECENT_EXITS[:-24]
+
+
 def run_protocol_registration(
     email: str,
     name: str,
@@ -86,7 +119,11 @@ def run_protocol_registration(
         "note": "协议注册不加载任何静态资源，仅接口请求",
     }
     try:
+        # 一号一出口：未显式指定代理时，优先挑最近没用过的出口。
+        if proxy is None:
+            proxy = _pick_fresh_exit()
         session = BrowserSession(proxy=proxy)
+        _remember_exit(getattr(session, "proxy", "") or proxy)
         oa.network_preflight(session)
         _log_phase("预检", True)
 

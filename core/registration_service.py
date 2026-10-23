@@ -266,6 +266,55 @@ def _normalize_workers(max_workers: int | None) -> int:
     return max(_MIN_MAX_WORKERS, min(_MAX_MAX_WORKERS, value))
 
 
+# ---- 协议注册串行闸门 ----------------------------------------------
+# 参考"慢速串行 + 分散出口"：同一时刻只允许一个协议注册在跑，
+# 并且与上一次结束时间保持最小间隔，避免同一出口短时间内批量建号。
+_PROTOCOL_GATE = threading.Lock()
+_PROTOCOL_LAST_FINISH = 0.0
+
+
+def _protocol_serial_enabled() -> bool:
+    try:
+        from config import register as _rc
+        from config import roxybrowser as _rb
+
+        driver = str(getattr(_rb, "REGISTRATION_DRIVER", "") or "").strip().lower()
+        if driver not in ("protocol", "api", "http"):
+            return False
+        return bool(getattr(_rc, "PROTOCOL_SERIAL_MODE", True))
+    except Exception:
+        return False
+
+
+def _protocol_gate_enter(logger) -> None:
+    global _PROTOCOL_LAST_FINISH
+    if not _protocol_serial_enabled():
+        return
+    _PROTOCOL_GATE.acquire()
+    try:
+        from config import register as _rc
+
+        interval = int(getattr(_rc, "PROTOCOL_SERIAL_MIN_INTERVAL_SECONDS", 90) or 0)
+        if _PROTOCOL_LAST_FINISH and interval > 0:
+            wait_s = interval - (time.time() - _PROTOCOL_LAST_FINISH)
+            if wait_s > 0:
+                logger.info("[串行] 距上次协议注册结束 %.0fs，再等 %.0fs", time.time() - _PROTOCOL_LAST_FINISH, wait_s)
+                time.sleep(wait_s)
+    except Exception:
+        pass
+
+
+def _protocol_gate_leave() -> None:
+    global _PROTOCOL_LAST_FINISH
+    if not _PROTOCOL_GATE.locked():
+        return
+    _PROTOCOL_LAST_FINISH = time.time()
+    try:
+        _PROTOCOL_GATE.release()
+    except RuntimeError:
+        pass
+
+
 def get_executor(max_workers: int | None = None) -> ThreadPoolExecutor:
     """返回注册线程池。
 
@@ -436,13 +485,17 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             with email_provider.email_source_context(
                 current.get("email_source") if force_email_pool else None
             ):
-                result = run_registration(
-                    email=email,
-                    name=name,
-                    birthday=birthday,
-                    on_email_acquired=_on_email_acquired,
-                    exclude_emails=excluded_emails,
-                )
+                _protocol_gate_enter(log_logger)
+                try:
+                    result = run_registration(
+                        email=email,
+                        name=name,
+                        birthday=birthday,
+                        on_email_acquired=_on_email_acquired,
+                        exclude_emails=excluded_emails,
+                    )
+                finally:
+                    _protocol_gate_leave()
             result_dict = result if isinstance(result, dict) else {}
             result_email = str(result_dict.get("email") or email or "").strip() or None
             result_account_id = result_dict.get("account_id")

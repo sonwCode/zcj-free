@@ -1,11 +1,12 @@
 ab7a7977  core/account_liveness.py
 c51cb06c  core/live_check_service.py
-8668b476  core/protocol_registration.py
+53d680bb  core/protocol_registration.py
+0eb11c71  core/registration_service.py
 2be65838  core/account_warmup.py
 382a2827  core/email_provider.py
 95981bb0  core/twofa_service.py
 a88c4e20  config/email.py
-bb6c5f79  config/register.py
+5b30d709  config/register.py
 ff174d33  config/codex.py
 83d85c60  config/sms_pool.py
 002f8067  core/codex_oauth.py

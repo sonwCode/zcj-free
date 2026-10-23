@@ -42,3 +42,12 @@ apply_env_overrides(globals(), {
 # 协议注册成功后是否做一次"暖号"（完整 bootstrap + 会话初始化），
 # 让账号留下真实使用痕迹，降低被清理概率。
 PROTOCOL_WARMUP_AFTER_REGISTER: bool = True
+
+# 协议注册慢速串行：同一时刻只跑一个协议注册，并与上一次保持最小间隔。
+# 目的是避免同一出口/同一分钟内批量建号被关联。
+PROTOCOL_SERIAL_MODE: bool = True
+PROTOCOL_SERIAL_MIN_INTERVAL_SECONDS: int = 90
+
+# 每个账号尽量使用不同的代理出口，并记住最近用过的几个。
+PROTOCOL_ROTATE_EXIT: bool = True
+PROTOCOL_RECENT_EXIT_MEMORY: int = 6
