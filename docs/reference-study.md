@@ -2745,3 +2745,54 @@ dango 声称"三处统一导航头后 409 = 0"。我们把它做成开关后实�
 
 **判定**：在当前邮箱枯竭的情况下，这 13 个号不值得投入；
 优先补邮箱、保证新号能连续产出。
+
+## 61. 前端验收与一个被忽略的事实（第 38 轮）
+
+### 61.1 静态验收：模板变量与 setup 返回是否对齐
+
+用脚本把 `ui2.html` 模板里引用的变量（`{{ }}`、`v-model`、`:data`、`@click` 等）
+与 `setup()` 返回的键逐一比对：
+
+```
+模板引用变量: 85 | 未在 return 中: 3
+缺失: ['Object', 'm', 'row']
+```
+
+三条都是误报：`Object` 来自 `Object.keys(...)`、`m` 是 `v-for` 的局部变量、
+`row` 是插槽作用域。**85 个引用全部有来源，不会出现 undefined。**
+
+### 61.2 靠截图验证行不通（记录教训）
+
+我试图把 Element Plus 内联进 HTML 做离线截图，结果两张图都只有 7KB——
+因为压缩后的 Element Plus 里含有 `</script>` 序列，内联后浏览器提前闭合脚本，
+页面直接空白。
+
+**结论**：对这种大依赖的页面，离线内联截图不可靠；
+验证要么用 `node probe` 执行 setup，要么让用户在真实浏览器里看。
+之前第 16 轮那张"界面空白"的截图，很可能也是同一个内联问题造成的假象
+（不过当时确实是 `ReferenceError` 导致的真空白，两者要分开看）。
+
+### 61.3 一个重要发现：上游本来就有 legacy/modern 两套界面
+
+读 `webui/app.py` 时发现已有机制：
+
+```python
+@app.get("/legacy")
+def ui_legacy():
+    ui_mode = request.args.get("ui") or request.cookies.get("ui_mode") or "modern"
+    template_name = "index_legacy.html" if ui_mode == "legacy" else "index.html"
+```
+
+模板目录实际有三套：
+
+| 模板 | 行数 | 说明 |
+|---|---:|---|
+| `index.html` | 672 | 当前 `/` 用的界面（JS/CSS 已外置） |
+| `index_legacy.html` | 3962 | **用户说的"8000 行单文件"就是它**（配 app.js 5063 行） |
+| `ui2.html` | 894 | 我这轮做的 Element Plus 版本 |
+
+也就是说：**"丑"的是 `index.html`，而"单文件 8000 行"指的是 `index_legacy.html`**，
+两者不是同一个东西——我之前把它们混为一谈，才导致"换掉旧界面"时方向模糊。
+
+后续如果要把 `ui2` 变成默认，最小改动是把 `ui_legacy` 里的
+`modern → ui2.html`，从而 `/?ui=modern` 就切到新版，且 `?ui=legacy` 仍可回退。
