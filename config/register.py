@@ -87,8 +87,11 @@ CF_CLEARANCE_TRY_CLICK: bool = True
 PROTOCOL_CHECKPOINT_ENABLED: bool = True
 
 # 服务重启后，把被取消的排队作业自动补偿一批（恢复吞吐）
-AUTO_REQUEUE_ON_RESTART: bool = True
+AUTO_REQUEUE_ON_RESTART: bool = False
 AUTO_REQUEUE_LIMIT: int = 10
 
 # 注册必须走密码：没设上密码就判失败（无密码号查活/2FA 都更难）
 REGISTRATION_REQUIRE_PASSWORD: bool = True
+
+# 注册总开关：关闭后重启补偿等自动提交全部停止（只影响自动，不影响手动提交）
+REGISTRATION_AUTO_SUBMIT: bool = True

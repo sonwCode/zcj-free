@@ -379,8 +379,10 @@ def requeue_restart_cancelled(limit: int = 10, dry_run: bool = False) -> dict:
     try:
         from config import register as _rc
 
-        if not bool(getattr(_rc, 'AUTO_REQUEUE_ON_RESTART', True)):
+        if not bool(getattr(_rc, 'AUTO_REQUEUE_ON_RESTART', False)):
             return {'ok': False, 'reason': 'disabled'}
+        if not bool(getattr(_rc, 'REGISTRATION_AUTO_SUBMIT', True)):
+            return {'ok': False, 'reason': 'auto_submit_disabled'}
         cap = int(getattr(_rc, 'AUTO_REQUEUE_LIMIT', 10) or 10)
     except Exception:
         cap = 10
@@ -848,6 +850,15 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
 # ============================================================
 
 def submit_registration(count: int = 1, email_source: str | None = None, workers: int | None = None) -> list[dict]:
+    # 注册总开关：暂停后不再接受新任务（UI 可切，落盘生效）
+    try:
+        from core import registration_switch as _sw
+
+        if _sw.is_paused():
+            logger.warning("[Service] 注册已暂停，拒绝提交 %s 个任务", count)
+            return []
+    except Exception:
+        pass
     """
     创建 N 个注册任务并提交到线程池。
     email_source 为支持的单一来源时，任务按此来源领取；自动模式保留配置顺序。

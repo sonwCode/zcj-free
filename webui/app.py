@@ -1318,6 +1318,29 @@ def create_app(auth_code: str | None = None) -> Flask:
         """新版界面（Vue 3 + Element Plus，与旧版并存）。"""
         return render_template("ui2.html")
 
+    @app.get("/api/registration/switch")
+    def api_registration_switch_get():
+        from core import registration_switch as sw
+
+        return jsonify({"ok": True, **sw.status()})
+
+    @app.post("/api/registration/switch")
+    def api_registration_switch_set():
+        """注册总开关：body {paused: bool} / {auto_submit: bool}。"""
+        from core import registration_switch as sw
+
+        data = request.get_json(silent=True) or {}
+        paused = data.get("paused")
+        auto_submit = data.get("auto_submit")
+        if paused is None and auto_submit is None:
+            return jsonify({"ok": False, "error": "需要 paused 或 auto_submit"}), 400
+        state = sw.set_state(
+            paused=None if paused is None else bool(paused),
+            auto_submit=None if auto_submit is None else bool(auto_submit),
+            reason=str(data.get("reason") or "ui"),
+        )
+        return jsonify({"ok": True, **state})
+
     @app.get("/api/funnel")
     def api_funnel():
         """注册漏斗：按状态与 Codex 细分统计。"""

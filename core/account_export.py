@@ -823,7 +823,24 @@ def setup_2fa(
         # 部分取码接口会短暂返回缓存中的上一封邮件。若服务端拒绝验证码，
         # 重新轮询一次并提交最新候选，避免第一次旧码直接终止整个 2FA 流程。
         status_code = getattr(getattr(first_exc, "response", None), "status_code", None)
-        if status_code != 401 or not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", False)):
+        # 409（error.code=invalid_state）：授权状态已失效。
+        # 实测：有密码的号 2FA 失败 21 次里 16 次是它，且重试同一个 OTP 无用——
+        # 必须重新发起重认证（新 state）+ 取新 OTP 再提交。
+        if status_code == 409:
+            logger.warning("[2FA] OTP validate 409（invalid_state），重新发起重认证后重试一次")
+            used_otp_codes.add(str(otp_code).strip())
+            _auth_url_retry = _trigger_reauth_with_retry(session, email, stage="state_refresh")
+            _follow_reauth(session, _auth_url_retry)
+            from core.email_provider import wait_for_otp as _wait_otp_409
+
+            _settle = max(8, int(getattr(_email_cfg, "OTP_SETTLE_SECONDS", 5) or 5))
+            _fresh_409 = _wait_otp_409(
+                email, after_ts=reauth_otp_after_ts,
+                settle_seconds=_settle, exclude_codes=used_otp_codes,
+            )
+            used_otp_codes.add(str(_fresh_409).strip())
+            continue_url = _validate_reauth_otp(session, _fresh_409)
+        elif status_code != 401 or not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", False)):
             raise
         logger.warning("[2FA] 首次 OTP 被拒绝，重新获取最新验证码后再试一次")
         from core.email_provider import wait_for_otp

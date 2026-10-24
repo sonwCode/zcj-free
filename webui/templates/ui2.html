@@ -50,6 +50,10 @@
       <header class="topbar">
         <h2>{{ title }}</h2>
         <span class="right"></span>
+        <span class="muted" style="font-size:12px;">注册</span>
+        <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'"
+                   inline-prompt style="--el-switch-on-color:#13ce66;margin-right:12px"
+                   @change="toggleRegistration" />
         <el-button size="small" @click="reload">刷新</el-button>
         <el-button size="small" text tag="a" href="/">返回旧版</el-button>
       </header>
@@ -240,8 +244,26 @@ createApp({
     };
     const fmt = (v) => String(v || '').replace('T',' ').slice(0,19) || '-';
 
-    onMounted(() => { load(); loadFunnel(); });
+    const regRunning = ref(true);
+    async function loadSwitch() {
+      try {
+        const s = await api('/api/registration/switch');
+        regRunning.value = !(s && s.paused);
+      } catch (e) { /* 忽略 */ }
+    }
+    async function toggleRegistration(val) {
+      try {
+        await post('/api/registration/switch', {paused: !val, reason: 'ui'});
+        ElMessage.success(val ? '注册已恢复' : '注册已暂停');
+      } catch (e) {
+        ElMessage.error('切换失败：' + e.message);
+        regRunning.value = !val;
+      }
+    }
+
+    onMounted(() => { loadSwitch(); load(); loadFunnel(); });
     return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+             regRunning, toggleRegistration,
              sms, smsEligible, smsReservations, loadSms, smsToggle,
              load, reload, onPage, onSize, switchTab, bulk, backfillCodex, tagType, fmt };
   }

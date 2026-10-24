@@ -60,9 +60,24 @@ def _phase_pause() -> None:
     _time.sleep(_random.uniform(lo, max(lo, hi)))
 
 
+def _ckpt(email: str, **stages) -> None:
+    """写入注册断点；失败不影响主流程。"""
+    try:
+        from config import register as _rc
+
+        if not bool(getattr(_rc, 'PROTOCOL_CHECKPOINT_ENABLED', True)):
+            return
+        from core.registration_checkpoint import update as _ckpt_update
+
+        _ckpt_update(email, **stages)
+    except Exception:
+        pass
+
+
 def _protocol_extra(password: str, info: dict, email_source: str | None,
                     mailbox_probe: dict | None = None,
-                    sentinel_provenance: dict | None = None) -> dict:
+                    sentinel_provenance: dict | None = None,
+                    session_cookies: dict | None = None) -> dict:
     """账号 extra：保留注册密码、驱动标记，并把 Remail 订单上下文一并落库。
 
     落库后即使进程重启、本地取件缓存丢失，查活/补跑仍可用
@@ -72,6 +87,7 @@ def _protocol_extra(password: str, info: dict, email_source: str | None,
         "registration_password": password,
         "mailbox_probe": mailbox_probe or {},
         "sentinel": sentinel_provenance or {},
+        "session_cookies": session_cookies or {},
         "create_recovered": bool((info or {}).get("__recovered__")),
         "registration_driver": "protocol",
         "session": info,
@@ -277,6 +293,7 @@ def run_protocol_registration(
         otp_header, otp_so = oa.build_sentinel_header(session, otp_sentinel, "email_otp_validate")
         oa.validate_email_otp(session, code, otp_header, otp_so)
         _log_phase("校验邮箱码", True)
+        _ckpt(email, otp_validated=True)
 
         oa.navigate_about_you(session)
 
@@ -293,6 +310,7 @@ def run_protocol_registration(
             try:
                 created = oa.create_account(session, name, birthday, about_header, about_so)
                 _log_phase("创建账号", True, str(created)[:80])
+                _ckpt(email, account_created=True)
                 break
             except Exception as exc:
                 last_exc = exc
@@ -349,6 +367,16 @@ def run_protocol_registration(
         if not access_token:
             raise RuntimeError("create_account 成功但未取到 accessToken")
 
+        _session_cookies: dict = {}
+        try:
+            from core.session_cookie import capture_from_session as _cap
+
+            _session_cookies = _cap(session) or {}
+            if _session_cookies:
+                _log_phase('抓取会话cookie', True, '%d 个' % len(_session_cookies))
+        except Exception as _sc_exc:
+            logger.debug('[协议注册] 会话 cookie 抓取跳过：%s', str(_sc_exc)[:100])
+        _ckpt(email, access_token=access_token)
         account_id = db.insert_account(
             email=email,
             access_token=access_token,
@@ -358,7 +386,7 @@ def run_protocol_registration(
             email_source=_email_source,
             device_id=str(getattr(session, "device_id", "") or ""),
             proxy_used=str(getattr(session, "proxy", "") or ""),
-            extra=_protocol_extra(password, info, _email_source, _mailbox_probe, _sentinel_prov),
+            extra=_protocol_extra(password, info, _email_source, _mailbox_probe, _sentinel_prov, _session_cookies),
             codex_status="skipped",
         )
         _log_phase("落库", True, "account_id=%s" % account_id)
@@ -370,12 +398,15 @@ def run_protocol_registration(
             if bool(getattr(_twofa_cfg, "ENABLE_2FA", False)):
                 from core.twofa_service import enqueue_account_totp_setup
 
+                # 用户要求：注册完必须**马上**开 2FA，不能排队等。
+                # inline=True 让 2FA 在当前流程内同步完成，失败即失败，不拖到后面。
                 queued = enqueue_account_totp_setup(
                     account_id=int(account_id),
                     email=email,
                     access_token=access_token,
                     trigger="registration_auto",
                     proxy=str(getattr(session, "proxy", "") or "") or None,
+                    inline=True,   # 注册完立刻开 2FA，不排队
                 )
                 _log_phase("2FA 入队", bool(queued.get("accepted") or queued.get("busy")),
                            str(queued.get("error") or queued.get("status") or "")[:80])
@@ -457,10 +488,18 @@ def run_protocol_registration(
             "registration_password": password,
             "network_traffic": traffic,
             "error": None,
+            "outcome": "success",
         }
     except Exception as exc:
         logger.warning("[协议注册] 失败：%s: %s", type(exc).__name__, str(exc)[:300])
         traffic["duration_seconds"] = round(time.time() - started_at, 1)
+        _outcome = 'unknown'
+        try:
+            from core.failure_registry import classify_error
+
+            _outcome = classify_error('%s: %s' % (type(exc).__name__, str(exc)))
+        except Exception:
+            pass
         return {
             "success": False,
             "task_status": "failed",
@@ -468,6 +507,7 @@ def run_protocol_registration(
             "email": email,
             "network_traffic": traffic,
             "error": "%s: %s" % (type(exc).__name__, str(exc)[:300]),
+            "outcome": _outcome,
         }
     finally:
         if session is not None:
