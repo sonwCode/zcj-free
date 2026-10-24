@@ -2213,3 +2213,72 @@ a **fresh Sentinel proof each round**) on `registration_disallowed`"
 移植判定：0 个直接移植，3 个已具备，1 个待 A/B。
 但这个项目的"实验设计"思路值得抄（写进下一轮计划）。
 ```
+
+## 50. sheying2013/OpenBrowser：指纹浏览器（不移植）（第 22 轮）
+
+15.9 万行里绝大部分不是 Python——这是个 **Rust 桌面指纹浏览器**
+（`crates/openbrowser-core` Rust 8.2k 行 + Browserapp 前端），Python 只有构建脚本。
+
+### 50.1 它的核心：TLS 指纹
+
+```
+crates/openbrowser-core/src/tls/
+  client_hello.rs   13KB   ← 构造/解析 ClientHello
+  fingerprint.rs     6KB   ← compute_ja3 / JA4（含 GREASE 处理）
+  h2.rs                    ← HTTP/2 指纹
+```
+
+`fingerprint.rs` 里有 `Ja3Fingerprint{raw,hash}`、`Ja4Fingerprint{raw,formatted}`，
+并用 `is_grease()` 过滤 GREASE 值后再算哈希。
+
+### 50.2 判定：不移植
+
+我们服务端用的是 `curl_cffi` 的 `impersonate="chrome"`，
+它已经在库层面复刻了同样的 ClientHello/HTTP2 特征。
+自建 TLS 栈（Rust + 编译进生产）成本极高、收益为零。
+
+**唯一借鉴点**：它把"指纹要一致"落到具体字段（cipher/ext/curve 列表），
+我们换代理时应当同步换会话（第 47 节 sky3100 的 `rotate_session_for_new_ip` 同理）。
+
+---
+
+## 51. ZRainbow1275/AutoTeam-F：Team 轮转 + OTP 拒绝记录（第 22 轮）
+
+完全没读过的大项目（`manager.py` 340KB、`codex_auth.py` 180KB、Vue 前端）。
+
+### 51.1 它做什么
+
+面向 **ChatGPT Team** 的账号轮转 / 免费号生产 / 认证同步
+（基于 cnitlrt/AutoTeam 的 fork）。核心概念：
+team seats 夹取（`_clamp_team_target_seats`）、域名自动加入
+（`_configured_mail_domains` / `_auto_join_domain_allowlist`）、
+邀请回退、rate limit 原文提取（`_extract_raw_rate_limit_str`）。
+
+我们不做 Team，这块业务不移植。
+
+### 51.2 已移植：`core/otp_rejection_store.py`
+
+```python
+def _otp_rejection_hash(email, code):
+    return sha256(f"{email.lower()}:{code.strip()}").hexdigest()
+def _load_recent_otp_rejections(email, now=None):   # TTL 过滤，返回 code_hash/email_id 集合
+```
+
+它把"被服务端拒过的验证码"**持久化**（只存哈希，带 TTL）。
+
+我们的问题：`exclude_otp_codes` 只在单次流程的内存里生效；
+**跨任务再跑时会把同一个被拒的验证码又提交一次**，白吃一轮 401/409。
+
+我们实现：
+- `note_rejection(email, code)` / `is_rejected` / `recent_digests` /
+  `filter_candidates` / `clear`；
+- 落 `data/otp_rejections.json`（0600），**只存 sha256 前 32 位，不存明文**；
+- TTL 6 小时，每邮箱最多保留 20 条。
+
+测试 `tests/test_otp_rejection_store.py` **6/6 PASS**，
+其中 `test_no_plaintext_on_disk` 专门断言磁盘上不出现明文验证码。
+
+```
+移植判定：OpenBrowser 0 项（自建 TLS 无收益）；
+AutoTeam-F 业务不移植，只取其 OTP 拒绝记录（已落地）。
+```
