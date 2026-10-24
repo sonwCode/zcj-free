@@ -77,6 +77,14 @@ FAILURE_CLASSES: tuple[FailureClass, ...] = (
         batch_dropped=True,
     ),
     FailureClass(
+        'password_required',
+        ('password_required', 'password required', '需要密码', '未保存密码',
+         'no_registration_password', 'passwordless_account'),
+        # 号需要密码但我们没存：既不是号废，也不是代码 bug。
+        # 补上密码后还能用，所以保留下批（对应 starmiaoa 的 PasswordRequiredError）。
+        retain_for_future_batch=True,
+    ),
+    FailureClass(
         'phone_required',
         ('手机号验证重试', '手机验证重试', 'phone number required',
          'add-phone', 'phone_verification_required', 'whatsapp_channel_reverted',
