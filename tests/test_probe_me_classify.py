@@ -16,10 +16,32 @@ class _Resp:
         self.text = text
 
 
+_ORIGINAL_REQUESTS = sys.modules.get('requests')
+
+
+_REAL_REQUESTS = None
+try:
+    import requests as _REAL_REQUESTS  # noqa: F401
+except Exception:
+    _REAL_REQUESTS = None
+
+
 def _patch(code, text):
+    """安装假 requests：保留真实模块的属性，只替换 get。
+
+    直接塞一个空 ModuleType 会污染 sys.modules，
+    导致后续测试模块 import requests 时 AttributeError。
+    """
     mod = types.ModuleType('requests')
+    if _REAL_REQUESTS is not None:
+        mod.__dict__.update({k: v for k, v in _REAL_REQUESTS.__dict__.items()
+                             if not k.startswith('__')})
     mod.get = lambda *a, **k: _Resp(code, text)
     sys.modules['requests'] = mod
+
+
+def pytest_sessionfinish_hook():
+    pass
 
 
 def test_alive_on_200():

@@ -70,3 +70,53 @@ def test_potential_abuse_counts_as_ban():
 
 def test_unknown_body():
     assert classify_token_failure(500, 'oops')['kind'] == 'unknown'
+
+
+def test_probe_me_sends_browser_headers():
+    """/me 探活必须带 Origin/Referer/账号 id/设备 id（dango：缺这些是典型非浏览器特征）。"""
+    import types
+    from core import account_inspection as ai
+
+    captured = {}
+
+    class _R:
+        status_code = 200
+        text = '{}'
+
+    def _get(url, headers=None, **kw):
+        captured.update(headers or {})
+        return _R()
+
+    mod = types.ModuleType('requests')
+    try:
+        import requests as _real
+        mod.__dict__.update({k: v for k, v in _real.__dict__.items() if not k.startswith('__')})
+    except Exception:
+        pass
+    mod.get = _get
+    saved = sys.modules.get('requests')
+    sys.modules['requests'] = mod
+    try:
+        tok = _jwt({'chatgpt_account_id': 'acc-7'})
+        kind, _ = ai._probe_me(tok, None, device_id='dev-9')
+    finally:
+        # 必须还原：否则后续测试模块 import requests 会拿到这个残缺假模块
+        if saved is not None:
+            sys.modules['requests'] = saved
+        else:
+            sys.modules.pop('requests', None)
+    assert kind == 'alive'
+    assert captured.get('Origin') == 'https://chatgpt.com'
+    assert captured.get('Referer') == 'https://chatgpt.com/'
+    assert captured.get('ChatGPT-Account-ID') == 'acc-7'
+    assert captured.get('OAI-Device-Id') == 'dev-9'
+    assert 'sec-ch-ua' in captured
+
+
+def test_device_id_is_stable_per_email():
+    from core.account_inspection import _device_id_for
+
+    a = _device_id_for('user@example.com')
+    b = _device_id_for('USER@example.com')
+    c = _device_id_for('other@example.com')
+    assert a == b and a != c

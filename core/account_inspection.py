@@ -127,13 +127,30 @@ def inspect_local(*, account_ids: list[int] | None = None, skew: int = DEFAULT_S
 ME_URL = 'https://chatgpt.com/backend-api/me'
 
 
-def _probe_me(token: str, proxy: str | None, timeout: float = 20.0) -> tuple[str, str]:
+def _device_id_for(email: str) -> str:
+    """按邮箱派生稳定设备 id（同一账号每次一致，避免每次换 id 反成异常特征）。"""
+    import uuid
+
+    key = str(email or '').strip().lower() or 'anonymous'
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'chatgpt-device:' + key))
+
+
+def _probe_me(token: str, proxy: str | None, timeout: float = 20.0,
+              device_id: str | None = None) -> tuple[str, str]:
     """单次 /me 探测：返回 (结论, 细节)。结论 ∈ alive/revoked/unknown。"""
     import requests
 
-    headers = {'Authorization': 'Bearer ' + str(token or ''), 'Accept': 'application/json',
-               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                             '(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'}
+    # 请求头走统一生成器：补 Origin / Referer / ChatGPT-Account-ID / OAI-Device-Id。
+    # dango 实测：带 Authorization 却不带 Origin/Referer 是典型非浏览器特征。
+    try:
+        from core.auth_headers import account_api_headers
+
+        headers = account_api_headers(token, device_id=str(device_id or ''))
+    except Exception:
+        headers = {'Authorization': 'Bearer ' + str(token or ''), 'Accept': 'application/json'}
+    headers.setdefault('User-Agent',
+                       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                       '(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36')
     proxies = {'http': proxy, 'https': proxy} if proxy else None
     try:
         # /me 是幂等 GET：TLS/连接类瞬时错误值得重试一次，
@@ -201,7 +218,7 @@ def inspect_network(*, account_ids: list[int] | None = None, workers: int = 4,
     def _work(item):
         acc_id, email, token = item
         proxy = pick_proxy_excluding() if PROXY_POOL else None
-        verdict, detail = _probe_me(token, proxy, timeout=timeout)
+        verdict, detail = _probe_me(token, proxy, timeout=timeout, device_id=_device_id_for(email))
         return acc_id, email, verdict, detail
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers or 1))) as pool:
