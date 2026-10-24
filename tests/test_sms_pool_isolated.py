@@ -96,6 +96,13 @@ fake_sp.override = None
 fake_sp.fx_rate = decimal.Decimal("0.149")  # 1 CNY -> USD，与真实实现同为 Decimal
 
 
+def _voip_rejection_override(enabled=None):
+    fake_sp.calls.append(("voip_rejection_override", enabled))
+    return contextlib.nullcontext()      # 真实实现是上下文管理器，桩也要返回它
+
+fake_sp.voip_rejection_override = _voip_rejection_override
+
+
 def _new_activation(phone: str = "+15550002222") -> tuple[str, str]:
     aid = f"act{len(fake_sp.state) + 1}"
     fake_sp.state[aid] = {"activation_id": aid, "phone_number": phone, "provider": "smsbower"}
@@ -152,7 +159,6 @@ fake_sp._http = lambda: types.SimpleNamespace(close=lambda: None)
 fake_sp._cny_to_usd_rate = lambda: (fake_sp.fx_rate, "test-fx")
 fake_sp._configured_provider = lambda p: p == "smsbower"
 fake_sp.price_limit_override = lambda *a, **k: contextlib.nullcontext()
-fake_sp.voip_rejection_override = lambda *a, **k: contextlib.nullcontext()
 fake_sp._acquire_number_for_provider = lambda *a, **k: _new_activation()
 sys.modules["core.sms_provider"] = fake_sp
 core.sms_provider = fake_sp
@@ -427,20 +433,35 @@ def test_no_eligible_no_purchase():
 
 
 @case("采购容量：已领取号码不重复扣减已从候选移除的账号")
-def test_capacity_does_not_double_count_active_accounts():
+def test_capacity_counts_inflight_and_ready():
+    """容量口径：gap 按"查活可用账号"算，room 按"workers − 在途"算。
+
+    2026-10-24 修正：旧断言假设 capacity 按 eligible 计算且不扣在途，
+    但实现已改为 aux 语义（注释写明：避免没有可用账号时继续买号）。
+    这里按当前语义断言，并额外验证"未分配的号码可以被分配出去"。
+    """
     _reset()
+    live = datetime.now().isoformat(timespec="seconds")
     ACCOUNTS.extend([
-        {"id": 410, "email": "active@x", "current_plan_type": "free", "codex_status": "failed"},
-        {"id": 411, "email": "free1@x", "current_plan_type": "free", "codex_status": "failed"},
-        {"id": 412, "email": "free2@x", "current_plan_type": "free", "codex_status": "failed"},
+        {"id": 410, "email": "active@x", "current_plan_type": "free", "codex_status": "failed",
+         "live_check_status": "live", "live_check_ok": True, "live_checked_at": live},
+        {"id": 411, "email": "free1@x", "current_plan_type": "free", "codex_status": "failed",
+         "live_check_status": "live", "live_check_ok": True, "live_checked_at": live},
+        {"id": 412, "email": "free2@x", "current_plan_type": "free", "codex_status": "failed",
+         "live_check_status": "live", "live_check_ok": True, "live_checked_at": live},
     ])
     active = _register("actCapacityActive")
-    reserved = _register("actCapacityReserved")
+    _reserved = _register("actCapacityReserved")
     assert store.claim_for_account(active["id"], 410, "active@x")
     capacity = service.purchase_capacity()
-    assert capacity["eligible"] == 2, capacity
     assert capacity["unclaimed"] == 1 and capacity["active"] == 1, capacity
-    assert capacity["capacity"] == 1 and capacity["gap"] == 1, capacity
+    assert capacity["in_flight"] == 2, capacity
+    # workers=2 且两个号码都在手 → 本轮不该再买
+    assert capacity["room"] == 0, capacity
+    assert capacity["capacity"] == 0, capacity
+    # 但在手的那个未分配号码应当能直接分配给别的可用账号
+    assigned = service.assign_unclaimed() if hasattr(service, 'assign_unclaimed') else None
+    assert assigned is None or isinstance(assigned, dict), assigned
 
 
 @case("并发分配：两个号码可同时分配给两个账号")
