@@ -38,7 +38,8 @@ function _qualInfo(r) {
     checkHtml = '<span class="qual-text-muted">未探测</span>';
     checkTitle = '还没有做过资格检查';
   } else {
-    var when = checkedAt.replace('T', ' ').slice(0, 16);
+    // 最近检测时间必须按中国时间显示：后端存的是 UTC ISO，直接截断会显示成 08:xx。
+    var when = String(formatDateTime(checkedAt) || '').slice(0, 16);
     checkHtml = when.slice(5);
     var tips = ['最近一次资格检查结果', '时间：' + when, '套餐：' + (plan || '-')];
     tips.push('可领 Plus 试用：' + (trialEligible ? '是' : '否'));
