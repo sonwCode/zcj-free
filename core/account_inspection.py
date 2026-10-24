@@ -136,7 +136,15 @@ def _probe_me(token: str, proxy: str | None, timeout: float = 20.0) -> tuple[str
                              '(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'}
     proxies = {'http': proxy, 'https': proxy} if proxy else None
     try:
-        resp = requests.get(ME_URL, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=False)
+        # /me 是幂等 GET：TLS/连接类瞬时错误值得重试一次，
+        # 否则一次网络抖动就会把好号记成 unknown/revoked。
+        from core.transient_retry import retry_transient
+
+        resp = retry_transient(
+            lambda: requests.get(ME_URL, headers=headers, proxies=proxies,
+                                 timeout=timeout, allow_redirects=False),
+            attempts=2, base_delay=1.0, tag='/me 探活',
+        )
     except Exception as exc:
         return 'unknown', '%s: %s' % (type(exc).__name__, str(exc)[:100])
     code = int(getattr(resp, 'status_code', 0) or 0)
