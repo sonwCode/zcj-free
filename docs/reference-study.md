@@ -1802,3 +1802,73 @@ if "code=" in current_url and "state=" in current_url:
 submit_callback_url 已读；core_engine 的 CPA 库存与额度解析已读。
 未读：luckmail / plugin / agent 目录（本轮未涉及）。
 ```
+
+## 43. aBaiFreeGPT 补深读：凭据校验的三个可迁移机制（第 3 轮）
+
+上一版只写了 `registration_pulse` 与凭据副本。补读 `platforms/chatgpt/credential_checks.py`(53KB)
+后，找到三个能直接改善我们"查活误判"的机制。
+
+### 43.1 结构化封禁判定（已落地）
+
+`_explicit_ban_code` 只信**结构化证据**：
+
+```python
+# 1) JSON 里出现 banned/deactivated/suspended == True
+if normalized_key in {"banned","deactivated","suspended"} and child is True:
+    return f"account_{normalized_key}"
+# 2) 字符串恰好等于已知封禁码
+if normalized in _BAN_CODES: return normalized
+# 3) 字符串本身是 JSON → 递归
+# 4) 兜底：严格正则匹配裸码
+```
+
+对比我们：我们大量用**子串匹配**（如 `"account_deactivated" in text`），
+能抓到线索但**误判风险高**——页面文案、别的账号的错误、日志片段都可能误伤。
+
+**已落地 `core/ban_detect.py`**：`explicit_ban_code()` / `has_explicit_ban()`，
+拿不准就返回空串（宁可"未判定"也不误杀）。
+
+### 43.2 刷新失败三分法（已落地）
+
+`_is_invalid_refresh_response` 的判据：
+
+| 响应 | 含义 | 正确处置 |
+|---|---|---|
+| 403 | 凭据过期/被吊销 | **重新走协议登录**拿新 AT（不是封号） |
+| 400 + `invalid_grant`/`invalid_token` | 授权失效 | 重新授权 |
+| 400 + 描述含 refresh + invalid/expired/revoked | 同上 | 重新授权 |
+
+我们此前把刷新失败**一律当"号废了"**，会把一次性失效的号当死号删掉。
+
+**已落地 `core/refresh_taxonomy.py`**：
+`classify_refresh(status, payload, text) -> {kind: ok|relogin|renew|banned|unknown}`，
+封禁判定优先于 HTTP 码（结构化封禁最可信）。
+
+### 43.3 React Router 的 devalue 序列化（未落地，记录）
+
+`_decode_react_router_payload`：账号选择页的数据不是普通 JSON，
+而是 React Router 的 **devalue 扁平化**格式——**键和值都是顶层数组的下标**：
+
+```python
+resolved = {}                        # 下标 → 已解析对象
+def resolve(ref):
+    if not isinstance(ref, int): return ref
+    value = payload[ref]
+    for encoded_key, encoded_value in value.items():
+        key = resolve(int(encoded_key[1:]))   # 键也是下标
+```
+
+这是"不执行 JS 也能读 SPA 数据"的技巧，将来要抓 workspace/账号列表时能直接用。
+本轮不实现（我们没有这种抓取需求）。
+
+### 43.4 测试
+
+`tests/test_ban_refresh.py` **12 项全部 PASS**：
+封禁标记真/假、精确码、JSON 字符串、**自由文本不误判**、
+403→relogin、400 invalid_grant→renew、描述含 expired→renew、
+封禁优先、200→ok、500→unknown、helper 语义。
+
+```
+覆盖情况：credential_checks.py 的封禁/刷新/选择器解析已读；
+pulse 与凭据副本上一轮已读。未读：browser_register_async / har_capture / environment_profile。
+```
