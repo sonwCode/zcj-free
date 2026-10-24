@@ -95,7 +95,9 @@ def _run_plan_check(
         # 否则套餐/试用/优惠三列会一直显示查询失败。
         if not result.get("ok"):
             _err = str(result.get("error") or "").lower()
-            if ("407" in _err or "connect tunnel" in _err or "proxy" in _err) and proxy:
+            # 注意：调用方通常不传 proxy（代理由内部路由选择），
+            # 所以这里不能再要求 proxy 非空，否则 407 时兜底永不触发。
+            if "407" in _err or "connect tunnel" in _err:
                 logger.warning("[Plan] 代理失败，改直连重试一次: %s", email)
                 try:
                     _direct = check_account_plan(
