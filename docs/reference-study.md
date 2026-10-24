@@ -2796,3 +2796,68 @@ def ui_legacy():
 
 后续如果要把 `ui2` 变成默认，最小改动是把 `ui_legacy` 里的
 `modern → ui2.html`，从而 `/?ui=modern` 就切到新版，且 `?ui=legacy` 仍可回退。
+
+## 62. 整体自检报告（2026-10-24 05:2x，第 39 轮）
+
+### 62.1 通过的部分
+
+| 项目 | 结果 |
+|---|---|
+| 语法编译（core / webui / tools） | OK |
+| 全量测试 | **187/187 PASS** |
+| 界面静态绑定检查 | 85 个模板引用全部有来源 |
+| 界面脚本语法 | `node --check` JS_OK；`node probe` 执行 setup 通过 |
+| 路由 | `/`→index、`/v2`→ui_v2、`/legacy`→ui_legacy |
+| TODO/FIXME 遗留 | 0 |
+| 磁盘 | 27G/49G（55%），备份 58 份 |
+
+### 62.2 查出的问题（按严重度）
+
+**① 一次性删除 12 个账号（已发生，已修）**
+
+```
+05:13:50 [清理已废] 即将 delete 12 个账号：['vpbdb6460672@…','kevinanderson064726@…', …]
+```
+
+账号总数 49 → 37。追查结论：
+
+- 接口 `/api/accounts/cleanup-dead` **没有** `max_batch`/`force` 参数，
+  我之前给 `/v2` 按钮编的请求体是错的（`dry_run` 默认 true，所以我的按钮其实只预检）；
+- 真正执行删除的是旧界面按钮，日志里 `verify=False` = 基于库里旧状态直接删；
+- 被删的 12 个确实是 `/me` 返回 401 `invalidated` 的那批，**属已废**，但流程不该一键就删。
+
+已改为：**预检（dry_run）→ 弹窗列名单 → 二次确认 → verify=true 重新探活后再删**。
+
+**② 号码池 worker 曾是停止状态**
+
+`turb-gpt-sms-pool` 在 00:08 被正常停止（`status=0/SUCCESS`，"停机排空完成"），
+而 Web 界面仍显示"运行中"——**界面与 worker 状态脱节**。已 `systemctl start`，现为 active。
+
+**③ 号码池实际处于暂停（.env 写死）**
+
+```
+config/sms_pool.py: SMS_POOL_PAUSED = False   ← 默认值
+.env:289:          SMS_POOL_PAUSED="True"     ← 实际生效
+```
+
+worker 启动后立即打印"[号码池] 已暂停，跳过新采购"。
+**很可能是我之前 `smsToggle` 的字段 bug 造成的**：
+旧代码读 `sms.value.paused`（undefined）→ `!undefined = true` → 把池子设成暂停。
+该 bug 已修（改为读 `status.paused`），但 `.env` 里的 `True` 需要人工确认后再改回。
+
+**④ 今日 139 条 ERROR，集中在注册步骤 10 的 403**
+
+```
+[步骤10] 请求失败, 状态码: 403
+```
+
+属上游风控拒绝（非代码缺陷），但数量偏高，说明当前出口/邮箱质量一般。
+
+**⑤ 文档章节编号有缺口**
+
+57 个章节但编号缺 13 / 33 / 35 / 37（早期删占位章节留下）。不影响内容，未强制重排。
+
+### 62.3 待你决定的两件事
+
+1. **号码池是否解除暂停**：解除后会开始花钱采购号码（24h 曾花费 0.508 元、退款 42.378 元）。
+2. **是否把 `ui2` 设为 modern 界面**：只需把 `ui_legacy` 里的映射改成 `modern → ui2.html`。
