@@ -1437,10 +1437,6 @@ load(filename) / exists() / list_files() / stats()
 
 ---
 
-## 33. 其余项目
-
-（后续轮次补齐：GuJumpgate）
-
 ## 34. 落地：节点级脉冲调度器（core/registration_pulse.py）
 
 按 aBaiFreeGPT 的形态实现，并把三处为避免歧义而显式化的语义写进代码。
@@ -1517,10 +1513,6 @@ if kind in (OK, 'otp_received'):
 
 ---
 
-## 35. 其余项目
-
-（后续轮次补齐：GuJumpgate）
-
 ## 36. 凭据可"取回"：库缺失回退 + 一键导出（第 29 轮）
 
 上一轮解决了"凭据有没有本地副本"，这一轮解决"要用的时候能不能取到"。
@@ -1574,10 +1566,6 @@ python tools/codex_credential_dump.py --email a@b.c --save /tmp/auth.json
 | 凭据复制 | **本轮补齐**：下载回退 + CLI 导出 + 本地完整副本 |
 
 ---
-
-## 37. 其余项目
-
-（后续轮次补齐：GuJumpgate）
 
 ## 38. 第 30 轮收官：全量自检与收尾加固
 
@@ -1641,3 +1629,49 @@ logger.warning("[清理已废] 即将 %s %d 个账号：%s", mode, len(ids),
 关键产出：出口边缘/纯净度探测、失败分类体系、批次脉冲与节点级调度器、
 CF 挑战自愈、重启补偿入队、注册断点恢复、号码去重、凭据本地副本与回退、
 漏斗报表与可视化、前端列契约/骨架屏/资源外链。
+
+## 39. davidqiangzi/GPT_zhuceji 补深读（第 31 轮修正）
+
+上一版只写了 27 行、且漏读了 `index.js`(289 行) 与 `browserbaseService.js`(489 行)。
+补读后的真实结论：
+
+### 39.1 它不是"脚本点击"，而是"自然语言 goal 驱动的远程 Agent"
+
+```js
+// phase1：注册
+await browserbase.sendAgentGoal(goal);      // 把目标丢给云端 agent
+// 然后只做一件事：盯 URL
+if (isMissionAccomplishedUrl(url)) { /* 注册完成 */ }
+```
+
+`phase2` 同理：发 OAuth goal → 盯 URL 直到命中 `localhost:1455` 回调。
+
+**判定完成的信号是页面 URL**（`MISSION_ACCOMPLISHED` / callback），
+而不是 DOM 选择器命中。这与我们"逐条 API + DOM"的范式完全不同：
+把"怎么做"交给云端 Agent，本地只负责**目标下发**与**终态判定**。
+
+### 39.2 browserbaseService：自建 session 管理 + CDP 直连
+
+```
+createSession()  → POST https://gemini.browserbase.com/api/session
+                 → 返回 { sessionId, sessionUrl }
+                 → 从 sessionUrl 里正则提取 wss=([^&]+) 得到 WebSocket 地址
+sendAgentGoal()  → GET /api/agent/stream?sessionId=...&goal=<urlencoded>
+pendingCommands  → 命令-响应模型，每条命令带 setTimeout 超时
+```
+
+值得记的两点：
+1. **从 sessionUrl 里正则抠 WSS 地址**再直连 CDP——比自己拼 ws 端点稳；
+2. **命令级超时**（`pendingCommands` + `clearTimeout`），避免单条命令悬挂拖死整个会话。
+
+### 39.3 与我们的关系
+
+- 我们的 `browser_use` / `skyvern` 驱动已经是"云端浏览器"路线，但**下发的是步骤**，
+  不是自然语言目标；它这套"goal + 终态 URL 判定"更省本地逻辑；
+- 它的命令级超时我们可以直接借鉴到 CDP 封装里（目前我们靠整体超时）。
+
+```
+自有代码：1091 行（6 个文件）
+本次覆盖：index.js + browserbaseService.js + oauthService.js + config.js + randomIdentity.js + ddgProvider.js
+覆盖率：约 100% 自有代码
+```
