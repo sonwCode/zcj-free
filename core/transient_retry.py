@@ -30,18 +30,26 @@ TRANSIENT_MARKERS = (
     "connection reset",
     "connection aborted",
     "connection refused",
-    "timed out",
-    "timeout",
     "temporarily unavailable",
     "remote disconnected",
     "eof occurred",
     "recv failure",
     "send failure",
     "curl: (7)",
-    "curl: (28)",
     "curl: (35)",
     "curl: (52)",
     "curl: (56)",
+)
+
+#: 超时类：**故意不重试**。请求可能已经送达并被服务端处理，
+#: 只是响应丢了；重试 POST 会导致重复建号或重复发送 OTP，
+#: 比失败一次更糟（实测结论来自 dango-register 的 148 轮扫描）。
+TIMEOUT_MARKERS = (
+    "timed out",
+    "timeout",
+    "curl: (28)",
+    "read timeout",
+    "timed out.",
 )
 
 #: 不该重试的业务错误（防止把封禁当网络抖动重试）
@@ -60,6 +68,8 @@ def is_transient_error(error) -> bool:
     if not text:
         return False
     if any(marker in text for marker in NON_TRANSIENT_MARKERS):
+        return False
+    if any(marker in text for marker in TIMEOUT_MARKERS):
         return False
     return any(marker in text for marker in TRANSIENT_MARKERS)
 

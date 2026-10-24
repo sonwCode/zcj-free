@@ -10,8 +10,10 @@ def test_detects_curl_tls_error():
     assert is_transient_error("ConnectionError: Failed to perform, curl: (35) TLS connect error")
 
 
-def test_detects_timeout():
-    assert is_transient_error("requests.exceptions.ReadTimeout: timed out")
+def test_timeout_is_not_transient():
+    """超时故意不重试：请求可能已送达并处理，重试 POST 会重复建号/重复发 OTP。"""
+    assert is_transient_error("requests.exceptions.ReadTimeout: timed out") is False
+    assert is_transient_error("curl: (28) Operation timed out") is False
 
 
 def test_ban_is_not_transient():
