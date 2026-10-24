@@ -1633,6 +1633,18 @@ def _type_otp(driver, code: str) -> None:
             recovery_url="https://auth.openai.com/email-verification",
             accept_hosts=("auth.openai.com", "chatgpt.com"),
         ):
+            # 刷新也没出输入框：最常见原因是停在 Cloudflare 挑战页。
+            # 给它一次自愈时间窗（JS 挑战通常几秒自动过），再重新找输入框。
+            try:
+                from core.cf_clearance import looks_like_challenge, wait_for_clearance
+
+                _state = _email_otp_page_state(driver)
+                if looks_like_challenge(_state):
+                    logger.warning('[OTP] 页面停在 Cloudflare 挑战，等待自愈…')
+                    wait_for_clearance(driver, _email_otp_page_state, deadline_s=45.0)
+                    continue
+            except Exception as _cf_exc:
+                logger.debug('[OTP] CF 自愈尝试失败：%s', str(_cf_exc)[:120])
             break
 
     raise RuntimeError(
@@ -1696,6 +1708,30 @@ class CloudflareChallengeError(RuntimeError):
 
 def _raise_if_cloudflare_challenge(driver) -> dict:
     state = _email_otp_page_state(driver)
+    if not _is_cloudflare_challenge_state(state):
+        return state
+    # 先给真实浏览器自愈时间：CF 的 JS Challenge 通常几秒内自动通过，
+    # Managed Challenge 点一次 Turnstile 也能过。此前一见标记就抛，
+    # 把"再等 5 秒就好"误判成"出口坏了"。
+    wait_s = 45
+    try_click = True
+    try:
+        from config import register as _cf_cfg
+
+        wait_s = int(getattr(_cf_cfg, 'CF_CLEARANCE_WAIT_SECONDS', 45) or 0)
+        try_click = bool(getattr(_cf_cfg, 'CF_CLEARANCE_TRY_CLICK', True))
+    except Exception:
+        pass
+    if wait_s > 0:
+        try:
+            from core.cf_clearance import wait_for_clearance
+
+            state = wait_for_clearance(
+                driver, _email_otp_page_state,
+                deadline_s=float(wait_s), try_click=try_click,
+            )
+        except Exception as exc:
+            logger.debug('[CF] 等待清除异常：%s', str(exc)[:120])
     if _is_cloudflare_challenge_state(state):
         raise CloudflareChallengeError(
             f"Cloudflare challenge on OTP page: url={state.get('url') or '-'} "

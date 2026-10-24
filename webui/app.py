@@ -419,6 +419,18 @@ def create_app(auth_code: str | None = None) -> Flask:
             },
         )
 
+    try:
+        import sys as _bsys
+
+        _broot = str(__import__('pathlib').Path(__file__).resolve().parent.parent)
+        if _broot not in _bsys.path:
+            _bsys.path.insert(0, _broot)
+        from tools.backup_db import backup as _db_backup
+
+        _db_backup(keep=14)
+    except Exception:
+        logger.exception('[启动] 数据库快照失败')
+
     init_auth(app, auth_code=auth_code)
     register_auth_routes(app)
     recovered_registration_jobs = svc.recover_interrupted_jobs()

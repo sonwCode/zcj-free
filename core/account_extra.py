@@ -14,32 +14,44 @@ logger = logging.getLogger(__name__)
 
 
 def update_extra(acc_id: int, patch: dict) -> bool:
-    """把 patch 合并进账号 extra_json；成功返回 True。"""
+    """把 patch 合并进账号 extra_json（单行 UPDATE，绝不整表回写）。
+
+    历史教训：早先的实现是"读出全表 → 改 → 整表写回"，
+    当外部脚本与线上服务并发时会互相覆盖——服务刚插入的新账号
+    会被脚本用旧快照整表覆盖掉，造成批量数据丢失。
+    这里改为只 UPDATE 目标行，避免任何跨行影响。
+    """
     if not isinstance(patch, dict) or not patch:
         return False
     try:
         from core import db
     except Exception:
         return False
-    lock = getattr(db, '_LOCK', None)
-    if lock is None:
+    conn = getattr(db, '_sqlite_conn', None)
+    if conn is None:
         return False
-    with lock:
-        accounts = db._load_accounts()
-        row = next((r for r in accounts if int(r.get('id') or 0) == int(acc_id)), None)
-        if row is None:
-            return False
-        try:
-            extra = json.loads(row.get('extra_json') or '{}')
-        except Exception:
-            extra = {}
-        if not isinstance(extra, dict):
-            extra = {}
-        extra.update(patch)
-        row['extra_json'] = json.dumps(extra, ensure_ascii=False)
-        try:
-            db._save_accounts(accounts)
-        except Exception as exc:
-            logger.warning('[extra] 保存失败 #%s：%s', acc_id, str(exc)[:120])
-            return False
-    return True
+    try:
+        with conn() as handle:
+            row = handle.execute('select payload from accounts where id=?', (int(acc_id),)).fetchone()
+            if row is None:
+                return False
+            try:
+                payload = json.loads(row[0] or '{}')
+            except Exception:
+                payload = {}
+            extra = payload.get('extra_json')
+            if isinstance(extra, str) and extra.strip().startswith('{'):
+                try:
+                    merged = json.loads(extra)
+                except Exception:
+                    merged = {}
+            else:
+                merged = {}
+            merged.update(patch)
+            payload['extra_json'] = json.dumps(merged, ensure_ascii=False)
+            handle.execute('update accounts set payload=? where id=?',
+                           (json.dumps(payload, ensure_ascii=False), int(acc_id)))
+        return True
+    except Exception as exc:
+        logger.warning('[extra] 单行更新失败 #%s：%s', acc_id, str(exc)[:120])
+        return False

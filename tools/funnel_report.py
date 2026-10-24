@@ -49,11 +49,20 @@ def build(limit: int = 200) -> dict:
                 sub_status['account_status:' + acc] = sub_status.get('account_status:' + acc, 0) + 1
             if codex:
                 sub_status['codex_status:' + codex] = sub_status.get('codex_status:' + codex, 0) + 1
+            # 报表口径：优先用结构化 error_code，其次才落到对错误的文本分类。
+            # 否则 runtimeerror 这种"只是异常类型名"的码会吞掉真实原因。
+            code = str(data.get('error_code') or '').strip().lower()
+            message = str(data.get('error_message') or '')
             result = data.get('result') if isinstance(data.get('result'), dict) else {}
-            err = result.get('error') or data.get('error') or (data.get('result') or {}).get('outcome')
-            if err:
-                cls = classify_error(err)
-                failure_classes[cls] = failure_classes.get(cls, 0) + 1
+            fallback = result.get('error') or data.get('error') or ''
+            if code and code not in ('runtimeerror', 'exception', 'error'):
+                key_cls = code
+            elif message or fallback:
+                key_cls = classify_error(message or fallback)
+            else:
+                key_cls = ''
+            if key_cls:
+                failure_classes[key_cls] = failure_classes.get(key_cls, 0) + 1
     total = sum(status_counts.values())
     return {
         'total': total,
