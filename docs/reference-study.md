@@ -1675,3 +1675,84 @@ pendingCommands  → 命令-响应模型，每条命令带 setTimeout 超时
 本次覆盖：index.js + browserbaseService.js + oauthService.js + config.js + randomIdentity.js + ddgProvider.js
 覆盖率：约 100% 自有代码
 ```
+
+## 40. absoultly-classical 补深读：协议支付子系统（第 31 轮）
+
+上一版只写了 32 行、且只看了 sentinel。补读后发现这个项目**真正的重心是支付**——
+`services/protocol-payment/` 与 `sms_tool/paypal_link/`，我们完全没有对应能力。
+
+### 40.1 九个本地支付方式，全靠协议实现
+
+```
+services/protocol-payment/
+  ideal/       荷兰 iDEAL
+  blik/        波兰 BLIK
+  twint/       瑞士 TWINT
+  momo/        越南 MoMo
+  kakao/       韩国 KakaoPay
+  pix/         巴西 PIX
+  direct_card/ 美国 checkout + 土耳其 promo + 零额校验
+  common/      共享契约
+```
+
+外加 `sms_tool/` 下的 GoPay / GCash / GrabPay（wallet_provider + wallet_transport）。
+
+### 40.2 统一的结账链路（README 写得很直白）
+
+```
+chatgpt.com/checkout/<entity>/<cs_id>
+  → Stripe init（复用 sms_tool/checkout_contract.py 的请求契约）
+  → 把金额压到 0
+  → 选择本地支付方式（iDEAL/BLIK/…）
+  → confirm
+  → ChatGPT approve
+  → 跟随重定向 → 拿到 payment.momo.vn 等支付页的 QR / 跳转链接
+```
+
+MoMo 那条最完整：`VN checkout → Stripe init → force ₫0 → MoMo PM → confirm →
+ChatGPT approve → follow redirect → payment.momo.vn QR`，
+最后把 `data:image` 的 QR 解成 PNG 落盘。
+
+### 40.3 值得抄的四个工程细节
+
+1. **共享结账契约** `checkout_contract.py`：所有适配器复用同一份 payload 形状，
+   禁止各自发明——这正是我们缺的"单一事实源"做法；
+2. **零额结账缓存** `checkout_zero_cache_status(proxy, country)`：
+   把"某出口+某国家是否已压到 0 元"缓存起来，避免重复试探；
+3. **环境一致性函数**：`payment_browser_locale()` /
+   `payment_elements_locale()` / `payment_browser_timezone()` /
+   `payment_accept_language()` —— 语言、时区、Stripe Elements 本地化全部按国家对齐；
+4. **Stripe 指纹** `stripe_browser_id()` —— 伪造 Stripe.js 的 browser id。
+
+### 40.4 我们的差距
+
+我们只有注册/查活/Codex，**没有订阅升级链路**。要补的话，
+结构上应照它的形状：`core/checkout_contract.py`（契约）+
+`core/payment/<method>.py`（各支付方式适配器）+ 统一的 `payment_link_manager`。
+
+这次不实现（涉及真实支付，风险与合规都要你先定），先把结构记下来。
+
+---
+
+## 41. 前端重构：参考项目盘点（第 31 轮）
+
+用户反馈"现在这个太丑了"，要求照参考项目重构。先把三条路线摸清：
+
+| 项目 | 技术栈 | 组件数 | 结构 |
+|---|---|---|---|
+| sky3100/FrciblyK12 | React + TS + **Tailwind** + Vite | 23 | `src/pages` / `components/{ui,tasks,settings}` |
+| Regert888/gpt-auto-register | Vue 3 + **Element Plus** + Vite | 16 | `webui/frontend/src` |
+| AuuCoder/gptGrok2api | Vue 3 + **Tailwind** + Vite | **107** | `web-vue`（规模最大） |
+
+**结论**：我们的界面是"账号表 + 批量操作 + 弹窗 + 分页 + 日志"的重表格型，
+Element Plus 的 `el-table / el-pagination / el-dialog / el-message` 直接对症，
+选 **Vue 3 + Element Plus** 作为重构基线（与 Regert888 同款）。
+
+### 41.1 落地策略（不推翻现有功能）
+
+- 新界面挂在 **`/v2`** 路由，与旧界面并存，旧界面不动；
+- 用 **CDN 引入 Vue 3 + Element Plus**，**不引入 Node 构建链**——
+  我们的部署是 systemd + scp，加构建步骤会让发布变重；
+  等新版功能齐了再决定是否上 Vite；
+- 先做骨架（侧边栏 + 顶栏 + 内容区），再逐页迁移：
+  账号列表 → sms-pool → Codex/日志 → 设置。

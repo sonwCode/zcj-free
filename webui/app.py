@@ -1313,6 +1313,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             "queue": live_check_service.queue_settings(),
         }), 202
 
+    @app.get("/v2")
+    def ui_v2():
+        """新版界面（Vue 3 + Element Plus，与旧版并存）。"""
+        return render_template("ui2.html")
+
     @app.get("/api/funnel")
     def api_funnel():
         """注册漏斗：按状态与 Codex 细分统计。"""
