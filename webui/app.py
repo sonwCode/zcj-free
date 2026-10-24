@@ -975,6 +975,20 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify(payload)
 
         ids = [int(a.get("id") or 0) for a in dead if int(a.get("id") or 0) > 0]
+        # 安全闸：单次批量删除超过 max_batch（默认 50）必须显式 force，
+        # 并把完整清单写进日志——批量删号是不可逆操作，必须留痕。
+        try:
+            max_batch = int(data.get("max_batch") or 50)
+        except (TypeError, ValueError):
+            max_batch = 50
+        force = bool(data.get("force", False))
+        if mode == "delete" and len(ids) > max_batch and not force:
+            payload.update({"ok": False, "error": "单次删除 %d 个超过上限 %d，需 force=true" % (len(ids), max_batch),
+                            "count": len(ids)})
+            logger.warning("[清理已废] 拒绝超量删除：%d > %d", len(ids), max_batch)
+            return jsonify(payload), 400
+        logger.warning("[清理已废] 即将 %s %d 个账号：%s", mode, len(ids),
+                       [str(a.get("email") or a.get("id")) for a in dead[:20]])
         if mode == "archive":
             archived, skipped = [], []
             for acc_id in ids:

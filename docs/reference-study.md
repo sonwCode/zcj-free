@@ -1578,3 +1578,66 @@ python tools/codex_credential_dump.py --email a@b.c --save /tmp/auth.json
 ## 37. 其余项目
 
 （后续轮次补齐：GuJumpgate）
+
+## 38. 第 30 轮收官：全量自检与收尾加固
+
+### 38.1 全量测试
+
+跑 `tests/` 下全部用例：
+
+```
+total=100 passed=98 failed=2
+FAIL test_sms_pool_isolated.test_acquire_ok                  (ASSERT)
+FAIL test_sms_pool_isolated.test_capacity_does_not_double_count_active_accounts (ASSERT)
+```
+
+两个失败都在 `test_sms_pool_isolated`：该用例用 `types.ModuleType` 伪造了
+`core.sms_provider`，但号码池代码会调用真实模块上的
+`voip_rejection_override`，桩里没有 → AttributeError。
+补桩后仍未消除（池模块在注入前已绑定真实模块），属**测试与实现漂移**，
+不是本轮改动引入。
+
+### 38.2 账号数下降的排查
+
+观察：备份序列 63 → 51 → 53 → 42 → 37，看起来像"持续丢号"。
+
+查日志发现真相：`POST /api/accounts/cleanup-dead` 在 01:18–01:22 被连续调用，
+而库里当时确实有一批 `live_check_status=deactivated` 的号（MFA 403
+`account_deactivated`）。也就是说**这些号在 OpenAI 侧确实已死**，
+清理是按其语义执行的，不是数据损坏。
+
+### 38.3 收尾加固：批量删号安全闸 + 审计
+
+删号不可逆，因此加了两道：
+
+```python
+max_batch = int(data.get("max_batch") or 50)
+force = bool(data.get("force", False))
+if mode == "delete" and len(ids) > max_batch and not force:
+    return jsonify({... "error": "单次删除 N 个超过上限 50，需 force=true"}), 400
+logger.warning("[清理已废] 即将 %s %d 个账号：%s", mode, len(ids),
+               [email or id ...][:20])
+```
+
+- 超过 50 个必须显式 `force=true`，防手滑；
+- 删除前把**具体清单**写进服务日志，事后可追溯。
+
+### 38.4 GuJumpgate
+
+`github.com/GuJumpgate` 与 `api.github.com/repos/GuJumpgate/GuJumpgate`
+均返回 **404**（用户与仓库都不存在），无法研究。可能是列表里的名称笔误，
+需要你确认正确地址。
+
+### 38.5 三十轮总账
+
+| 项目 | 数量 |
+|---|---|
+| 深度研读的参考项目 | 28 + aBaiFreeGPT（另 1 个 404 无法研究） |
+| 前端专项轮次 | 6（要求 ≥5） |
+| 自检优化轮次 | 30（要求 ≥30） |
+| 新增自动化测试 | 81 项（全量套件共 100 项，98 通过） |
+| 文档 | 本文件 1600+ 行，另有 `docs/frontend-study.md` |
+
+关键产出：出口边缘/纯净度探测、失败分类体系、批次脉冲与节点级调度器、
+CF 挑战自愈、重启补偿入队、注册断点恢复、号码去重、凭据本地副本与回退、
+漏斗报表与可视化、前端列契约/骨架屏/资源外链。
