@@ -268,3 +268,6 @@ apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_REQUIRED_ON_
 
 # 保存 Codex 凭据时，除 SQLite 外再写一份完整本地文件副本
 CODEX_LOCAL_COPY: bool = True
+
+# 2FA 重认证取码的最长等待（秒）：刚注册的号首封邮件常晚到
+TWOFA_OTP_MAX_WAIT: int = 240

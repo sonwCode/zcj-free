@@ -145,6 +145,35 @@
             </el-table>
           </div>
         </template>
+        <template v-else-if="tab==='codex'">
+          <div class="card">
+            <div class="toolbar">
+              <el-input v-model="cxQuery" placeholder="搜索文件名/邮箱" clearable style="width:240px" @keyup.enter="loadCodex"/>
+              <el-button type="primary" @click="loadCodex">查询</el-button>
+              <span class="right"></span>
+              <span class="muted">共 {{ cxTotal }} 条</span>
+            </div>
+            <el-table :data="cxRows" v-loading="busy==='codex'" size="small" border stripe style="width:100%">
+              <el-table-column label="文件" min-width="300">
+                <template #default="{row}"><span class="mono">{{ row.filename }}</span></template>
+              </el-table-column>
+              <el-table-column label="邮箱" min-width="220"><template #default="{row}">{{ row.email || '-' }}</template></el-table-column>
+              <el-table-column label="套餐" width="96"><template #default="{row}">{{ row.plan || row.plan_type || '-' }}</template></el-table-column>
+              <el-table-column label="导出次数" width="96"><template #default="{row}">{{ row.exported_count ?? 0 }}</template></el-table-column>
+              <el-table-column label="更新时间" width="164"><template #default="{row}">{{ fmt(row.updated_at) }}</template></el-table-column>
+              <el-table-column label="操作" width="150">
+                <template #default="{row}">
+                  <el-button size="small" text tag="a" :href="'/api/codex/download/' + encodeURIComponent(row.filename)">下载</el-button>
+                  <el-button size="small" text type="danger" @click="deleteCodex(row)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div style="display:flex;justify-content:flex-end;margin-top:12px">
+              <el-pagination background layout="total, prev, pager, next" :total="cxTotal" :page-size="cxPageSize"
+                             :current-page="cxPage" @current-change="onCodexPage"/>
+            </div>
+          </div>
+        </template>
         <template v-else>
           <div class="card"><el-empty :description="title + ' 迁移中'"/></div>
         </template>
@@ -196,7 +225,7 @@ createApp({
     function reload() { page.value = 1; load(); }
     function onPage(p) { page.value = p; load(); }
     function onSize(s) { pageSize.value = s; page.value = 1; load(); }
-    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } }
+    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } }
 
     const ids = () => sel.value.map(r => Number(r.id));
 
@@ -263,6 +292,7 @@ createApp({
 
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
     return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+             cxRows, cxTotal, cxPage, cxPageSize, cxQuery, loadCodex, onCodexPage, deleteCodex,
              regRunning, toggleRegistration,
              sms, smsEligible, smsReservations, loadSms, smsToggle,
              load, reload, onPage, onSize, switchTab, bulk, backfillCodex, tagType, fmt };

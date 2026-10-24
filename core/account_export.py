@@ -707,6 +707,15 @@ def _activate_totp(
     return True
 
 
+def _twofa_otp_max_wait() -> int:
+    """2FA 取码最长等待：刚注册的号首封重认证邮件常常晚到。"""
+    try:
+        from config import codex as _cc
+        return max(120, int(getattr(_cc, "TWOFA_OTP_MAX_WAIT", 240) or 240))
+    except Exception:
+        return 240
+
+
 def setup_2fa(
     session: BrowserSession,
     email: str,
@@ -774,7 +783,8 @@ def setup_2fa(
             logger.info("[2FA] 自动等待邮箱重认证 OTP...")
             try:
                 otp_code = wait_for_otp(
-                    email, after_ts=reauth_otp_after_ts, exclude_codes=used_otp_codes
+                    email, after_ts=reauth_otp_after_ts, exclude_codes=used_otp_codes,
+                    max_wait=_twofa_otp_max_wait(),
                 )
                 used_otp_codes.add(str(otp_code).strip())
             except Exception as first_wait_exc:
@@ -797,7 +807,8 @@ def setup_2fa(
                 broad_after_ts = max(0.0, reauth_otp_after_ts - 120.0)
                 logger.info("[2FA] 第二轮取码启用时间偏差容错：after_ts=%.0f", broad_after_ts)
                 otp_code = wait_for_otp(
-                    email, after_ts=broad_after_ts, exclude_codes=used_otp_codes
+                    email, after_ts=broad_after_ts, exclude_codes=used_otp_codes,
+                    max_wait=_twofa_otp_max_wait(),
                 )
                 used_otp_codes.add(str(otp_code).strip())
             logger.info("[2FA] 已收到邮箱重认证 OTP")
