@@ -107,6 +107,40 @@
             </div>
           </div>
         </template>
+        <template v-else-if="tab==='sms'">
+          <div class="funnel">
+            <div class="fitem"><div class="k">总开关</div><div class="v">{{ sms.enabled ? '开启' : '关闭' }}</div></div>
+            <div class="fitem"><div class="k">状态</div><div class="v">{{ sms.paused ? '已暂停' : '运行中' }}</div></div>
+            <div class="fitem"><div class="k">并发 / 预热</div><div class="v">{{ sms.workers || '-' }} / {{ sms.prewarm ?? '-' }}</div></div>
+            <div class="fitem"><div class="k">候选账号</div><div class="v">{{ (smsEligible||[]).length }}</div></div>
+            <div class="fitem"><div class="k">占用中</div><div class="v">{{ (smsReservations||[]).length }}</div></div>
+          </div>
+          <div class="card" style="margin-bottom:14px;">
+            <div class="toolbar">
+              <el-button :loading="busy==='sms'" @click="loadSms">刷新</el-button>
+              <el-button type="primary" :loading="busy==='sms'" @click="smsToggle">{{ sms.paused ? '恢复' : '暂停' }}</el-button>
+              <span class="right"></span>
+              <span class="muted">候选按"查活可用"筛选；仅展示前 50 条</span>
+            </div>
+            <el-table :data="smsEligible" size="small" border stripe v-loading="busy==='sms'" style="width:100%">
+              <el-table-column label="ID" width="76"><template #default="{row}">#{{ row.id }}</template></el-table-column>
+              <el-table-column label="邮箱" min-width="220"><template #default="{row}">{{ row.email }}</template></el-table-column>
+              <el-table-column label="套餐" width="92"><template #default="{row}">{{ row.plan_type || row.current_plan_type || 'free' }}</template></el-table-column>
+              <el-table-column label="Codex" width="104"><template #default="{row}"><el-tag size="small" :type="tagType('codex',row.codex_status)">{{ row.codex_status || '未开始' }}</el-tag></template></el-table-column>
+              <el-table-column label="测活" width="98"><template #default="{row}"><el-tag size="small" :type="tagType('live',row.live_check_status)">{{ row.live_check_status || '-' }}</el-tag></template></el-table-column>
+            </el-table>
+          </div>
+          <div class="card">
+            <div style="font-weight:600;margin-bottom:10px;">号码占用</div>
+            <el-table :data="smsReservations" size="small" border stripe style="width:100%">
+              <el-table-column label="ID" width="70"><template #default="{row}">#{{ row.id }}</template></el-table-column>
+              <el-table-column label="号码" width="140"><template #default="{row}">{{ row.phone_mask || row.phone || '-' }}</template></el-table-column>
+              <el-table-column label="状态" width="110"><template #default="{row}"><el-tag size="small">{{ row.status || '-' }}</el-tag></template></el-table-column>
+              <el-table-column label="账号" min-width="200"><template #default="{row}">{{ row.email || row.account_id || '-' }}</template></el-table-column>
+              <el-table-column label="过期" width="164"><template #default="{row}">{{ fmt(row.expires_at) }}</template></el-table-column>
+            </el-table>
+          </div>
+        </template>
         <template v-else>
           <div class="card"><el-empty :description="title + ' 迁移中'"/></div>
         </template>
@@ -158,7 +192,7 @@ createApp({
     function reload() { page.value = 1; load(); }
     function onPage(p) { page.value = p; load(); }
     function onSize(s) { pageSize.value = s; page.value = 1; load(); }
-    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } }
+    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } }
 
     const ids = () => sel.value.map(r => Number(r.id));
 
@@ -208,6 +242,7 @@ createApp({
 
     onMounted(() => { load(); loadFunnel(); });
     return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+             sms, smsEligible, smsReservations, loadSms, smsToggle,
              load, reload, onPage, onSize, switchTab, bulk, backfillCodex, tagType, fmt };
   }
 }).use(ElementPlus).mount('#app');
