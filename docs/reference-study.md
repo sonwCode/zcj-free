@@ -2282,3 +2282,72 @@ def _load_recent_otp_rejections(email, now=None):   # TTL 过滤，返回 code_h
 移植判定：OpenBrowser 0 项（自建 TLS 无收益）；
 AutoTeam-F 业务不移植，只取其 OTP 拒绝记录（已落地）。
 ```
+
+## 52. Haohuangsix / xiaoguzuiniu：同源变体，按函数级差异读（第 23 轮）
+
+这两个项目**目录结构与我们一模一样**（core/db.py、roxy_registration.py、
+browser_use_registration.py、webui/app.py），所以"读"的正确方式是**双向 diff**。
+
+### 52.1 双向文件差异
+
+我们有、它们没有：`account_liveness` / `account_inspection` / `alerting` /
+`ban_detect` / `account_seal` / `account_warmup` / `batch_pulse` 等
+（第 23–25 轮我们自己加的那批）。
+
+它们有、我们没有（Haohuangsix）：
+
+| 文件 | 作用 | 判定 |
+|---|---|---|
+| `core/sms_country_selector.py` | 接码国家自动筛选 | **移植** |
+| `core/selenium_phone_verify.py` | 注册期手机验证（含 about-you 顺序保护） | 部分移植（记录规则） |
+| `core/icloud_client.py` | iCloud 邮箱 | 不移植（我们没接 iCloud） |
+
+xiaoguzuiniu 没有独有文件，只有 11 个函数差异，如 `_sync_accounts_txt` /
+`_sync_tokens_txt` / `_sync_outlook_txt` / `refresh_static_viewer`——
+即"把库同步成 txt + 渲染静态查看页"。我们已有导出模块且以 DB 为主，
+判定**不移植**。
+
+### 52.2 已移植：`core/sms_country_selector.py`
+
+Haohuangsix 的原注释把背景写得极清楚：
+
+> hero-sms（SMS-Activate 兼容）的 openai 服务码是 "dr"。
+> `getPrices(service=dr)` 一个调用就能拿到所有国家的价格+库存：
+> `{"国家id": {"dr": {"cost": 0.099, "count": 100, "physicalCount": 0}}}`
+> …纯虚拟号常被静默拒（OpenAI 更可能接受真实号）
+
+筛选规则：价格 ≤ 上限、count>0、**physicalCount>0 优先**、再按库存降序。
+
+**为什么这个对我们重要**：我们 Codex 手机验证失败 27/38 是号码问题，
+"美国虚拟号被静默拒"是高频原因。按 physicalCount 选国家能直接绕开。
+
+我们的实现：
+- `parse_prices(payload, service)`：解析并过滤服务码；
+- `pick_country(rows, max_price, prefer_physical)`：纯排序逻辑，可单测；
+- `select_country(service='dr', max_price='0.08', provider='herosms')`：
+  走我们已有的 `sms_provider._request_herosms(action=getPrices)`，缓存 5 分钟；
+- 非 herosms 的 provider 直接抛 `SmsSelectError`（不假装支持）。
+
+测试 `tests/test_sms_country_selector.py` **6/6 PASS**，
+关键一条 `test_prefers_physical_numbers`：更便宜的纯虚拟国家（0.05）
+必须让位给有真实号的国家（0.07）。
+
+### 52.3 记录但未移植：注册期手机验证的顺序保护
+
+`selenium_phone_verify._do_registration_phone_verification` 里有一段保护：
+
+```python
+if not _wait_phone_form_ready(driver, timeout):
+    if "we can't create your account" in body:
+        raise RuntimeError("资料页被拒")
+    if "about-you" in cur or "how old are":
+        raise RuntimeError("仍停留在资料页")
+```
+
+即：**手机验证只能在 about-you 完成后做**，在此之前裸导航 add-phone
+会丢失会话状态。这条规则值得记住——我们目前没有注册期手机验证这一步。
+
+```
+移植判定：sms_country_selector 移植（已落地并带测试）；
+icloud_client / txt 同步 / 静态查看页 不移植；手机验证顺序规则记录。
+```
