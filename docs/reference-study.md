@@ -2553,3 +2553,49 @@ def _navigate_with_tab_recovery(..., max_attempts=3)   # 导航前先做 tab.url
 移植判定：断连恢复 → 移植（已完成，未接驱动）；
 codex_keep_alive 的 sign_up/login/authorize_codex → 与我们同构，不移植。
 ```
+
+## 57. HengXin666 / starmiaoa：代理池与登录态（第 30 轮）
+
+### 57.1 HengXin666 的 ProxyPoolService（41KB）
+
+`py/proxy_pool/service.py` 是一个完整的代理池服务：
+节点带 `score` / `grade` / `latency_ms` / `last_tested_at`，
+有订阅导入（`import_subscription`）、自动刷新线程（`_auto_refresh_loop`）、
+批量改池（`batch_set_pool`），选节点时按 `-(score if score>=0 else -1)` 排序。
+
+**我们的现状**：`core/proxy_edge_probe.py` 是**判定式健康检查**
+（`clean` / `degraded` / `blocked` + 冷却 + `pick_clean_exit`），
+已经比"裸分数"更贴近可用性；但**没有用延迟排序**。
+
+**已落地（不改原有逻辑）**：
+- `remember()` 顺带把 `elapsed_ms` 存进 `_LATENCY`；
+- `latency_of(proxy)`；
+- `pick_fastest_clean(candidates, exclude=...)`：只在**已知 clean** 的候选里按延迟取最优；
+  已判 clean 但没延迟记录的排最后；没有已知 clean 时返回 None（由调用方决定是否探测）。
+
+测试 `tests/test_proxy_ranking.py` **6/6 PASS**。
+
+**没移植的部分**：订阅导入 + 自动刷新线程。
+我们的代理是配置里写死的池，接订阅体系属于产品决策，不是技术缺口。
+
+### 57.2 starmiaoa 的 login_flow（37KB）
+
+`chatgpt_register_k12/login/login_flow.py` 里几个设计值得记：
+
+- `PasswordRequiredError(LoginError)`：把"这个号需要密码而我没有"当成**独立错误类型**，
+  而不是笼统的登录失败。我们的 13 个无密码老号正好是这种情况——
+  现在只能表现为"登录失败"，无法被单独统计和批量处理。
+- `_login_otp_lock_for(email)`：**按邮箱加锁**再取验证码，
+  避免同号并发拉两封邮件、把前一封的码用错。
+  我们有 `phone_lock`（按号码），但没有按邮箱的 OTP 锁。
+- `_extract_code_from_response(resp, data)`：从响应体、URL、跳转链里
+  多路兜底提取 code，而不是只看一个字段。
+
+**判定**：`PasswordRequiredError` 与"按邮箱 OTP 锁"这两条**值得后续落地**
+（前者能让我们把无密码号单独列出，后者防并发错码）；
+本轮未实现，先记录。
+
+```
+移植判定：代理延迟排序 → 移植（已落地，未接入选择流程）；
+订阅刷新 → 不移植；PasswordRequiredError / 邮箱级 OTP 锁 → 待落地。
+```

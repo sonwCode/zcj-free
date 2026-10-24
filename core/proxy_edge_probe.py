@@ -96,10 +96,47 @@ def probe_exit(proxy: str, *, timeout: float = 15.0) -> EdgeVerdict:
     return EdgeVerdict(proxy=target, status=verdict, http_status=code, detail=detail, elapsed_ms=elapsed_ms)
 
 
+_LATENCY: dict = {}
+
+
 def remember(verdict: EdgeVerdict) -> None:
     if not verdict.proxy:
         return
     _VERDICTS[verdict.proxy] = (verdict.status, time.time() + _CACHE_TTL)
+    try:
+        _LATENCY[verdict.proxy] = int(getattr(verdict, 'elapsed_ms', 0) or 0)
+    except Exception:
+        pass
+
+
+def latency_of(proxy: str) -> int | None:
+    """已测出口的延迟（毫秒）；没测过返回 None。"""
+    return _LATENCY.get(str(proxy or ''))
+
+
+def pick_fastest_clean(candidates, *, exclude=None) -> str | None:
+    """从候选里挑**已测为 clean 且延迟最低**的出口。
+
+    与 pick_clean_exit 的区别：这里只用已知结论（缓存），不发探测请求；
+    并且按延迟排序——来源 HengXin666 的代理池按 score/latency 选节点的做法。
+
+    没有已知 clean 的候选时返回 None（由调用方决定是否回退到探测）。
+    """
+    excluded = set(exclude or [])
+    best = None
+    best_ms = None
+    for raw in candidates or []:
+        proxy = str(raw or '').strip()
+        if not proxy or proxy in excluded:
+            continue
+        if cached_status(proxy) != CLEAN:
+            continue
+        ms = latency_of(proxy)
+        if ms is None:
+            ms = 10 ** 9          # 已判 clean 但没延迟记录 → 排在最后
+        if best is None or ms < best_ms:
+            best, best_ms = proxy, ms
+    return best
 
 
 def cached_status(proxy: str) -> str | None:
