@@ -2111,3 +2111,52 @@ def _execute_stage_with_tls_retry(...)
 未读：AuuCoder register_service(190KB) 全文、sky3100 payment.py 全文（均为超大文件，
 本轮只读结构与关键函数）。
 ```
+
+## 48. myfanhua（上游）对比深读：3 个新模块 + 移植判定（第 20 轮）
+
+这个仓库就是**我们自己项目的上游**，所以"读它"的正确方式是逐文件对比。
+
+### 48.1 上游有、我们没有的文件
+
+| 文件 | 行数 | 作用 | 判定 |
+|---|---|---|---|
+| `core/inspection_lease.py` | 57 | 按 SQLite 文件隔离的巡检进程锁，进程退出由 OS 释放 | **移植** |
+| `core/account_inspection_service.py` | 235 | 本地 AT 过期巡检；只对失效账号联网查活，同会话自动查套餐 | **部分移植** |
+| `core/xigua_client.py` | 137 | 西瓜（xigua.dasiqo.com）邮箱接码 API | **不移植** |
+
+### 48.2 已移植：`core/token_expiry.py` + `core/inspection_lease.py`
+
+上游 `token_needs_refresh` 的做法：不验签解 JWT payload，读 `exp` 与当前时间比；
+解析不出来（非 JWT / 无 exp / 非法值）**一律当作需要刷新**（保守）。
+
+我们落地的：
+- `token_needs_refresh(token)` / `token_expiry` / `seconds_until_expiry`
+- `acquire_inspection_lease(name)`：flock 独占，拿不到抛 `InspectionLeaseBusy`
+  （我们查活既能从 WebUI 触发也能从定时任务触发，两个一起跑会重复请求、互相覆盖）
+
+测试 `tests/test_token_expiry.py` **7/7 PASS**（含 Bearer 前缀、垃圾 token、无 exp、锁互斥）。
+
+### 48.3 但实测收益有限（诚实结论）
+
+拿我们库里 31 个账号跑本地判断：
+
+```
+token 已过期(需刷新): 0
+token 仍有效(无需联网): 31
+```
+
+**全部 token 的 exp 都还没到期**。可是 /me 探活时那 4 个号返回
+`401 invalidated oauth token`——说明它们是**被服务端吊销**，不是自然过期。
+
+所以这个优化只解决 `exp` 过期，**对我们的主要失效模式（吊销）无效**。
+代码留着（无害且将来有用），但不要指望它省下多少请求。
+
+### 48.4 不移植的理由
+
+`xigua_client.py` 是接"西瓜邮箱"这一个具体服务商的客户端。
+我们当前邮箱来源是 Outlook / 通用 API / IMAP / 域名邮箱，
+**没有用西瓜**，移植进来就是死代码。
+
+```
+结论：上游 3 个新文件里，1 个移植、1 个部分移植、1 个明确不移植。
+```
