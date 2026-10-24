@@ -65,6 +65,35 @@
   .logbox{background:#0f172a;color:#cbd5e1;padding:14px;border-radius:8px;font-size:12px;line-height:1.65;
           white-space:pre-wrap;word-break:break-all;max-height:78vh;overflow:auto}
 </style>
+
+<script>
+(function(){
+  function show(msg){
+    try{
+      var d=document.getElementById("boot-err");
+      if(!d){
+        d=document.createElement("div");
+        d.id="boot-err";
+        d.style.cssText="position:fixed;left:0;right:0;top:0;z-index:99999;background:#7f1d1d;color:#fff;padding:12px 16px;font:13px/1.6 monospace;white-space:pre-wrap;max-height:60vh;overflow:auto";
+        (document.body||document.documentElement).appendChild(d);
+      }
+      d.textContent += "\n[页面错误] " + msg;
+    }catch(e){}
+  }
+  window.addEventListener("error", function(ev){
+    var t = ev && ev.target;
+    if (t && (t.tagName === "SCRIPT" || t.tagName === "LINK")) {
+      show("资源加载失败: " + (t.src || t.href));
+    } else {
+      show((ev.message || "unknown") + " @ " + (ev.filename || "") + ":" + (ev.lineno || ""));
+    }
+  }, true);
+  window.addEventListener("unhandledrejection", function(ev){
+    var r = ev && ev.reason;
+    show("Promise 未捕获: " + (r && (r.stack || r.message) || r));
+  });
+})();
+</script>
 </head>
 <body>
 <div id="app">
@@ -83,7 +112,7 @@
         <span class="muted" style="font-size:12px;">注册</span>
         <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'"
                    inline-prompt style="--el-switch-on-color:#13ce66;margin-right:12px"
-                   @change="toggleRegistration" />
+                   @change="toggleRegistration" ></el-switch>
         <el-button size="small" @click="reload">刷新</el-button>
         <el-button size="small" text tag="a" href="/">返回旧版</el-button>
       </header>
@@ -93,9 +122,9 @@
             <div class="toolbar">
               <span class="muted">来源</span>
               <el-select v-model="poolSource" style="width:200px" @change="loadPool">
-                <el-option v-for="s in poolSources" :key="s.value" :label="s.label" :value="s.value" />
+                <el-option v-for="s in poolSources" :key="s.value" :label="s.label" :value="s.value" ></el-option>
               </el-select>
-              <el-input v-model="poolQuery" placeholder="搜索邮箱" clearable style="width:220px" @keyup.enter="reloadPool" />
+              <el-input v-model="poolQuery" placeholder="搜索邮箱" clearable style="width:220px" @keyup.enter="reloadPool" ></el-input>
               <el-button type="primary" @click="reloadPool">查询</el-button>
               <span class="right"></span>
               <el-button type="success" @click="importOpen = true">导入邮箱</el-button>
@@ -103,7 +132,7 @@
             </div>
             <el-table :data="poolRows" empty-text="该来源下没有邮箱" v-loading="busy==='pool'" size="small" border stripe
                       @selection-change="v=>poolSel=v" style="width:100%">
-              <el-table-column type="selection" width="42" />
+              <el-table-column type="selection" width="42" ></el-table-column>
               <el-table-column label="邮箱" min-width="260"><template #default="{row}">{{ row.email }}</template></el-table-column>
               <el-table-column label="状态" width="120">
                 <template #default="{row}"><el-tag size="small" :type="row.status==='available'?'success':'info'">{{ row.status || '-' }}</el-tag></template>
@@ -113,25 +142,25 @@
             </el-table>
             <div style="display:flex;justify-content:flex-end;margin-top:12px">
               <el-pagination background layout="total, prev, pager, next" :total="poolTotal" :page-size="50"
-                             :current-page="poolPage" @current-change="onPoolPage" />
+                             :current-page="poolPage" @current-change="onPoolPage" ></el-pagination>
             </div>
           </div>
           <el-dialog v-model="importOpen" title="导入邮箱" width="640px">
             <div class="toolbar">
               <span class="muted">类型</span>
               <el-select v-model="importSource" style="width:180px">
-                <el-option label="Outlook" value="outlook" />
-                <el-option label="通用 API" value="generic_api" />
-                <el-option label="通用 IMAP" value="imap" />
+                <el-option label="Outlook" value="outlook" ></el-option>
+                <el-option label="通用 API" value="generic_api" ></el-option>
+                <el-option label="通用 IMAP" value="imap" ></el-option>
               </el-select>
               <template v-if="importSource==='imap'">
                 <span class="muted">IMAP 服务器</span>
-                <el-input v-model="imapServer" placeholder="imap.example.com:993" style="width:220px" />
+                <el-input v-model="imapServer" placeholder="imap.example.com:993" style="width:220px" ></el-input>
                 <el-checkbox v-model="importSplit">导入时也分裂（一般不用，注册页开关即可）</el-checkbox>
               </template>
             </div>
             <el-input v-model="importText" type="textarea" :rows="9" style="margin-top:10px"
-                      placeholder="Outlook: email----password----clientId----refreshToken&#10;通用 API: email----code_url&#10;IMAP: email----password" />
+                      placeholder="Outlook: email----password----clientId----refreshToken&#10;通用 API: email----code_url&#10;IMAP: email----password" ></el-input>
             <template #footer>
               <el-button @click="importOpen = false">取消</el-button>
               <el-button type="primary" :loading="busy==='imp'" @click="doImport">导入</el-button>
@@ -143,12 +172,12 @@
             <div class="card-title">注册总开关</div>
             <div class="toolbar">
               <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'" inline-prompt
-                         style="--el-switch-on-color:#13ce66" @change="toggleRegistration" />
+                         style="--el-switch-on-color:#13ce66" @change="toggleRegistration" ></el-switch>
               <span class="muted">暂停后不再接受任何新任务（含重启补偿与手动提交）</span>
               <span class="right"></span>
               <span class="muted">分裂注册</span>
               <el-switch v-model="splitRunning" :active-text="splitRunning ? '开' : '关'" inline-prompt
-                         style="--el-switch-on-color:#7c3aed" @change="toggleSplit" />
+                         style="--el-switch-on-color:#7c3aed" @change="toggleSplit" ></el-switch>
               <el-tooltip content="开启后，每次注册会把选中的邮箱派生成 +6位后缀 的子地址去注册（信仍进主箱）">
                 <el-icon style="cursor:help;color:#909399">?</el-icon>
               </el-tooltip>
@@ -158,23 +187,23 @@
             <div class="card-title">发起注册</div>
             <div class="toolbar">
               <span class="muted">数量</span>
-              <el-input-number v-model="regCount" :min="1" :max="200" size="default" style="width:130px" />
+              <el-input-number v-model="regCount" :min="1" :max="200" size="default" style="width:130px" ></el-input-number>
               <span class="muted">并发</span>
-              <el-input-number v-model="regWorkers" :min="1" :max="10" size="default" style="width:110px" />
+              <el-input-number v-model="regWorkers" :min="1" :max="10" size="default" style="width:110px" ></el-input-number>
               <span class="muted">邮箱来源</span>
               <el-select v-model="regSource" style="width:230px">
-                <el-option v-for="o in sourceOptions" :key="o.value" :label="o.label" :value="o.value" />
+                <el-option v-for="o in sourceOptions" :key="o.value" :label="o.label" :value="o.value" ></el-option>
               </el-select>
               <span class="muted">驱动</span>
               <el-select v-model="regDriver" style="width:150px" clearable placeholder="跟随配置">
-                <el-option v-for="d in driverOptions" :key="d" :label="d" :value="d" />
+                <el-option v-for="d in driverOptions" :key="d" :label="d" :value="d" ></el-option>
               </el-select>
               <el-button type="primary" :loading="busy==='reg'" :disabled="!regRunning" @click="startRegistration">
                 开始注册
               </el-button>
             </div>
             <el-alert v-if="!regRunning" type="warning" :closable="false" show-icon
-                      title="当前已暂停：请先打开上方开关再发起注册。" />
+                      title="当前已暂停：请先打开上方开关再发起注册。" ></el-alert>
           </div>
           <div class="card">
             <div class="card-title">队列状态</div>
@@ -200,9 +229,9 @@
           </div>
           <div class="card">
             <div class="toolbar">
-              <el-input v-model="query" placeholder="搜索邮箱/备注" clearable style="width:220px" @keyup.enter="reload"/>
+              <el-input v-model="query" placeholder="搜索邮箱/备注" clearable style="width:220px" @keyup.enter="reload"></el-input>
               <el-select v-model="archived" style="width:120px" @change="reload">
-                <el-option label="默认账号" value="0"/><el-option label="已归档" value="only"/>
+                <el-option label="默认账号" value="0"></el-option><el-option label="已归档" value="only"></el-option>
               </el-select>
               <el-button type="primary" @click="reload">查询</el-button>
               <span class="right"></span>
@@ -222,7 +251,7 @@
               <el-button type="danger" plain :disabled="!sel.length" :loading="busy==='del'" @click="bulk('del')">删除</el-button>
             </div>
             <el-table :data="rows" v-loading="loading" size="small" border stripe @selection-change="v=>sel=v" style="width:100%">
-              <el-table-column type="selection" width="42"/>
+              <el-table-column type="selection" width="42"></el-table-column>
               <el-table-column label="ID" width="76"><template #default="{row}">#{{ row.id }}</template></el-table-column>
               <el-table-column label="邮箱" min-width="230">
                 <template #default="{row}">
@@ -249,7 +278,7 @@
             </el-table>
             <div style="display:flex;justify-content:flex-end;margin-top:12px">
               <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :page-size="pageSize"
-                             :current-page="page" :page-sizes="[20,50,100]" @current-change="onPage" @size-change="onSize"/>
+                             :current-page="page" :page-sizes="[20,50,100]" @current-change="onPage" @size-change="onSize"></el-pagination>
             </div>
           </div>
         </template>
@@ -312,7 +341,7 @@
         <template v-else-if="tab==='codex'">
           <div class="card">
             <div class="toolbar">
-              <el-input v-model="cxQuery" placeholder="搜索文件名/邮箱" clearable style="width:240px" @keyup.enter="loadCodex"/>
+              <el-input v-model="cxQuery" placeholder="搜索文件名/邮箱" clearable style="width:240px" @keyup.enter="loadCodex"></el-input>
               <el-button type="success" @click="openManualOauth">人工授权</el-button>
               <el-button type="primary" @click="loadCodex">查询</el-button>
               <span class="right"></span>
@@ -341,7 +370,7 @@
             </el-table>
             <div style="display:flex;justify-content:flex-end;margin-top:12px">
               <el-pagination background layout="total, prev, pager, next" :total="cxTotal" :page-size="cxPageSize"
-                             :current-page="cxPage" @current-change="onCodexPage"/>
+                             :current-page="cxPage" @current-change="onCodexPage"></el-pagination>
             </div>
           </div>
         </template>
@@ -373,16 +402,16 @@
           </div>
           <el-dialog v-model="manualOauthOpen" title="人工 OAuth 授权" width="640px">
             <el-steps :active="oauthStep" simple style="margin-bottom:16px">
-              <el-step title="生成链接" /><el-step title="浏览器授权" /><el-step title="粘贴回调" />
+              <el-step title="生成链接" ></el-step><el-step title="浏览器授权" ></el-step><el-step title="粘贴回调" ></el-step>
             </el-steps>
             <div class="toolbar">
-              <el-input v-model="oauthEmail" placeholder="账号邮箱（可选）" style="width:260px" />
+              <el-input v-model="oauthEmail" placeholder="账号邮箱（可选）" style="width:260px" ></el-input>
               <el-button type="primary" :loading="oauthBusy" @click="startOauth">生成授权链接</el-button>
             </div>
-            <el-input v-if="oauthUrl" v-model="oauthUrl" readonly type="textarea" :rows="3" style="margin:10px 0" />
+            <el-input v-if="oauthUrl" v-model="oauthUrl" readonly type="textarea" :rows="3" style="margin:10px 0" ></el-input>
             <el-alert v-if="oauthUrl" type="info" :closable="false" show-icon
-                      title="在浏览器打开上面的链接并完成登录；最后浏览器会跳到 localhost:1455 打不开，把地址栏 URL 整个复制回来。" />
-            <el-input v-model="oauthCallback" placeholder="粘贴 http://localhost:1455/auth/callback?code=...&state=..." type="textarea" :rows="3" style="margin:12px 0" />
+                      title="在浏览器打开上面的链接并完成登录；最后浏览器会跳到 localhost:1455 打不开，把地址栏 URL 整个复制回来。" ></el-alert>
+            <el-input v-model="oauthCallback" placeholder="粘贴 http://localhost:1455/auth/callback?code=...&state=..." type="textarea" :rows="3" style="margin:12px 0" ></el-input>
             <template #footer>
               <el-button @click="manualOauthOpen = false">关闭</el-button>
               <el-button type="primary" :loading="oauthBusy" @click="finishOauth">提交回调</el-button>
@@ -396,9 +425,9 @@
           <div class="card">
             <div class="toolbar">
               <el-select v-model="cfgGroup" style="width:200px" placeholder="选择分组">
-                <el-option v-for="g in cfgGroups" :key="g" :label="g" :value="g" />
+                <el-option v-for="g in cfgGroups" :key="g" :label="g" :value="g" ></el-option>
               </el-select>
-              <el-input v-model="cfgFilter" placeholder="按名称/键筛选" clearable style="width:240px" />
+              <el-input v-model="cfgFilter" placeholder="按名称/键筛选" clearable style="width:240px" ></el-input>
               <el-button :loading="busy==='cfg'" @click="loadConfig">重新加载</el-button>
               <span class="right"></span>
               <span class="muted">改动 {{ Object.keys(cfgDirty).length }} 项</span>
@@ -416,10 +445,10 @@
               </el-table-column>
               <el-table-column label="值" min-width="320">
                 <template #default="{row}">
-                  <el-switch v-if="row.type==='bool'" v-model="cfgDraft[row.key]" />
-                  <el-input v-else-if="row.type==='int'||row.type==='float'" type="number" v-model="cfgDraft[row.key]" />
-                  <el-input v-else-if="row.type==='list_str_multiline'" type="textarea" :rows="3" v-model="cfgDraft[row.key]" />
-                  <el-input v-else :type="row.secret ? 'password' : 'text'" show-password v-model="cfgDraft[row.key]" />
+                  <el-switch v-if="row.type==='bool'" v-model="cfgDraft[row.key]" ></el-switch>
+                  <el-input v-else-if="row.type==='int'||row.type==='float'" type="number" v-model="cfgDraft[row.key]" ></el-input>
+                  <el-input v-else-if="row.type==='list_str_multiline'" type="textarea" :rows="3" v-model="cfgDraft[row.key]" ></el-input>
+                  <el-input v-else :type="row.secret ? 'password' : 'text'" show-password v-model="cfgDraft[row.key]" ></el-input>
                 </template>
               </el-table-column>
               <el-table-column label="说明" min-width="260">
@@ -434,10 +463,10 @@
             <div class="toolbar">
               <span class="muted" style="width:120px;">注册</span>
               <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'" inline-prompt
-                         @change="toggleRegistration" />
+                         @change="toggleRegistration" ></el-switch>
             </div>
             <el-alert type="info" :closable="false" show-icon
-                      title="暂停后不再接受任何新的注册任务（含重启补偿）；手动提交也会被拒绝。" />
+                      title="暂停后不再接受任何新的注册任务（含重启补偿）；手动提交也会被拒绝。" ></el-alert>
           </div>
           <div class="card" style="margin-bottom:14px;">
             <div class="card-title">关键配置</div>
@@ -918,7 +947,7 @@ createApp({
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
 
     return {
-      menus, tab, title, busy, cxSel, cxBulk, cfgItems, cfgDraft, cfgDirty, cfgGroup, cfgFilter, cfgGroups, cfgVisible, loadConfig, saveConfig, markCfgDirty, bulkChangeEmail, cleanupDead, cancelPending, rows, total, page, pageSize, loading, query, archived, sel, funnel,
+      menus, regionOf, tab, title, busy, cxSel, cxBulk, cfgItems, cfgDraft, cfgDirty, cfgGroup, cfgFilter, cfgGroups, cfgVisible, loadConfig, saveConfig, markCfgDirty, bulkChangeEmail, cleanupDead, cancelPending, rows, total, page, pageSize, loading, query, archived, sel, funnel,
       load, reload, onPage, onSize, switchTab, bulk, bulkNote, backfillCodex, tagType, fmt,
       regRunning, toggleRegistration, splitRunning, toggleSplit, regCount, regWorkers, regSource, regDriver,
       sourceOptions, driverOptions, jobCounts, loadSources, loadCounts, startRegistration,
