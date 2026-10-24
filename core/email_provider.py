@@ -355,14 +355,20 @@ def wait_for_otp(
 
     def _fetch(fetcher):
         _check_stop_requested()
+        # 把 max_wait 透传给取码器（remail 用自己的 max_wait 决定轮询截止）；
+        # 不支持该参数的 provider 会走下面的 TypeError 兼容分支。
+        _kwargs = dict(extra_kwargs)
+        if max_wait:
+            _kwargs.setdefault('max_wait', int(max_wait))
         try:
-            result = fetcher(email, after_ts=after_ts, **extra_kwargs)
+            result = fetcher(email, after_ts=after_ts, **_kwargs)
         except TypeError as exc:
             # 兼容尚未升级的第三方邮箱 provider；已升级的实现仍负责过滤旧 OTP。
             if "exclude_codes" not in extra_kwargs or "exclude_codes" not in str(exc):
                 raise
-            legacy_kwargs = dict(extra_kwargs)
+            legacy_kwargs = dict(_kwargs)
             legacy_kwargs.pop("exclude_codes", None)
+            legacy_kwargs.pop("max_wait", None)
             logger.warning("[EmailProvider] provider 尚未支持 exclude_codes，降级调用：%s", getattr(fetcher, "__module__", fetcher))
             result = fetcher(email, after_ts=after_ts, **legacy_kwargs)
         _check_stop_requested()

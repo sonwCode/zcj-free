@@ -34,6 +34,7 @@
   .email-cell{display:flex;flex-direction:column;line-height:1.35}
   .email-cell .sub{font-size:12px;color:#909399}
   .right{margin-left:auto}
+  .logbox{background:#0f1720;color:#c9d1d9;padding:14px;border-radius:8px;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-all;max-height:80vh;overflow:auto}
 </style>
 </head>
 <body>
@@ -174,6 +175,36 @@
             </div>
           </div>
         </template>
+        <template v-else-if="tab==='logs'">
+          <div class="card">
+            <div class="toolbar">
+              <el-button :loading="busy==='jobs'" @click="loadJobs">刷新</el-button>
+              <span class="right"></span>
+              <span class="muted">最近 {{ jobRows.length }} 条任务</span>
+            </div>
+            <el-table :data="jobRows" v-loading="busy==='jobs'" size="small" border stripe style="width:100%">
+              <el-table-column label="ID" width="76"><template #default="{row}">#{{ row.id }}</template></el-table-column>
+              <el-table-column label="邮箱" min-width="220"><template #default="{row}">{{ row.email || '-' }}</template></el-table-column>
+              <el-table-column label="状态" width="120">
+                <template #default="{row}"><el-tag size="small" :type="jobTag(row.status)">{{ row.status }}</el-tag></template>
+              </el-table-column>
+              <el-table-column label="阶段" width="120"><template #default="{row}">{{ row.phase || '-' }}</template></el-table-column>
+              <el-table-column label="Codex" width="104"><template #default="{row}"><el-tag size="small" :type="tagType('codex',row.codex_status)">{{ row.codex_status || '-' }}</el-tag></template></el-table-column>
+              <el-table-column label="错误码" width="150"><template #default="{row}">{{ row.error_code || '-' }}</template></el-table-column>
+              <el-table-column label="创建" width="150"><template #default="{row}">{{ fmt(row.created_at) }}</template></el-table-column>
+              <el-table-column label="操作" width="190">
+                <template #default="{row}">
+                  <el-button size="small" text @click="openLog(row)">日志</el-button>
+                  <el-button size="small" text type="warning" @click="stopJob(row)">停止</el-button>
+                  <el-button size="small" text type="primary" @click="retryJob(row)">重试</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <el-drawer v-model="logOpen" :title="'Job #' + logJobId + ' 日志'" size="56%">
+            <pre class="logbox">{{ logText || '（暂无日志）' }}</pre>
+          </el-drawer>
+        </template>
         <template v-else>
           <div class="card"><el-empty :description="title + ' 迁移中'"/></div>
         </template>
@@ -225,7 +256,7 @@ createApp({
     function reload() { page.value = 1; load(); }
     function onPage(p) { page.value = p; load(); }
     function onSize(s) { pageSize.value = s; page.value = 1; load(); }
-    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } }
+    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } else if (k === 'logs') { loadJobs(); } }
 
     const ids = () => sel.value.map(r => Number(r.id));
 
@@ -292,6 +323,7 @@ createApp({
 
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
     return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+             jobRows, logOpen, logText, logJobId, loadJobs, openLog, stopJob, retryJob, jobTag,
              cxRows, cxTotal, cxPage, cxPageSize, cxQuery, loadCodex, onCodexPage, deleteCodex,
              regRunning, toggleRegistration,
              sms, smsEligible, smsReservations, loadSms, smsToggle,
