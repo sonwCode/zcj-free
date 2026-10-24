@@ -43,6 +43,39 @@ def try_resume(email: str) -> dict | None:
     token = str(info.get('access_token') or '').strip()
     password = str(info.get('password') or '').strip()
     data = _load(addr)
+    # 保护1：该邮箱在库里已有账号时不再重复落库（避免重复插入同一邮箱）。
+    try:
+        from core import db as _db
+
+        _exist = None
+        try:
+            if hasattr(_db, 'find_account_by_email'):
+                _exist = _db.find_account_by_email(addr)
+            else:
+                # db 没有按邮箱查询的辅助函数：扫描一遍历史账号（含归档）
+                for _row in (_db.list_accounts(limit=100000, archived=None) or []):
+                    if str(_row.get('email') or '').strip().lower() == addr.lower():
+                        _exist = _row
+                        break
+        except Exception:
+            _exist = None
+        if _exist:
+            logger.info('[断点恢复] %s 已存在账号 #%s，清理断点', addr, _exist.get('id'))
+            _clear(addr)
+            return None
+    except Exception:
+        pass
+
+    # 保护2：断点里的 token 若已过期，恢复无意义（落库一个死号），直接清断点。
+    try:
+        from core.token_expiry import token_needs_refresh
+
+        if token and token_needs_refresh(token):
+            logger.warning('[断点恢复] %s 断点 token 已过期，放弃恢复', addr)
+            _clear(addr)
+            return None
+    except Exception:
+        pass
     try:
         from core import db
 

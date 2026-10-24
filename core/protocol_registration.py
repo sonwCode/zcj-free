@@ -264,6 +264,9 @@ def run_protocol_registration(
             _log_phase("跟随授权页", True, str(final_url)[:70])
         except Exception as exc:
             _log_phase("跟随授权页", False, "%s: %s" % (type(exc).__name__, str(exc)[:120]))
+            # 授权链没建起来就继续，后面 authorize/continue 必然 409 invalid_state，
+            # 等于白烧一个邮箱与出口。这里直接失败，让上层换出口/重试。
+            raise
 
         # 第 1 步：先建立授权事务（signup screen_hint），否则后续 user/register 直接 400。
         # 参照 aBaiFreeGPT/platforms/chatgpt/protocol_register.py 的顺序：
@@ -435,6 +438,38 @@ def run_protocol_registration(
                            str(queued.get("error") or queued.get("status") or "")[:80])
         except Exception as exc:
             _log_phase("2FA 入队", False, str(exc)[:100])
+
+        # 协议注册自带收尾：注册阶段签到的是 signup 令牌（amr 只有 otp_email），
+        # 实测这种号很快被停用；成品令牌必须带 pwd + mfa。
+        # 这里用「密码 + TOTP」在同一会话里重新登录换发（不依赖查活）。
+        try:
+            from core import token_health as _th
+            from core.ready_token import relogin_with_retry as relogin_for_ready_token
+
+            if not _th.is_ready_token(access_token):
+                _log_phase("成品token", False, _th.describe(access_token))
+                _row = {}
+                try:
+                    _row = db.get_account(int(account_id)) or {}
+                except Exception:
+                    _row = {}
+                _rt = relogin_for_ready_token(
+                    session, email,
+                    password=password,
+                    totp_secret=str(_row.get("totp_secret") or ""),
+                )
+                if _rt.get("ok") and _rt.get("token"):
+                    access_token = str(_rt["token"])
+                    from core.ready_token import save_ready_token
+                    save_ready_token(int(account_id), access_token)
+                    _log_phase("成品token", True, _th.describe(access_token))
+                else:
+                    _log_phase("成品token", False, str(_rt.get("reason"))[:120])
+            else:
+                _log_phase("成品token", True, "已是成品令牌")
+        except Exception as exc:
+            _log_phase("成品token", False, str(exc)[:100])
+
 
         # 暖号：用同一 device 指纹补一轮真实前端请求（完整 bootstrap、
         # 会话初始化、会话列表），让新号带上使用痕迹。
