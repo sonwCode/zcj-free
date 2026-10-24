@@ -2485,3 +2485,71 @@ timeout 15s→40s，最多重试 4 次（每次换出口 IP，不换指纹）。
 本轮结论：dango 提供 5 条可直接修的实现问题（其中 1 条已修：超时不该重试）；
 焚诀提供方法论与 1 条 SSE 协议细节。
 ```
+
+## 55. dango 七条清单的逐条核对结果（第 29 轮）
+
+把 dango 的改动逐条对照我们自己的代码，结论比预期更"我们已经做了不少"。
+
+| # | dango 的做法 | 我们的现状 | 处理 |
+|---|---|---|---|
+| 1 | `curl:(28)` 超时**不重试** | 我们原来把 timeout 也算可重试 | ✅ **已修**（拆 `TIMEOUT_MARKERS`） |
+| 2 | warmup 判据查 cookie 里有没有 `oai-did` | 无此守卫 | ✅ 已加 `core/auth_warmup_gate`，接了开关（默认关） |
+| 3 | 必须发 `sec-ch-ua`（client hints） | **本来就有**，连"Safari 不发 CH"都写在注释里 | ✅ 无需改（第 615 行） |
+| 4 | 401/403 读响应体判封号 | 只有 200+`is_deactivated` 那条死代码 | ✅ 已加 `classify_token_failure` 并接线 |
+| 5 | 补 `Origin`/`Referer`/账号 id/设备 id | 会话内已有，但 **/me 探活没带** | ✅ 已接线（`account_api_headers`） |
+| 6 | warmup 失败拦在 `create_mailbox` 之前 | 无 | ✅ 已在守卫里 raise |
+| 7 | 换指纹时 `sec-ch-ua` 与 UA 同步 | **本来就一致** | ✅ 无需改 |
+
+### 55.1 关于 #3 / #7 的实测核对
+
+```
+USER_AGENT  = ... Chrome/150.0.0.0 ...
+SEC_CH_UA   = "Chromium";v="150", "Not-A.Brand";v="24", "Google Chrome";v="150"
+IMPERSONATE = chrome150
+```
+
+三者版本一致。也就是说 dango 踩的"UA 说 136、sec-ch-ua 说 146"那个坑，
+我们的实现里不存在（`_get_common_headers` 直接按画像取 CH，
+并显式处理了 Safari 不发 Chromium CH 的情况）。
+
+**这条经验值得记**：研究别人的补丁时，先核对自己是否已有；
+否则会把时间花在"移植一个我们本来就对的实现"上。
+
+### 55.2 dango 唯一是我判断失误的地方
+
+我上一轮写的 `transient_retry` 把 timeout 归入可重试，
+而它 148 轮实测证明**超时不能重试**（请求可能已送达并处理，
+重试 POST 会重复建号或重复发 OTP）。这条是它纠正我，不是我们已有。
+
+---
+
+## 56. pirder/codex_me：标签断连恢复（已移植）（第 29 轮）
+
+`src/core/codex_keep_alive.py` 里有一套浏览器自愈：
+
+```python
+def _is_page_disconnected_error(exc):
+    return exc.__class__.__name__ == "PageDisconnectedError" \
+        or "与页面的连接已断开" in str(exc)
+def _recover_browser_tab(browser_manager, ...):   # quit → init → new_tab
+def _navigate_with_tab_recovery(..., max_attempts=3)   # 导航前先做 tab.url 健康检查
+```
+
+**我们的缺口**：全仓库搜不到 `PageDisconnected` / `连接已断开` 的识别，
+`cloakbrowser_*` 里也没有任何 recover/restart——**标签一崩，整轮注册直接判失败**。
+
+**已落地 `core/tab_recovery.py`**：
+- `is_page_disconnected_error(err)`：按类名 + 关键字（含中文"与页面的连接已断开"、
+  `target closed`、`invalid session id` 等）识别；
+- `run_with_tab_recovery(open_session, action, close_session=..., attempts=2)`：
+  遇断连 → 关闭旧会话 → 重开 → 重试 action；**业务错误原样抛出、不重开**；
+  耗尽抛 `TabRecoveryFailed`（便于上层按"浏览器故障"分类）。
+
+测试 `tests/test_tab_recovery.py` **6/6 PASS**，其中两条锁语义：
+`test_non_disconnect_error_not_retried`（业务错误只开一次会话）、
+`test_exhausted_raises`（耗尽抛专用异常）。
+
+```
+移植判定：断连恢复 → 移植（已完成，未接驱动）；
+codex_keep_alive 的 sign_up/login/authorize_codex → 与我们同构，不移植。
+```
