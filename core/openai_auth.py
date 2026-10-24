@@ -620,7 +620,10 @@ def register_user(
     logger.info("[步骤7] 提交邮箱和密码：%s", email)
     resp = session.post(url, headers=headers, data=body)
     if resp.status_code != 200:
-        logger.error("[步骤7] user/register 失败 status=%s content_length=%s", resp.status_code, len(resp.text or ""))
+        # 打全响应体：400 的具体原因（邮箱被拒 / 已存在 / 域名不支持）必须看得见，
+        # 只打 content_length 等于把排查线索丢掉。
+        logger.error("[步骤7] user/register 失败 status=%s body=%s",
+                     resp.status_code, str(resp.text or "")[:400])
         resp.raise_for_status()
     data = resp.json()
     return data

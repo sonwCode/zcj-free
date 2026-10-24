@@ -127,6 +127,7 @@
               <template v-if="importSource==='imap'">
                 <span class="muted">IMAP 服务器</span>
                 <el-input v-model="imapServer" placeholder="imap.example.com:993" style="width:220px" />
+                <el-checkbox v-model="importSplit">导入后每个邮箱再分裂 1 个</el-checkbox>
               </template>
             </div>
             <el-input v-model="importText" type="textarea" :rows="9" style="margin-top:10px"
@@ -645,6 +646,7 @@ createApp({
     const poolSource = ref('outlook'), poolRows = ref([]), poolTotal = ref(0);
     const poolPage = ref(1), poolQuery = ref(''), poolSel = ref([]);
     const importOpen = ref(false), importText = ref(''), importSource = ref('outlook'), imapServer = ref('');
+    const importSplit = ref(true);
     async function loadPool() {
       busy.value = 'pool';
       try {
@@ -672,6 +674,7 @@ createApp({
       try {
         const body = { source: importSource.value, text: importText.value };
         if (importSource.value === 'imap' && imapServer.value) body.imap_server = imapServer.value;
+        if (importSource.value === 'imap') body.split_once = importSplit.value;
         const d = await post('/api/outlook/import', body);
         if (d.ok === false) throw new Error(d.error || '导入失败');
         ElMessage.success('已导入 ' + (d.imported ?? d.count ?? 0) + ' 条');
@@ -898,7 +901,7 @@ createApp({
       regRunning, toggleRegistration, regCount, regWorkers, regSource, regDriver,
       sourceOptions, driverOptions, jobCounts, loadSources, loadCounts, startRegistration,
       poolSources, poolSource, poolRows, poolTotal, poolPage, poolQuery, poolSel,
-      loadPool, reloadPool, onPoolPage, deletePool, importOpen, importText, importSource, imapServer, doImport,
+      loadPool, reloadPool, onPoolPage, deletePool, importOpen, importText, importSource, imapServer, importSplit, doImport,
       sms, smsEligible, smsReservations, smsStatus, smsEvents, cap, live, loadSms, smsToggle,
       cxRows, cxTotal, cxPage, cxPageSize, cxQuery, loadCodex, onCodexPage, deleteCodex,
       manualOauthOpen, oauthEmail, oauthUrl, oauthCallback, oauthBusy, oauthStep, openManualOauth, startOauth, finishOauth,

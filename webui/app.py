@@ -2328,7 +2328,10 @@ def create_app(auth_code: str | None = None) -> Flask:
                 records.append({
                     "email": parts[0], "imap_password": parts[1],
                     "imap_server": imap_server, "imap_port": imap_port,
-                    "imap_ssl": imap_ssl, "imap_username": "",
+                    "imap_ssl": imap_ssl,
+                    # 第三段可选：iCloud 等平台的登录名（Apple ID）与地址不同，
+                    # 例如 idea-clues-5w@icloud.com----<app密码>----lucasfx66@icloud.com
+                    "imap_username": parts[2] if len(parts) > 2 else "",
                 })
                 continue
             if len(parts) < 4:
@@ -2346,6 +2349,33 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "邮箱----IMAP密码 或 邮箱:IMAP密码" if source == "imap" else
                     "4 段：email----password----clientId----refreshToken")
             return jsonify({"ok": False, "error": f"未解析到有效邮箱行（需 {need}，---- 或 ==== 分隔）"}), 400
+        # 导入即分裂：每个导入的邮箱再派生子地址（+6位后缀），池子直接翻倍。
+        # 用户场景：导入的本身就是 iCloud 别名，再裂一次 30 → 60。
+        try:
+            if source == "imap" and bool(data.get("split_once")):
+                from core.email_splitter import split_email
+
+                origin = list(records)
+                added = 0
+                for rec in origin:
+                    email_addr = str(rec.get("email") or "")
+                    if not email_addr:
+                        continue
+                    try:
+                        alias = split_email(email_addr, 1)[0]
+                    except Exception:
+                        continue
+                    child = dict(rec)
+                    child["email"] = alias
+                    child["imap_username"] = (
+                        str(rec.get("imap_username") or "").strip() or email_addr
+                    )
+                    records.append(child)
+                    added += 1
+                logger.info("[邮箱导入] 分裂派生 %d 条（源 %d 条）", added, len(origin))
+        except Exception as exc:
+            logger.warning("[邮箱导入] 分裂派生失败：%s: %s", type(exc).__name__, str(exc)[:120])
+
         if as_registered:
             inserted, skipped = db.import_registered_email_accounts(records, source=source)
         elif source == "generic_api":
