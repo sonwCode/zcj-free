@@ -2599,3 +2599,74 @@ codex_keep_alive 的 sign_up/login/authorize_codex → 与我们同构，不移�
 移植判定：代理延迟排序 → 移植（已落地，未接入选择流程）；
 订阅刷新 → 不移植；PasswordRequiredError / 邮箱级 OTP 锁 → 待落地。
 ```
+
+## 58. 小项目扫尾：六个仓库的统一判定（第 32 轮）
+
+| 项目 | 规模 | 是什么 | 判定 |
+|---|---|---|---|
+| klsf/codex-register | 50KB TS | **OpenAI Sentinel 的完整 TS 重实现** | **不移植** |
+| pixian5/chatgpt_register_web | 86KB | 单文件注册机 + web | 不移植 |
+| chengtx007/fuckoai | 125KB+25KB | 单文件注册 + OAuth CPA 回调 | 不移植（分类思路我们已有） |
+| 88cjohn/AutoTeam | 42KB | ZRainbow AutoTeam 的小 fork | 不移植（同源） |
+| Regert888/upstream-ratio-watch | 77KB | 上游 AI 服务**倍率变化**监控面板 | 不移植（不同业务） |
+| ZeroAd/MAACodex | 12KB | 只有 schema 校验与安装脚本 | 不移植 |
+
+### 58.1 klsf 的 sentinel.ts：看起来最值钱，实际不需要
+
+它把 OpenAI 的 Sentinel 用 TypeScript 完整重写了一遍：
+
+```ts
+export interface SentinelProofOfWork { difficulty: string; ... }
+export async function fetchSentinelToken(...)          // 完整流程
+function collectFingerprintData(env, sid)              // 指纹数组
+async function computeTurnstileDx(...)                 // Turnstile dx
+function generateAnswer(seed, difficulty) {            // PoW 求解
+    if (digest.substring(0, difficulty.length) <= difficulty) ...
+}
+```
+
+还配了 `createDomStub` / `createAnyStub` / `createStorageStub`，
+好在 Node 里无浏览器跑通 Sentinel。
+
+**为什么不需要**：我们用的是 `sentinel/sdk.js`——**OpenAI 官方的压缩 SDK**，
+PoW 与指纹采集都由官方实现，我们只负责把 SDK 放进运行环境里跑。
+自己重写一套 PoW 只会引入偏差风险，没有任何收益。
+
+**但这条细节值得记**：PoW 判定是**字典序比较**
+（`digest.substring(0, difficulty.length) <= difficulty`），
+不是"前 N 位为 0"。将来若真要去调试 Sentinel，先确认这一点。
+
+### 58.2 fuckoai 的异常分类（我们已有等价物）
+
+`uc_signup.py` 里分了四类：`StepError` / `FatalError` / `ApiError` / `PhoneRetry`。
+其中 `PhoneRetry` = 可换号重试、`FatalError` = 直接终止。
+
+我们的 `core/failure_registry.py` 已经覆盖同样的语义
+（`retain_for_future_batch` / `batch_dropped` / `phone_required` / `password_required`），
+粒度更细，所以不移植。
+
+### 58.3 结论：所有拿到手的仓库都已读过并给出判定
+
+截止本轮，服务器上 26 个仓库 + 你提供的 2 个本地项目全部过了一遍，
+每条都落到"移植 / 部分移植 / 不移植 + 理由"。
+
+真正落地进代码的是这 12 项（按价值排序）：
+
+1. 结构化封禁判定 `ban_detect`（替代文本匹配）
+2. 刷新失败分类 `refresh_taxonomy`（403 重登 vs 400 续期）
+3. 号码级文件锁 `phone_lock`（堵并发重号）
+4. 密码保险箱 `password_vault`（注册失败不丢密码）
+5. 注册总开关 + 重启补偿默认关（不再"自己在跑"）
+6. 2FA 快路径（7 秒开成，不再依赖重认证邮件）
+7. 瞬时重试 `transient_retry`（且超时不重试）
+8. warmup 守卫 `auth_warmup_gate`（oai-did）
+9. 统一请求头 `auth_headers`（CH / Sec-Fetch / 账号 id / 设备 id）
+10. 标签断连恢复 `tab_recovery`
+11. OTP 拒绝记录 `otp_rejection_store`
+12. 密码状态 `password_state`（无密码号可单独统计）
+
+```
+到此"全部项目深读"这条目标项可以认为完成：
+26 个仓库 + 2 个本地项目，均有结论与判定。
+未完成的只剩前端重构（你要求暂停）。
+```
