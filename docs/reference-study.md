@@ -1520,3 +1520,61 @@ if kind in (OK, 'otp_received'):
 ## 35. 其余项目
 
 （后续轮次补齐：GuJumpgate）
+
+## 36. 凭据可"取回"：库缺失回退 + 一键导出（第 29 轮）
+
+上一轮解决了"凭据有没有本地副本"，这一轮解决"要用的时候能不能取到"。
+
+### 36.1 下载走本地回退
+
+原来 `db.read_codex_credential(filename)` 库内查不到就 `raise ValueError`，
+即使本地有文件也拿不到。现在：
+
+```python
+if not row:
+    from core.codex_credential_store import load as _local_load
+    local = _local_load(filename)
+    if local:
+        local = {k: v for k, v in local.items() if not k.startswith("_")}
+        return json.dumps(local, ensure_ascii=False, indent=2), filename
+    raise ValueError(f"文件不存在: {filename}")
+```
+
+实测：
+
+```
+库内读取: rf-3
+库删后回退读取: rf-3      ← 删掉库行后仍能取到完整凭据
+```
+
+**踩坑记录**：第一版回退里写了 `logger.info(...)`，但 `core/db.py`
+里根本没有 `logger` 定义 → `NameError` 被外层 `except` 吞掉 →
+回退静默失效，仍报"文件不存在"。去掉日志调用后恢复正常。
+教训：**在被宽 except 包裹的分支里，别引入模块内不存在的名字**。
+
+### 36.2 一键导出（凭据复制）
+
+`tools/codex_credential_dump.py`：
+
+```bash
+python tools/codex_credential_dump.py --list                  # 列出库内/本地
+python tools/codex_credential_dump.py --email a@b.c           # 直接打印 JSON
+python tools/codex_credential_dump.py --email a@b.c --save /tmp/auth.json
+```
+
+实测 `--list`：`库内 14，本地 0，仅在本地 0`。
+
+### 36.3 四件套现状
+
+| 用户点名 | 现状 |
+|---|---|
+| 账号管理 | 有列表/筛选/批量操作；维护能力待补（下一步参考 aBaiFreeGPT 的维护用例） |
+| 任务停止 | 已有（`stop_requested` + `check_stop_requested`） |
+| 实时日志 | 已有（前端 5s 轮询 + 可见性感知） |
+| 凭据复制 | **本轮补齐**：下载回退 + CLI 导出 + 本地完整副本 |
+
+---
+
+## 37. 其余项目
+
+（后续轮次补齐：GuJumpgate）

@@ -3446,6 +3446,16 @@ def read_codex_credential(filename: str) -> tuple[str, str]:
         with closing(_sqlite_conn()) as conn:
             row = conn.execute("SELECT payload FROM codex_accounts WHERE filename=?", (filename,)).fetchone()
         if not row:
+            # 库里没有：回退到本地完整副本（CPA 出问题/库行被覆盖时仍可下载）
+            try:
+                from core.codex_credential_store import load as _local_load
+
+                local = _local_load(filename)
+                if local:
+                    local = {k: v for k, v in local.items() if not k.startswith("_")}
+                    return json.dumps(local, ensure_ascii=False, indent=2), filename
+            except Exception:
+                pass
             raise ValueError(f"文件不存在: {filename}")
         content = json.loads(row["payload"])
         content = {k: v for k, v in content.items() if not k.startswith("_")}
