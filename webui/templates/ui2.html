@@ -244,11 +244,24 @@
         </template>
         <template v-else-if="tab==='sms'">
           <div class="funnel">
-            <div class="fitem"><div class="k">总开关</div><div class="v">{{ sms.enabled ? '开启' : '关闭' }}</div></div>
-            <div class="fitem"><div class="k">状态</div><div class="v">{{ sms.paused ? '已暂停' : '运行中' }}</div></div>
-            <div class="fitem"><div class="k">并发 / 预热</div><div class="v">{{ sms.workers || '-' }} / {{ sms.prewarm ?? '-' }}</div></div>
-            <div class="fitem"><div class="k">候选账号</div><div class="v">{{ (smsEligible||[]).length }}</div></div>
-            <div class="fitem"><div class="k">占用中</div><div class="v">{{ (smsReservations||[]).length }}</div></div>
+            <div class="fitem"><div class="k">可补跑候选</div><div class="v">{{ cap.eligible ?? 0 }}</div></div>
+            <div class="fitem g"><div class="k">测活正常</div><div class="v">{{ live.ready ?? 0 }}</div></div>
+            <div class="fitem a"><div class="k">待测活</div><div class="v">{{ live.waiting ?? 0 }}</div></div>
+            <div class="fitem"><div class="k">测活中</div><div class="v">{{ live.checking ?? 0 }}</div></div>
+            <div class="fitem"><div class="k">号码待分配</div><div class="v">{{ cap.in_flight ?? 0 }}</div></div>
+            <div class="fitem"><div class="k">并发任务</div><div class="v">{{ cap.active ?? 0 }}</div></div>
+          </div>
+          <div class="card" style="margin-bottom:14px;">
+            <div class="toolbar">
+              <span class="muted">启用平台 {{ (smsStatus.configured_providers || []).join(' / ') || '—' }}</span>
+              <span class="muted">单号上限 ￥{{ smsStatus.max_price_cny ?? '—' }}</span>
+              <span class="muted">轮询 / 并发 {{ smsStatus.poll_interval ?? '—' }}s / {{ smsStatus.workers ?? '—' }}</span>
+              <span class="muted">今日花费 ￥{{ (smsStatus.budget || {}).spent_cny_24h ?? 0 }}</span>
+              <span class="muted">24h 退款 ￥{{ (smsStatus.budget || {}).refunded_cny_24h ?? 0 }}</span>
+              <span class="right"></span>
+              <el-button size="small" :loading="busy==='sms'" @click="loadSms">刷新</el-button>
+              <el-button size="small" type="primary" :loading="busy==='sms'" @click="smsToggle">{{ smsStatus.paused ? '恢复' : '暂停' }}</el-button>
+            </div>
           </div>
           <div class="card" style="margin-bottom:14px;">
             <div class="toolbar">
@@ -263,6 +276,15 @@
               <el-table-column label="套餐" width="92"><template #default="{row}">{{ row.plan_type || row.current_plan_type || 'free' }}</template></el-table-column>
               <el-table-column label="Codex" width="104"><template #default="{row}"><el-tag size="small" :type="tagType('codex',row.codex_status)">{{ row.codex_status || '未开始' }}</el-tag></template></el-table-column>
               <el-table-column label="测活" width="98"><template #default="{row}"><el-tag size="small" :type="tagType('live',row.live_check_status)">{{ row.live_check_status || '-' }}</el-tag></template></el-table-column>
+            </el-table>
+          </div>
+          <div class="card">
+            <div class="card-title">运行事件</div>
+            <el-table :data="smsEvents" size="small" border stripe style="width:100%" empty-text="暂无事件">
+              <el-table-column label="时间" width="180"><template #default="{row}">{{ fmt(row.created_at) }}</template></el-table-column>
+              <el-table-column label="事件" width="140"><template #default="{row}"><el-tag size="small">{{ row.event }}</el-tag></template></el-table-column>
+              <el-table-column label="详情" min-width="240"><template #default="{row}">{{ row.detail || '-' }}</template></el-table-column>
+              <el-table-column label="预留" width="100"><template #default="{row}">{{ row.reservation_id ?? '-' }}</template></el-table-column>
             </el-table>
           </div>
           <div class="card">
@@ -641,18 +663,23 @@ createApp({
 
     /* ---------- 号码池 ---------- */
     const sms = ref({}), smsEligible = ref([]), smsReservations = ref([]);
+    const smsStatus = ref({}), smsEvents = ref([]);
+    const cap = computed(() => (smsStatus.value.capacity || {}));
+    const live = computed(() => (cap.value.live_summary || {}));
     async function loadSms() {
       busy.value = 'sms';
       try {
         const st = await api('/api/sms-pool/status');
         sms.value = st || {};
+        smsStatus.value = (st && st.status) || {};
+        smsEvents.value = ((st && st.events) || []).slice(0, 100);
         try { const e = await api('/api/sms-pool/eligible'); smsEligible.value = (e.items || e.accounts || e || []).slice(0, 50); } catch (e2) { smsEligible.value = []; }
         try { const r = await api('/api/sms-pool/reservations'); smsReservations.value = (r.items || r.reservations || r || []).slice(0, 50); } catch (e3) { smsReservations.value = []; }
       } catch (e) { ElMessage.error('号码池加载失败：' + e.message); }
       finally { busy.value = ''; }
     }
     async function smsToggle() {
-      try { await post('/api/sms-pool/toggle', { paused: !sms.value.paused }); await loadSms(); }
+      try { await post('/api/sms-pool/toggle', { paused: !smsStatus.value.paused }); await loadSms(); }
       catch (e) { ElMessage.error('操作失败：' + e.message); }
     }
 
@@ -852,7 +879,7 @@ createApp({
       sourceOptions, driverOptions, jobCounts, loadSources, loadCounts, startRegistration,
       poolSources, poolSource, poolRows, poolTotal, poolPage, poolQuery, poolSel,
       loadPool, reloadPool, onPoolPage, deletePool, importOpen, importText, importSource, imapServer, doImport,
-      sms, smsEligible, smsReservations, loadSms, smsToggle,
+      sms, smsEligible, smsReservations, smsStatus, smsEvents, cap, live, loadSms, smsToggle,
       cxRows, cxTotal, cxPage, cxPageSize, cxQuery, loadCodex, onCodexPage, deleteCodex,
       manualOauthOpen, oauthEmail, oauthUrl, oauthCallback, oauthBusy, oauthStep, openManualOauth, startOauth, finishOauth,
       jobRows, logOpen, logText, logJobId, loadJobs, openLog, stopJob, retryJob, jobTag,
