@@ -152,6 +152,7 @@ FAILURE_CLASSES: tuple[FailureClass, ...] = (
             'email_submit_stalled',
             'missing_continue_with_password',
             '未进入密码页',
+            'password_required_but_missing',
             '找不到邮箱输入框',
             '找不到 otp 输入框',
             'accesstoken 超时',

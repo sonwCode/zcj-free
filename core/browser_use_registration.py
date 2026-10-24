@@ -1057,6 +1057,14 @@ def _is_email_verification_page(page) -> bool:
 
 
 def _click_passwordless_signup_if_present(page) -> bool:
+    # 政策：必须走密码注册；开启后这里直接放弃点击无密码入口。
+    try:
+        from config import register as _rc
+
+        if bool(getattr(_rc, "REGISTRATION_REQUIRE_PASSWORD", True)):
+            return False
+    except Exception:
+        pass
     """在注册/登录密码页优先点击“使用一次性验证码”，进入邮箱 OTP 流。"""
     selectors = [
         "button[name='intent'][value='passwordless_signup_send_otp']",

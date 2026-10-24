@@ -517,6 +517,17 @@ def _run_cloak_registration_impl(
             create_acknowledged = True
             human_delay("post_auth")
 
+        # 政策：必须走密码注册。没设上密码的号在查活/2FA/Codex 上都更脆弱，
+        # 与其产出一个"半残号"，不如现在就判失败。
+        try:
+            from config import register as _reg_cfg
+
+            _require_pwd = bool(getattr(_reg_cfg, 'REGISTRATION_REQUIRE_PASSWORD', True))
+        except Exception:
+            _require_pwd = True
+        if _require_pwd and not openai_password:
+            raise RuntimeError('password_required_but_missing: 未进入密码创建页，拒绝无密码建号')
+
         session_info = _fetch_chatgpt_session(
             driver,
             timeout=150,
