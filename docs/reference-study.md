@@ -1930,3 +1930,62 @@ email_otp_timeout=180, sms_otp_timeout=30, sms_max_attempts=3, sms_max_otp_retri
 覆盖情况：phone_binding 的锁/绑定入口/存储已读；pipeline 的支付与 SMS 部分已读；
 未读：roxy_mgr(58KB) / browser_mgr / plan_check(51KB) / jp_identity。
 ```
+
+## 45. Regert888/gpt-auto-register 补深读：密码早存与事件推送（第 7 轮）
+
+上一版只看了 sentinel 文档。补读 `auth_flow.py`(179KB)、`webui/registrar.py`(30KB)、
+`webui/auto_loop.py` 后，抓到两个直接影响我们的做法。
+
+### 45.1 `_save_password_early` —— 我们 13 个无密码号的真正原因（已修）
+
+它的 registrar 里有个不起眼但关键的函数：
+
+```python
+def _save_password_early(email: str, password: str) -> None:
+    """设好密码的第一时间就落盘，不等整条流程结束。"""
+```
+
+对照我们：`core/codex_oauth.remember_registration_password` 只写进**内存字典**
+`_PENDING_PASSWORDS`，等账号落库时才一起写进 `extra.registration_password`。
+
+后果很直接：**注册在"设好密码"之后失败**（OTP 超时、建号失败、进程重启），
+内存里的密码随进程消失 → 账号存在但没有密码。
+我们库里 13 个无密码号（#42 #45 #46 #47 #48 #84 #86 #94 #97 #99 #100 #102 #115）
+大概率就是这么产生的。
+
+**已落地 `core/password_vault.py`**：
+- `remember/get/pop/list_pending`，落 `data/pending_passwords.json`（0600）；
+- `remember_registration_password` 改为**内存 + 落盘双写**；
+- `pop_pending_registration_password` 无论从哪取到都清理保险箱，避免残留。
+
+**已落地 `tools/backfill_pending_passwords.py`**：
+把保险箱里遗留的密码回填到没有密码的账号（`--apply`）。
+
+实测：`保险箱条目: 0`（存量已丢的救不回来，但**今后不会再丢**）。
+
+### 45.2 AutoLoopController —— 事件推送而非轮询
+
+```python
+class AutoLoopController:
+    def start/pause/resume/stop/status(...)
+    def subscribe() -> queue.Queue      # 每个前端一个队列
+    def _broadcast(kind, data)          # 状态变化推给所有订阅者
+```
+
+我们的前端是**每 5 秒轮询**（第 1 轮还专门加了"页面隐藏就不轮询"）。
+它的做法是后端维护订阅队列、状态变化主动推——对日志/进度这类高频变化更合适。
+我们目前不打算为此引入 SSE/WebSocket（部署面变复杂），记录备查。
+
+### 45.3 其他
+
+- `AuthFlow` 179KB：`_build_codex_authorize` / `_follow_authorize_for_callback` /
+  `_callback_has_code` / `fetch_client_auth_session_dump` —— 与我们的 codex_oauth 同构；
+- `_extract_login_challenge_from_cookie`：从 cookie 里取登录挑战值，
+  我们没有对应实现（我们靠 sentinel）；
+- `classify_error(err, mail_source)`：分类时**带上邮箱来源**这个维度，
+  我们的 failure_registry 目前只看错误文本。
+
+```
+覆盖情况：registrar / auto_loop / auth_flow 的关键函数已读；
+未读：mail_providers/icloud_relay(52KB) / sms_provider(48KB) / fingerprint(26KB)。
+```

@@ -271,3 +271,6 @@ CODEX_LOCAL_COPY: bool = True
 
 # 2FA 重认证取码的最长等待（秒）：刚注册的号首封邮件常晚到
 TWOFA_OTP_MAX_WAIT: int = 240
+
+# 有可用 accessToken 时先直接 enroll（跳过重认证 OTP），失败再回退
+TWOFA_FAST_PATH_FRESH_TOKEN: bool = True

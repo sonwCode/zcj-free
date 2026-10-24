@@ -1318,6 +1318,42 @@ def create_app(auth_code: str | None = None) -> Flask:
         """新版界面（Vue 3 + Element Plus，与旧版并存）。"""
         return render_template("ui2.html")
 
+    @app.get("/api/settings/overview")
+    def api_settings_overview():
+        """运行态总览：开关状态 + 关键配置 + 备份/凭据数量。"""
+        from core import registration_switch as _sw
+
+        out = {"ok": True, "switch": _sw.status()}
+        try:
+            from config import codex as _cx, email as _em, register as _rg, twofa as _tf
+
+            out["config"] = {
+                "enable_2fa": bool(getattr(_tf, "ENABLE_2FA", False)),
+                "twofa_workers": int(getattr(_tf, "TWOFA_WORKERS", 0) or 0),
+                "twofa_otp_max_wait": int(getattr(_cx, "TWOFA_OTP_MAX_WAIT", 0) or 0),
+                "enable_codex_auto": bool(getattr(_cx, "ENABLE_CODEX_AUTO", False)),
+                "require_password": bool(getattr(_rg, "REGISTRATION_REQUIRE_PASSWORD", True)),
+                "auto_requeue_on_restart": bool(getattr(_rg, "AUTO_REQUEUE_ON_RESTART", False)),
+                "otp_max_wait": int(getattr(_em, "OTP_MAX_WAIT", 0) or 0),
+                "registration_driver": str(getattr(__import__("config.roxybrowser", fromlist=["x"]), "REGISTRATION_DRIVER", "") or ""),
+            }
+        except Exception as exc:
+            out["config"] = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+        try:
+            from core import codex_credential_store as _cs
+
+            out["credentials"] = _cs.stats()
+        except Exception:
+            out["credentials"] = {}
+        try:
+            root = __import__("pathlib").Path(__file__).resolve().parent.parent
+            backups = sorted((root / "backups").glob("db-*.sqlite3"))
+            out["backups"] = {"count": len(backups),
+                              "latest": backups[-1].name if backups else ""}
+        except Exception:
+            out["backups"] = {}
+        return jsonify(out)
+
     @app.get("/api/registration/switch")
     def api_registration_switch_get():
         from core import registration_switch as sw

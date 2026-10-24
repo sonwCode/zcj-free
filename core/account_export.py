@@ -759,6 +759,28 @@ def setup_2fa(
             # 403 时会开启会话级熔断，若不清理，下一步 CSRF 请求甚至不会发出。
             _clear_twofa_session_circuit(session, source="可选预热")
 
+    # 快路径：刚注册完的会话登录态是新鲜的，直接 enroll 往往就能过。
+    # 走重认证会额外触发一封 OTP 邮件，而实测这类邮件经常收不到
+    # （注册 OTP 能收到、重认证 OTP 收不到），白白把 2FA 拖成失败。
+    if access_token:
+        _fast_on = True
+        try:
+            from config import codex as _ccf
+
+            _fast_on = bool(getattr(_ccf, 'TWOFA_FAST_PATH_FRESH_TOKEN', True))
+        except Exception:
+            _fast_on = True
+        if _fast_on:
+            try:
+                logger.info('[2FA] 快路径：用现有 accessToken 直接 enroll（跳过重认证 OTP）')
+                _fast_secret, _fast_sid = _enroll_totp(session, access_token)
+                _activate_totp(session, access_token, _fast_secret, _fast_sid)
+                logger.info('[2FA] 快路径成功，TOTP 已激活')
+                return _fast_secret
+            except Exception as _fast_exc:
+                logger.warning('[2FA] 快路径失败，回退到重认证流程：%s: %s',
+                               type(_fast_exc).__name__, str(_fast_exc)[:160])
+
     # 阶段一：重认证
     logger.info("[2FA] 阶段1：发起重认证")
     reauth_otp_after_ts = time.time()
