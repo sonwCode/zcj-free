@@ -143,8 +143,22 @@ def _probe_me(token: str, proxy: str | None, timeout: float = 20.0) -> tuple[str
     body = (resp.text or '')[:300].lower()
     if code == 200:
         return 'alive', '200'
-    if code == 401 or 'token_revoked' in body or 'deactivated' in body:
+    # 分类要点：
+    #   401 / token_revoked        → 凭据失效（可重登恢复），记 revoked
+    #   任何状态码 + 结构化封禁标记 → 真封禁，记 revoked 并注明 ban
+    #   403 但没有封禁标记         → 多半是 IP/CF 拦截，记 unknown（别误判成号废）
+    try:
+        from core.ban_detect import explicit_ban_code
+
+        ban = explicit_ban_code(body)
+    except Exception:
+        ban = ''
+    if ban:
+        return 'revoked', 'ban:%s %s' % (ban, body[:60])
+    if code == 401 or 'token_revoked' in body:
         return 'revoked', '%s %s' % (code, body[:80])
+    if code == 403:
+        return 'unknown', 'http-403(no-ban-marker)'
     return 'unknown', 'http-%s' % code
 
 

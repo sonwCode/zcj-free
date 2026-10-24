@@ -80,8 +80,23 @@ _ACCOUNT_DEAD_TEXT_MARKERS = (
 
 
 def detect_account_unusable_text(text: str) -> str:
-    """从浏览器页面/异常文本里识别账号已废，返回规范 error_code；未命中返回空串。"""
-    low = str(text or "").lower()
+    """从浏览器页面/异常文本里识别账号已废，返回规范 error_code；未命中返回空串。
+
+    判定顺序：
+      1) **结构化证据优先**（core.ban_detect）：JSON 里的 banned/deactivated 标记、
+         精确封禁码——这是 aBaiFreeGPT 的做法，误判率远低于文本匹配；
+      2) 再退回原来的子串/文案标记匹配（保持既有行为，不制造回归）。
+    """
+    raw = str(text or "")
+    try:
+        from core.ban_detect import explicit_ban_code
+
+        structured = explicit_ban_code(raw)
+        if structured:
+            return structured
+    except Exception:
+        pass
+    low = raw.lower()
     for code in _ACCOUNT_DEAD_CODES:
         if code in low:
             return code
