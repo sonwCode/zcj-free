@@ -427,7 +427,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             _bsys.path.insert(0, _broot)
         from tools.backup_db import backup as _db_backup
 
-        _db_backup(keep=14)
+        _db_backup(days=3)
     except Exception:
         logger.exception('[启动] 数据库快照失败')
 
