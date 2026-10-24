@@ -468,8 +468,8 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     # 页面
     # ----------------------------------------------------------
-    @app.get("/")
-    def index():
+    @app.get("/legacy")
+    def ui_legacy():
         requested_ui = (request.args.get("ui") or "").strip().lower()
         if requested_ui in {"legacy", "modern"}:
             ui_mode = requested_ui
@@ -1312,6 +1312,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped": skipped,
             "queue": live_check_service.queue_settings(),
         }), 202
+
+    @app.get("/")
+    def index():
+        """新版界面（Vue3 + Element Plus）。旧版保留在 /legacy。"""
+        return render_template("ui2.html")
 
     @app.get("/v2")
     def ui_v2():

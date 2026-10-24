@@ -59,6 +59,55 @@
         <el-button size="small" text tag="a" href="/">返回旧版</el-button>
       </header>
       <main class="content">
+        <template v-if="tab==='pool'">
+          <div class="card" style="margin-bottom:14px;">
+            <div class="toolbar">
+              <span class="muted">来源</span>
+              <el-select v-model="poolSource" style="width:200px" @change="loadPool">
+                <el-option v-for="s in poolSources" :key="s.value" :label="s.label" :value="s.value" />
+              </el-select>
+              <el-input v-model="poolQuery" placeholder="搜索邮箱" clearable style="width:220px" @keyup.enter="reloadPool" />
+              <el-button type="primary" @click="reloadPool">查询</el-button>
+              <span class="right"></span>
+              <el-button type="success" @click="importOpen = true">导入邮箱</el-button>
+              <el-button type="danger" plain :disabled="!poolSel.length" @click="deletePool">删除所选</el-button>
+            </div>
+            <el-table :data="poolRows" v-loading="busy==='pool'" size="small" border stripe
+                      @selection-change="v=>poolSel=v" style="width:100%">
+              <el-table-column type="selection" width="42" />
+              <el-table-column label="邮箱" min-width="260"><template #default="{row}">{{ row.email }}</template></el-table-column>
+              <el-table-column label="状态" width="120">
+                <template #default="{row}"><el-tag size="small" :type="row.status==='available'?'success':'info'">{{ row.status || '-' }}</el-tag></template>
+              </el-table-column>
+              <el-table-column label="已用次数" width="100"><template #default="{row}">{{ row.used_count ?? 0 }}</template></el-table-column>
+              <el-table-column label="更新时间" width="164"><template #default="{row}">{{ fmt(row.updated_at) }}</template></el-table-column>
+            </el-table>
+            <div style="display:flex;justify-content:flex-end;margin-top:12px">
+              <el-pagination background layout="total, prev, pager, next" :total="poolTotal" :page-size="50"
+                             :current-page="poolPage" @current-change="onPoolPage" />
+            </div>
+          </div>
+          <el-dialog v-model="importOpen" title="导入邮箱" width="640px">
+            <div class="toolbar">
+              <span class="muted">类型</span>
+              <el-select v-model="importSource" style="width:180px">
+                <el-option label="Outlook" value="outlook" />
+                <el-option label="通用 API" value="generic_api" />
+                <el-option label="通用 IMAP" value="imap" />
+              </el-select>
+              <template v-if="importSource==='imap'">
+                <span class="muted">IMAP 服务器</span>
+                <el-input v-model="imapServer" placeholder="imap.example.com:993" style="width:220px" />
+              </template>
+            </div>
+            <el-input v-model="importText" type="textarea" :rows="9" style="margin-top:10px"
+                      placeholder="Outlook: email----password----clientId----refreshToken&#10;通用 API: email----code_url&#10;IMAP: email----password" />
+            <template #footer>
+              <el-button @click="importOpen = false">取消</el-button>
+              <el-button type="primary" :loading="busy==='imp'" @click="doImport">导入</el-button>
+            </template>
+          </el-dialog>
+        </template>
         <template v-if="tab==='register'">
           <div class="card" style="margin-bottom:14px;">
             <div style="font-weight:600;margin-bottom:12px;">注册总开关</div>
@@ -124,6 +173,10 @@
               <el-button :disabled="!sel.length" :loading="busy==='totp'" @click="bulk('totp')">开 2FA</el-button>
               <el-button :disabled="!sel.length" :loading="busy==='cpa'" @click="bulk('cpa')">导出凭据</el-button>
               <el-button :disabled="!sel.length" :loading="busy==='codex'" @click="backfillCodex">Codex 补跑</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='plan'" @click="bulk('plan')">查套餐</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='link'" @click="bulk('link')">提取链接</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='note'" @click="bulkNote">批量备注</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='secret'" @click="bulk('secret')">查看密钥</el-button>
               <el-button :disabled="!sel.length" @click="bulk('archive')">归档</el-button>
               <el-button type="danger" plain :disabled="!sel.length" :loading="busy==='del'" @click="bulk('del')">删除</el-button>
             </div>
@@ -323,6 +376,7 @@ createApp({
   setup() {
     const menus = [
       {key:'register', label:'注册'},
+      {key:'pool', label:'邮箱池'},
       {key:'accounts', label:'账号管理'},
       {key:'sms', label:'号码池'},
       {key:'codex', label:'Codex 凭证'},
@@ -353,7 +407,7 @@ createApp({
     function reload() { page.value = 1; load(); }
     function onPage(p) { page.value = p; load(); }
     function onSize(s) { pageSize.value = s; page.value = 1; load(); }
-    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } else if (k === 'logs') { loadJobs(); } else if (k === 'settings') { loadSettings(); } else if (k === 'register') { loadSources(); loadCounts(); } }
+    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } else if (k === 'logs') { loadJobs(); } else if (k === 'settings') { loadSettings(); } else if (k === 'register') { loadSources(); loadCounts(); } else if (k === 'pool') { loadPool(); } }
 
     const ids = () => sel.value.map(r => Number(r.id));
 
@@ -371,6 +425,15 @@ createApp({
         } else if (kind === 'cpa') {
           const r = await post('/api/accounts/download-cpa-bulk', {account_ids:list, prepare:true});
           ElMessage.success('已准备导出：' + (r.count ?? r.prepared_count ?? list.length));
+        } else if (kind === 'plan') {
+          const r = await post('/api/accounts/check-plan-bulk', {account_ids:list, workers:4});
+          ElMessage.success('已提交查套餐：' + (r.started_count ?? list.length));
+        } else if (kind === 'link') {
+          const r = await post('/api/accounts/extract-link-bulk', {account_ids:list});
+          ElMessage.success('已提交提取链接：' + (r.started_count ?? list.length));
+        } else if (kind === 'secret') {
+          const r = await post('/api/accounts/secret-bulk', {account_ids:list});
+          ElMessage.success('已提交取密钥：' + (r.started_count ?? list.length));
         } else if (kind === 'archive') {
           const r = await post('/api/accounts/archive-bulk', {account_ids:list, archived: archived.value !== 'only'});
           ElMessage.success('归档处理完成：' + (r.archived ?? list.length));
@@ -419,7 +482,9 @@ createApp({
     }
 
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
-    return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+    return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel, bulkNote,
+             poolSources, poolSource, poolRows, poolTotal, poolPage, poolQuery, poolSel, loadPool, reloadPool, onPoolPage, deletePool,
+             importOpen, importText, importSource, imapServer, doImport,
              regCount, regWorkers, regSource, regDriver, sourceOptions, driverOptions, jobCounts, startRegistration,
              manualOauthOpen, oauthEmail, oauthUrl, oauthCallback, oauthBusy, oauthStep, openManualOauth, startOauth, finishOauth,
              cfg, creds, backups, loadSettings,
