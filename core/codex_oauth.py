@@ -2094,6 +2094,16 @@ def save_codex_credential(
     if merged_phone:
         payload["phone_activation"] = merged_phone
     db.upsert_codex_credential(payload, fname)
+    # 再落一份真实文件副本：CPA 出问题或库行被覆盖时还有可用的完整凭据。
+    try:
+        from config import codex as _cc
+
+        if bool(getattr(_cc, 'CODEX_LOCAL_COPY', True)):
+            from core import codex_credential_store as _store
+
+            _store.save(payload, fname)
+    except Exception as _copy_exc:
+        logger.warning('[Codex] 本地凭据副本写入失败：%s', str(_copy_exc)[:140])
     return f"sqlite://codex_accounts/{fname}"
 
 
@@ -2214,6 +2224,16 @@ def _save_cpa_local_record(
     if phone_activation:
         record["phone_activation"] = _merge_phone_activation({}, phone_activation)
     db.upsert_codex_credential(record, fname)
+    # 同样落一份本地完整副本（CPA/sub2 出问题时还有可用凭据）
+    try:
+        from config import codex as _cc2
+
+        if bool(getattr(_cc2, 'CODEX_LOCAL_COPY', True)):
+            from core import codex_credential_store as _store2
+
+            _store2.save(record, fname)
+    except Exception:
+        pass
     return f"sqlite://codex_accounts/{fname}"
 
 
@@ -2284,6 +2304,16 @@ def _save_sub2_local_record(
     if phone_activation:
         record["phone_activation"] = _merge_phone_activation({}, phone_activation)
     db.upsert_codex_credential(record, fname)
+    # 同样落一份本地完整副本（CPA/sub2 出问题时还有可用凭据）
+    try:
+        from config import codex as _cc2
+
+        if bool(getattr(_cc2, 'CODEX_LOCAL_COPY', True)):
+            from core import codex_credential_store as _store2
+
+            _store2.save(record, fname)
+    except Exception:
+        pass
     return f"sqlite://codex_accounts/{fname}"
 
 

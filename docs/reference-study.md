@@ -1306,9 +1306,6 @@ if (continueURL === `${AUTH_BASE_URL}/add-phone`) {
 ### 28.2 我们的差距：27/38 条 codex_failed 是手机验证
 
 统计 `codex_failed` 的 error_message：
-
-```
-
 ```
 12 条  手机号验证重试 10 次仍失败（provider=smsbower）
  6 条  同上（provider=tiger）
@@ -1321,17 +1318,14 @@ if (continueURL === `${AUTH_BASE_URL}/add-phone`) {
 **27 条属于手机验证/号码耗尽**——外部依赖（号码质量与风控），不是代码 bug。
 而我们每条要重试 10 次、最多遍历 12 个国家才放弃。
 
-### 28.3 已落地两项（第 26 轮）
+### 28.3 已落地（第 26 轮）
 
-**(a) 新增 `phone_required` 失败类**，`retain_for_future_batch=True`（过段时间可能不需要绑定）。
-
-**(b) 号码耗尽自适应早停**：连续 3 次取号类失败即抛 `phone_numbers_exhausted`，
-不再固定重试 `SMS_MAX_RETRIES=10`。
+- 新增 `phone_required` 失败类（`retain_for_future_batch=True`）；
+- 号码耗尽自适应早停：连续 3 次取号类失败即抛 `phone_numbers_exhausted`。
 
 ### 28.4 收益
 
-- 号码池空时从 10 次 × 12 国 降到 3 次，单条失败省数分钟；
-- 漏斗里"接码平台问题"与"代码问题"彻底分开。
+号码池空时从 10 次 × 12 国 降到 3 次；漏斗里"接码平台问题"与"代码问题"彻底分开。
 
 ---
 
@@ -1339,86 +1333,110 @@ if (continueURL === `${AUTH_BASE_URL}/add-phone`) {
 
 ### 29.1 克隆踩的坑
 
-`git clone` 默认分支 `master` **只有 LICENSE**（单次提交 "Update LICENSE"）。
-但仓库 API 显示 size 94MB、★1404、标签到 `v18.2.0`：
-
-```
-branches: main, master
-tags: v18.2.0 … v18.1.0
-```
-
-真代码在 **`main`** 分支。重新 `git clone --branch main` 后拿到 129 个文件：
-`utils/core_engine.py` 126KB、`utils/auth_pipeline/register.py` 110KB、
-`turnstile-solver/api_solver.py` 77KB（与 sky3100 同源）、
-`utils/integrations/{hero,fivesim,smsbower}_sms.py`。
+`git clone` 默认分支 `master` **只有 LICENSE**，但仓库 94MB / ★1404 / 标签到 `v18.2.0`。
+真代码在 **`main`** 分支，切换后 129 个文件（core_engine 126KB、auth_pipeline/register.py 110KB、
+turnstile-solver 77KB）。
 
 **教训**：判空不能只看默认分支，要看 `branches` 与 `tags`。
 
-### 29.2 它启动横幅里的三条官方口径（关键）
+### 29.2 启动横幅里的官方口径（关键）
 
 ```
-根据官网披露消息：add-phone 主要面向美国、荷兰、法国、西班牙、英国、…
-根据官网披露消息：创建账号时验证手机号，**一个号码只能验证一个账号**
-根据官网披露消息：在某些国家，您可以使用 WhatsApp 完成手机验证，而无需…
+add-phone 主要面向美国、荷兰、法国、西班牙、英国、…
+创建账号时验证手机号，**一个号码只能验证一个账号**
+在某些国家，您可以使用 WhatsApp 完成手机验证，而无需…
 ```
 
-第二条直接解释了第 26 轮的发现：接码平台会反复分配**已被用过**的号码，
-而这类号码在 OpenAI 侧必然被拒——所以重试 10 次也全失败。
-
-### 29.3 接码抽象
-
-三个 provider 集成（hero / fivesim / smsbower）+ 国家重试测试，
-与我们 `sms_provider` 的多 provider 链同构。
+第二条直接解释第 26 轮现象：接码平台反复分配**已被用过**的号码，
+这类号码在 OpenAI 侧必然被拒——所以重试 10 次也全失败。
 
 ---
 
-## 30. 本轮落地：已用号码登记表
+## 30. 已用号码登记表（第 27 轮）
 
-新增 `core/phone_registry.py`：
-
-```python
-normalize(number)          # → 纯数字（保留国家码）
-is_used(number)            # 是否用过
-mark_used(number, email)   # 幂等登记
-filter_unused(numbers)     # 剔除用过的
-stats()                    # 统计
-```
-
+`core/phone_registry.py`：`normalize / is_used / mark_used / filter_unused / stats`，
 状态落盘 `data/used_phone_numbers.json`，跨进程共享。
 
-### 30.1 接入取号链路
+接入：`sms_provider.acquire_number_unused(max_tries=3)` —— 取号 → 命中已用则取消换号 →
+连续 3 次撞旧号抛 `phone_numbers_exhausted`。三处调用点全部切换
+（browser_use_codex_oauth / codex_oauth / roxy_codex_oauth）。
 
-`core/sms_provider.acquire_number_unused(max_tries=3)`：
-取号 → 命中已用记录则 `cancel_and_report_failure` 取消换号 →
-连续 3 次撞旧号则抛 `phone_numbers_exhausted`。
-
-三处调用点全部切换：
-
-```
-core/browser_use_codex_oauth.py
-core/codex_oauth.py
-core/roxy_codex_oauth.py
-```
-
-### 30.2 验证
-
-```
-py_compile: OK（5 个文件）
-acquire_number_unused 可用: True
-号码登记表: {'used': 0, 'path': 'data/used_phone_numbers.json'}
-服务: active
-```
-
-测试 `tests/test_phone_registry.py` **5 项全部 PASS**。
-
-### 30.3 为什么值钱
-
-- 旧号码在 OpenAI 侧注定失败——现在第一次就换掉；
-- 与自适应早停配合：撞旧号 3 次即停，不再 10 次 × 12 国；
-- 登记表可统计"号码复用率"，作为换平台的依据。
+测试 `tests/test_phone_registry.py` 5 项全 PASS。
 
 ---
 
-## 31. 其余项目
+## 31. asz798838958/aBaiFreeGPT（282 文件）——脉冲调度与凭据管理
+
+### 31.1 脉冲调度：`application/registration_pulse.py`
+
+它的文档字符串写明了设计动机：
+
+> OAI 在某个出口 IP 注册过多后会**临时封禁该出口**，可观测症状是
+> **邮箱永远收不到验证邮件**（OTP 等待超时）。本控制器用**离散同步脉冲**
+> 替代连续滚动工作池。
+
+四条机制：
+
+| 机制 | 说明 |
+|---|---|
+| 波次（wave） | 每波最多 N 个并发，按完成顺序应用结果，**硬超时**防止一个卡住的浏览器拖死后续波 |
+| 账号级重排 | OTP 没到 → `_NO_EMAIL_MARKER` → **重排到下一波**（不是原地重试） |
+| 节点级封禁 | 同一节点连续 K 波 no-email → **暂停该节点** |
+| 探测解封 | 后台线程按 `probe_interval_seconds` 对每个被封节点跑短超时注册，收到 OTP 或成功 → 解封；全封时空转等探测 |
+
+对比我们：`core/batch_pulse.py` 只有 `detect_exit_ban()`（整轮一致判定），
+**没有节点状态机、没有重排、没有探测解封**。这是明确的下一步。
+
+### 31.2 凭据管理
+
+- `core/db.py` 有 `auth_json` 字段；
+- `platforms/chatgpt/from_credentials.py` 支持 `auth-json` / `certificate` / `sub2api` 三格式互转；
+- `credential_checks.py` 53KB 专门做凭据校验。
+
+它把凭据当成一等公民，而不是注册的副产物。
+
+---
+
+## 32. 已落地：Codex 凭据的本地完整副本
+
+问题（用户反馈）：我们的 `save_codex_credential` **只写 SQLite**，
+返回 `sqlite://codex_accounts/xxx.json` 伪路径，**没有任何真实文件**。
+CPA 一侧出问题、或库行被覆盖，就没有第二份可用凭据。
+
+新增 `core/codex_credential_store.py`：
+
+```python
+save(content, filename)   # codex_accounts/codex-<email>[-plan].json（0600）
+load(filename) / exists() / list_files() / stats()
+```
+
+三条保存路径全部接入（`save_codex_credential` / `_save_cpa_local_record` /
+`_save_sub2_local_record`），配置 `CODEX_LOCAL_COPY=True`。
+
+实测：
+
+```
+返回值: sqlite://codex_accounts/codex-local-copy-test@example.com-free.json
+本地存在: True
+回读 refresh_token: rftok-test
+统计: {'count': 1, 'bytes': 230, 'dir': '/opt/turb-gpt-register/codex_accounts'}
+```
+
+### 32.1 从本地文件回灌
+
+`tools/restore_codex_credentials.py`：扫描 `codex_accounts/*.json` 与库内 filename 比对，
+`--apply` 回灌缺失项（默认不覆盖已有行）。
+
+实测：`本地文件 1 个，库内 15 行，缺失 0 个`。
+
+### 32.2 接下来的四件套
+
+用户点名的账号管理 / 任务停止 / 实时日志 / 凭据复制：
+我们已有任务停止与实时日志，**凭据复制**用本地副本 + 一键下载补齐；
+账号管理可参考它的 `tests/test_account_maintenance.py`（50KB 的维护用例）。
+
+---
+
+## 33. 其余项目
 
 （后续轮次补齐：GuJumpgate）
