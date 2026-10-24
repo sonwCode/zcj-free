@@ -5,35 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GPT 注册控制台</title>
   <link rel="stylesheet" href="/static/app.css?v=bd17de8f">
-
-<script>
-(function(){
-  function show(msg){
-    try{
-      var d=document.getElementById("boot-err");
-      if(!d){
-        d=document.createElement("div");
-        d.id="boot-err";
-        d.style.cssText="position:fixed;left:0;right:0;top:0;z-index:99999;background:#7f1d1d;color:#fff;padding:12px 16px;font:13px/1.6 monospace;white-space:pre-wrap;max-height:60vh;overflow:auto";
-        (document.body||document.documentElement).appendChild(d);
-      }
-      d.textContent += "\n[页面错误] " + msg;
-    }catch(e){}
-  }
-  window.addEventListener("error", function(ev){
-    var t = ev && ev.target;
-    if (t && (t.tagName === "SCRIPT" || t.tagName === "LINK")) {
-      show("资源加载失败: " + (t.src || t.href));
-    } else {
-      show((ev.message || "unknown") + " @ " + (ev.filename || "") + ":" + (ev.lineno || ""));
-    }
-  }, true);
-  window.addEventListener("unhandledrejection", function(ev){
-    var r = ev && ev.reason;
-    show("Promise 未捕获: " + (r && (r.stack || r.message) || r));
-  });
-})();
-</script>
 </head>
 <body>
 <aside class="app-sidebar" aria-label="主导航">

@@ -1316,12 +1316,7 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/")
     def index():
         """新版界面（Vue3 + Element Plus）。旧版保留在 /legacy。"""
-        return render_template("ui2.html")
-
-    @app.get("/v2")
-    def ui_v2():
-        """新版界面（Vue 3 + Element Plus，与旧版并存）。"""
-        return render_template("ui2.html")
+        return render_template("index.html")
 
     @app.post("/api/codex/oauth/start")
     def api_codex_oauth_start():
