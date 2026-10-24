@@ -154,7 +154,15 @@ def fetch_latest_otp(
         messages.sort(key=lambda item: item.get("date") or "", reverse=True)
         for item in messages:
             recipient = " ".join(str(item.get(k) or "") for k in ("to", "deliveredTo", "xOriginalTo")).lower()
-            if email.lower() not in recipient or not looks_like_openai_email(item):
+            # 子地址（user+suffix@domain）也要能被基础地址的信件命中：
+            # iCloud 等会把 To 头重写成基础地址（实测 "Hide My Email <base@icloud.com>"），
+            # 如果只按带后缀的地址精确匹配，就永远取不到码。
+            target = email.lower()
+            base = target
+            _local, _sep, _domain = target.partition("@")
+            if "+" in _local:
+                base = _local.split("+", 1)[0] + "@" + _domain
+            if (target not in recipient and base not in recipient) or not looks_like_openai_email(item):
                 continue
             otp = extract_otp(item)
             if not otp:
