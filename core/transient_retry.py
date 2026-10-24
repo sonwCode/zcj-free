@@ -62,6 +62,12 @@ NON_TRANSIENT_MARKERS = (
 )
 
 
+def is_timeout_error(error) -> bool:
+    """单独判断超时：幂等 GET 可以重试，POST 不可以。"""
+    text = str(error or '').lower()
+    return any(marker in text for marker in TIMEOUT_MARKERS)
+
+
 def is_transient_error(error) -> bool:
     """判断异常/文本是否属于瞬时网络故障。"""
     text = str(error or "").lower()
@@ -75,7 +81,8 @@ def is_transient_error(error) -> bool:
 
 
 def retry_transient(fn: Callable, *, attempts: int = 3, base_delay: float = 1.0,
-                     tag: str = "", sleep: Callable[[float], None] = time.sleep):
+                     tag: str = "", sleep: Callable[[float], None] = time.sleep,
+                     retry_timeout: bool = False):
     """执行 fn，仅对瞬时网络错误重试。"""
     attempts = max(1, int(attempts or 1))
     last = None
@@ -84,7 +91,8 @@ def retry_transient(fn: Callable, *, attempts: int = 3, base_delay: float = 1.0,
             return fn()
         except Exception as exc:
             last = exc
-            if i >= attempts or not is_transient_error(exc):
+            _retryable = is_transient_error(exc) or (retry_timeout and is_timeout_error(exc))
+            if i >= attempts or not _retryable:
                 raise
             delay = base_delay * (2 ** (i - 1))
             logger.warning("[重试] %s 第 %d/%d 次失败（%s），%.1fs 后重试",

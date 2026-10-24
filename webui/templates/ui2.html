@@ -127,7 +127,7 @@
               <template v-if="importSource==='imap'">
                 <span class="muted">IMAP 服务器</span>
                 <el-input v-model="imapServer" placeholder="imap.example.com:993" style="width:220px" />
-                <el-checkbox v-model="importSplit">导入后每个邮箱再分裂 1 个</el-checkbox>
+                <el-checkbox v-model="importSplit">导入时也分裂（一般不用，注册页开关即可）</el-checkbox>
               </template>
             </div>
             <el-input v-model="importText" type="textarea" :rows="9" style="margin-top:10px"
@@ -145,6 +145,13 @@
               <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'" inline-prompt
                          style="--el-switch-on-color:#13ce66" @change="toggleRegistration" />
               <span class="muted">暂停后不再接受任何新任务（含重启补偿与手动提交）</span>
+              <span class="right"></span>
+              <span class="muted">分裂注册</span>
+              <el-switch v-model="splitRunning" :active-text="splitRunning ? '开' : '关'" inline-prompt
+                         style="--el-switch-on-color:#7c3aed" @change="toggleSplit" />
+              <el-tooltip content="开启后，每次注册会把选中的邮箱派生成 +6位后缀 的子地址去注册（信仍进主箱）">
+                <el-icon style="cursor:help;color:#909399">?</el-icon>
+              </el-tooltip>
             </div>
           </div>
           <div class="card" style="margin-bottom:14px;">
@@ -601,6 +608,13 @@ createApp({
     const fmt = (v) => String(v || '').replace('T', ' ').slice(0, 19) || '-';
 
     /* ---------- 注册开关 ---------- */
+    const splitRunning = ref(false);
+    async function toggleSplit(val) {
+      try {
+        await post('/api/registration/switch', {split: val, reason: 'ui'});
+        ElMessage.success(val ? '分裂注册已开启' : '分裂注册已关闭');
+      } catch (e) { ElMessage.error('切换失败：' + e.message); splitRunning.value = !val; }
+    }
     const regRunning = ref(true);
     async function loadSwitch() {
       try { const s = await api('/api/registration/switch'); regRunning.value = !(s && s.paused); } catch (e) {}
@@ -646,7 +660,7 @@ createApp({
     const poolSource = ref('outlook'), poolRows = ref([]), poolTotal = ref(0);
     const poolPage = ref(1), poolQuery = ref(''), poolSel = ref([]);
     const importOpen = ref(false), importText = ref(''), importSource = ref('outlook'), imapServer = ref('');
-    const importSplit = ref(true);
+    const importSplit = ref(false);   // 默认关：分裂在注册页开关控制
     async function loadPool() {
       busy.value = 'pool';
       try {
@@ -898,7 +912,7 @@ createApp({
     return {
       menus, tab, title, busy, cxSel, cxBulk, cfgItems, cfgDraft, cfgDirty, cfgGroup, cfgFilter, cfgGroups, cfgVisible, loadConfig, saveConfig, markCfgDirty, bulkChangeEmail, cleanupDead, cancelPending, rows, total, page, pageSize, loading, query, archived, sel, funnel,
       load, reload, onPage, onSize, switchTab, bulk, bulkNote, backfillCodex, tagType, fmt,
-      regRunning, toggleRegistration, regCount, regWorkers, regSource, regDriver,
+      regRunning, toggleRegistration, splitRunning, toggleSplit, regCount, regWorkers, regSource, regDriver,
       sourceOptions, driverOptions, jobCounts, loadSources, loadCounts, startRegistration,
       poolSources, poolSource, poolRows, poolTotal, poolPage, poolQuery, poolSel,
       loadPool, reloadPool, onPoolPage, deletePool, importOpen, importText, importSource, imapServer, importSplit, doImport,

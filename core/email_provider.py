@@ -142,6 +142,13 @@ def acquire_email(exclude_emails: Iterable[str] | str | None = None) -> str:
                     logger.exception("[EmailProvider] 释放排除邮箱失败: %s", email)
                 raise RuntimeError(f"邮箱 {email} 在本次重试排除列表中")
             logger.info(f"[EmailProvider] 使用邮箱来源: {source}, email={email}")
+            # 分裂注册：开关开启时为该邮箱派生 +子地址（落池后再返回）
+            try:
+                from core.split_registration import maybe_split
+
+                email = maybe_split(email, source)
+            except Exception:
+                pass
             return email
         except Exception as exc:
             _check_stop_requested()
@@ -167,6 +174,13 @@ def acquire_email_from_source(source: str, exclude_emails: Iterable[str] | str |
             logger.exception("[EmailProvider] 释放排除邮箱失败: %s", email)
         raise RuntimeError(f"邮箱 {email} 在本次重试排除列表中")
     logger.info("[EmailProvider] 指定来源领取邮箱: source=%s, email=%s", source, email)
+    # 分裂注册：开关开启时为该邮箱派生一个 +子地址（落池后再返回）
+    try:
+        from core.split_registration import maybe_split
+
+        email = maybe_split(email, source)
+    except Exception:
+        pass
     return email
 
 

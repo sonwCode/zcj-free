@@ -43,6 +43,7 @@ def status() -> dict:
     return {
         'paused': bool(data.get('paused', False)),
         'auto_submit': bool(data.get('auto_submit', True)),
+        'split': bool(data.get('split', False)),
         'updated_at': str(data.get('updated_at') or ''),
         'reason': str(data.get('reason') or ''),
     }
@@ -52,17 +53,24 @@ def is_paused() -> bool:
     return bool(_load().get('paused', False))
 
 
+def split_enabled() -> bool:
+    """注册时是否启用"分裂注册"（为邮箱派生 +子地址）。"""
+    return bool(_load().get('split', False))
+
+
 def set_state(paused: bool | None = None, auto_submit: bool | None = None,
-              reason: str = '') -> dict:
+              split: bool | None = None, reason: str = '') -> dict:
     data = _load()
     if paused is not None:
         data['paused'] = bool(paused)
     if auto_submit is not None:
         data['auto_submit'] = bool(auto_submit)
+    if split is not None:
+        data['split'] = bool(split)
     data['updated_at'] = time.strftime('%Y-%m-%dT%H:%M:%S')
     if reason:
         data['reason'] = str(reason)[:120]
     _save(data)
-    logger.warning('[注册开关] paused=%s auto_submit=%s (%s)',
-                   data.get('paused'), data.get('auto_submit'), reason or '-')
+    logger.warning('[注册开关] paused=%s auto_submit=%s split=%s (%s)',
+                   data.get('paused'), data.get('auto_submit'), data.get('split'), reason or '-')
     return status()

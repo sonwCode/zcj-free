@@ -505,7 +505,17 @@ def fetch_session(session: BrowserSession) -> dict:
     headers = session.get_nextauth_headers(referer="https://chatgpt.com/")
 
     logger.info("[Session] 拉取 ChatGPT session 信息...")
-    resp = session.get(url, headers=headers)
+    # 这是幂等 GET：代理链路偶发 curl:(28) 超时（实测挂在"账号已创建、取 session"这一步，
+    # 白白浪费一个已建好的号），因此允许对超时重试；POST 仍然不重试。
+    try:
+        from core.transient_retry import retry_transient
+
+        resp = retry_transient(
+            lambda: session.get(url, headers=headers),
+            attempts=3, base_delay=2.0, tag='拉取 session', retry_timeout=True,
+        )
+    except TypeError:
+        resp = session.get(url, headers=headers)
     resp.raise_for_status()
     data = resp.json()
 
