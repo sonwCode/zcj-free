@@ -12,15 +12,23 @@ function _qualInfo(r) {
   var offers = Array.isArray(pr.eligible_offer_ids) ? pr.eligible_offer_ids.length : 0;
   var promos = (pr.eligible_promo_campaigns && typeof pr.eligible_promo_campaigns === 'object')
     ? Object.keys(pr.eligible_promo_campaigns).length : 0;
-  var promoEligible = offers > 0 || promos > 0;
+  // 优惠只看 promo_campaigns（真正的折扣活动）。
+  // eligible_offer_ids 是"可升级套餐列表"，恒有若干项，不能当优惠用。
+  var promoEligible = promos > 0;
   var NL = String.fromCharCode(10);
   var trialHtml;
-  if (trialEligible) { trialHtml = '<span class="qual-dot qual-dot--ok"></span>可领Plus试用'; }
+  if (trialEligible) {
+    var _disc = pr.plus_trial_discount_percentage;
+    var _per = pr.plus_trial_duration_num_periods;
+    var _unit = pr.plus_trial_duration_period ? String(pr.plus_trial_duration_period) : '';
+    trialHtml = '<span class="qual-dot qual-dot--ok"></span>可领Plus试用'
+      + (_disc ? '（' + _disc + '%' + (_per ? ' · ' + _per + (_unit || '期') : '') + '）' : '');
+  }
   else if (checkedAt) { trialHtml = '<span class="qual-text-muted">无试用资格</span>'; }
   else { trialHtml = '<span class="qual-text-muted">信息不完整</span>'; }
   var promoHtml;
   if (!checkedAt) { promoHtml = '<span class="qual-text-muted">信息不完整</span>'; }
-  else if (promoEligible) { promoHtml = '<span class="qual-tag qual-tag--ok">可领试用</span>'; }
+  else if (promoEligible) { promoHtml = '<span class="qual-tag qual-tag--ok">' + promos + ' 个活动</span>'; }
   else { promoHtml = '<span class="qual-text-muted">无可用优惠</span>'; }
   var checkHtml, checkTitle;
   if (err) {
@@ -36,13 +44,13 @@ function _qualInfo(r) {
     tips.push('可领 Plus 试用：' + (trialEligible ? '是' : '否'));
     if (pr.plus_trial_title) tips.push('活动：' + pr.plus_trial_title);
     if (pr.plus_trial_discount_percentage) tips.push('折扣：' + pr.plus_trial_discount_percentage + '%');
-    tips.push('可用 offer：' + offers + ' 个');
-    tips.push('可用活动：' + promos + ' 个');
+    tips.push('可升级套餐：' + offers + ' 个（非优惠）');
+    tips.push('优惠活动：' + promos + ' 个');
     checkTitle = tips.join(NL);
   }
   var trialTitle = '试用资格：' + (trialEligible ? '可领 Plus 试用' : (checkedAt ? '不符合' : '尚未检测'))
     + (pr.plus_trial_title ? '（' + pr.plus_trial_title + '）' : '');
-  var promoTitle = '优惠：' + (promoEligible ? ('可领 ' + offers + ' 个 offer / ' + promos + ' 个活动') : (checkedAt ? '无可用优惠' : '尚未检测'));
+  var promoTitle = '优惠：' + (promoEligible ? (promos + ' 个活动') : (checkedAt ? '无可用优惠' : '尚未检测')) ;
   return { trialHtml: trialHtml, trialTitle: trialTitle,
            promoHtml: promoHtml, promoTitle: promoTitle,
            checkHtml: checkHtml, checkTitle: checkTitle };
@@ -580,7 +588,11 @@ async function startRegistrationFromInputs(countEl, workersEl, startBtn) {
   const b2 = $('#btnStartV2'); if (b2) b2.disabled = true;
   try {
     const r = await api('/api/jobs', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({count, workers, email_source: emailSource, driver}) });
-    const warnHtml = r.warning ? `<div class="banner warn">${esc(r.warning)}（本次并发 ${r.workers || workers}）</div>` : `<div class="banner info">已提交 ${r.submitted} 个任务，本次并发 ${r.workers || workers}</div>`;
+    const _splitOn = !!document.getElementById("regSplitV2")?.checked;
+    const _warnText = _splitOn && r.warning
+      ? "分裂已开启：邮箱按倍数派生子地址，忽略可用数不足提示"
+      : r.warning;
+    const warnHtml = _warnText ? `<div class="banner ${_splitOn ? "info" : "warn"}">${esc(_warnText)}（本次并发 ${r.workers || workers}）</div>` : `<div class="banner info">已提交 ${r.submitted} 个任务，本次并发 ${r.workers || workers}</div>`;
     const warnEl = $('#regWarnV2'); if (warnEl) warnEl.innerHTML = warnHtml;
     const c2 = $('#regCountV2'); if (c2) c2.value = count;
     const w2 = $('#regWorkersV2'); if (w2) w2.value = workers;
@@ -5061,3 +5073,25 @@ document.addEventListener('click', async (event) => {
     btn.textContent = label;
   }
 });
+
+async function loadRegSplitState(){
+  const box = document.getElementById("regSplitV2");
+  if (!box) return;
+  try {
+    const st = await api("/api/registration/switch");
+    box.checked = !!(st && st.split);
+  } catch (e) {}
+  box.addEventListener("change", async () => {
+    try {
+      await api("/api/registration/switch", {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({split: box.checked, reason: "ui"})});
+      const w = document.getElementById("regWarnV2");
+      if (w) w.innerHTML = box.checked
+        ? '<div class="banner info">分裂注册已开启：每单会派生 +随机后缀 的子地址，邮箱可用量按倍数放大</div>'
+        : '<div class="banner info">分裂注册已关闭</div>';
+    } catch (e) {
+      box.checked = !box.checked;
+    }
+  });
+}
+loadRegSplitState();

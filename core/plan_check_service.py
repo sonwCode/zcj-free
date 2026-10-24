@@ -35,6 +35,19 @@ def _float_setting(name: str, default: float, lower: float, upper: float) -> flo
 _WORKERS = _int_setting("PLAN_CHECK_WORKERS", 3, 1, 16)
 _QUEUE_LIMIT = _int_setting("PLAN_CHECK_QUEUE_LIMIT", 500, _WORKERS, 5000)
 _EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="plan-check")
+
+def _get_executor() -> ThreadPoolExecutor:
+    """线程池自愈：进程重启/退出后旧的池已 shutdown，直接重建。
+
+    否则每次入队都会 RuntimeError: cannot schedule new futures after
+    interpreter shutdown，导致套餐/试用/优惠三列全部显示查询失败。
+    """
+    global _EXECUTOR
+    if _EXECUTOR is None or getattr(_EXECUTOR, "_shutdown", False):
+        _EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS,
+                                      thread_name_prefix="plan-check")
+    return _EXECUTOR
+
 _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
 _RATE_LOCK = threading.Lock()
 _NEXT_REQUEST_AT = 0.0
@@ -77,6 +90,27 @@ def _run_plan_check(
             proxy=proxy,
             timezone_offset_min=timezone_offset_min,
         )
+
+        # 代理链路失败（407 CONNECT tunnel / 隧道拒绝）时改直连重试一次：
+        # 否则套餐/试用/优惠三列会一直显示查询失败。
+        if not result.get("ok"):
+            _err = str(result.get("error") or "").lower()
+            if ("407" in _err or "connect tunnel" in _err or "proxy" in _err) and proxy:
+                logger.warning("[Plan] 代理失败，改直连重试一次: %s", email)
+                try:
+                    _direct = check_account_plan(
+                        access_token,
+                        proxy=None,
+                        timezone_offset_min=timezone_offset_min,
+                        **session_options,
+                    )
+                    if _direct.get("ok"):
+                        result = _direct
+                        logger.info("[Plan] 直连重试成功: %s plan=%s trial=%s",
+                                    email, _direct.get("current_plan_type"),
+                                    bool(_direct.get("plus_trial_eligible")))
+                except Exception:
+                    logger.warning("[Plan] 直连重试异常: %s", email)
 
         recheck_delay = _registration_recheck_delay()
         should_recheck = (
@@ -136,6 +170,25 @@ def _run_plan_check(
         return result
     finally:
         _QUEUE_SLOTS.release()
+        if "cannot schedule" in str(exc).lower():
+            # 线程池已 shutdown（进程重启/退出后常见）：改为同线程直接执行，
+            # 避免套餐/试用/优惠三列因为入队失败而全部显示"查询失败"。
+            try:
+                inline = _run_plan_check(
+                    account_id=account_id,
+                    email=email,
+                    access_token=access_token,
+                    trigger=str(trigger or "manual"),
+                    proxy=proxy,
+                    timezone_offset_min=str(timezone_offset_min or "-"),
+                    run_id=run_id,
+                )
+                return {"accepted": True, "busy": False, "inline": True,
+                        "account_id": account_id, "email": email,
+                        "status": "inline", "ok": bool(inline.get("ok")),
+                        "result": inline}
+            except Exception:
+                pass
 
 
 def enqueue_account_plan_check(
@@ -161,7 +214,7 @@ def enqueue_account_plan_check(
         return {"accepted": False, "busy": True, "error": "该账号正在查询套餐"}
 
     try:
-        _EXECUTOR.submit(
+        _get_executor().submit(
             _run_plan_check,
             account_id=account_id,
             email=email,
