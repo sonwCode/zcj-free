@@ -535,13 +535,32 @@ createApp({
     }
 
     async function cleanupDead() {
+      // 先预检（dry_run=true）：只统计不删除，把名单摆出来
+      busy.value = 'cleanup';
+      let preview;
       try {
-        await ElMessageBox.confirm('清理已判定为已废的账号？该操作会删除数据。', '确认', {type:'warning'});
-        busy.value = 'cleanup';
-        const d = await post('/api/accounts/cleanup-dead', {max_batch: 50, force: false});
-        ElMessage.success('清理完成：' + (d.deleted_count ?? d.deleted ?? 0));
+        preview = await post('/api/accounts/cleanup-dead', {dry_run: true, mode: 'delete', verify: true});
+      } catch (e) {
+        busy.value = '';
+        ElMessage.error('预检失败：' + e.message);
+        return;
+      }
+      busy.value = '';
+      const count = preview.count ?? preview.deleted_count ?? 0;
+      if (!count) { ElMessage.info('没有可清理的已废账号'); return; }
+      const names = (preview.sample || []).map(x => (typeof x === 'string' ? x : (x.email || x))).slice(0, 8).join('\n');
+      try {
+        await ElMessageBox.confirm(
+          '预检发现 ' + count + ' 个已废账号（已重新探活确认）：\n' + names +
+          (count > 8 ? '\n…' : '') + '\n\n删除不可恢复，确认继续？',
+          '危险操作确认', {type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消'});
+      } catch (e) { return; }
+      busy.value = 'cleanup';
+      try {
+        const d = await post('/api/accounts/cleanup-dead', {dry_run: false, mode: 'delete', verify: true});
+        ElMessage.success('已删除 ' + (d.deleted_count ?? 0) + ' 个已废账号');
         await load(); await loadFunnel();
-      } catch (e) { if (e !== 'cancel') ElMessage.error('清理失败：' + (e.message || e)); }
+      } catch (e) { ElMessage.error('清理失败：' + e.message); }
       finally { busy.value = ''; }
     }
 
