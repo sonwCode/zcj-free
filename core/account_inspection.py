@@ -247,6 +247,16 @@ def inspect_network(*, account_ids: list[int] | None = None, workers: int = 4,
     with ThreadPoolExecutor(max_workers=max(1, int(workers or 1))) as pool:
         for acc_id, email, verdict, detail in pool.map(_work, targets):
             results[verdict].append({'id': acc_id, 'email': email, 'detail': detail})
+            try:
+                from core import survival_watch
+
+                survival_watch.record(
+                    acc_id, email, verdict, detail,
+                    created_at=str(next((a.get('created_at') for a in rows
+                                         if int(a.get('id') or 0) == acc_id), '') or ''),
+                )
+            except Exception:
+                pass
             if update_db:
                 try:
                     if verdict == 'alive':
