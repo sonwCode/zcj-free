@@ -59,6 +59,50 @@
         <el-button size="small" text tag="a" href="/">返回旧版</el-button>
       </header>
       <main class="content">
+        <template v-if="tab==='register'">
+          <div class="card" style="margin-bottom:14px;">
+            <div style="font-weight:600;margin-bottom:12px;">注册总开关</div>
+            <div class="toolbar">
+              <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'" inline-prompt
+                         style="--el-switch-on-color:#13ce66" @change="toggleRegistration" />
+              <span class="muted">暂停后不再接受任何新任务（含重启补偿与手动提交）</span>
+            </div>
+          </div>
+          <div class="card" style="margin-bottom:14px;">
+            <div style="font-weight:600;margin-bottom:12px;">发起注册</div>
+            <div class="toolbar">
+              <span class="muted">数量</span>
+              <el-input-number v-model="regCount" :min="1" :max="200" size="default" style="width:130px" />
+              <span class="muted">并发</span>
+              <el-input-number v-model="regWorkers" :min="1" :max="10" size="default" style="width:110px" />
+              <span class="muted">邮箱来源</span>
+              <el-select v-model="regSource" style="width:230px">
+                <el-option v-for="o in sourceOptions" :key="o.value" :label="o.label" :value="o.value" />
+              </el-select>
+              <span class="muted">驱动</span>
+              <el-select v-model="regDriver" style="width:150px" clearable placeholder="跟随配置">
+                <el-option v-for="d in driverOptions" :key="d" :label="d" :value="d" />
+              </el-select>
+              <el-button type="primary" :loading="busy==='reg'" :disabled="!regRunning" @click="startRegistration">
+                开始注册
+              </el-button>
+            </div>
+            <el-alert v-if="!regRunning" type="warning" :closable="false" show-icon
+                      title="当前已暂停：请先打开上方开关再发起注册。" />
+          </div>
+          <div class="card">
+            <div style="font-weight:600;margin-bottom:10px;">队列状态</div>
+            <el-descriptions :column="4" border size="small">
+              <el-descriptions-item label="待执行">{{ jobCounts.pending ?? 0 }}</el-descriptions-item>
+              <el-descriptions-item label="执行中">{{ jobCounts.running ?? 0 }}</el-descriptions-item>
+              <el-descriptions-item label="成功">{{ jobCounts.success ?? 0 }}</el-descriptions-item>
+              <el-descriptions-item label="失败">{{ jobCounts.failed ?? 0 }}</el-descriptions-item>
+            </el-descriptions>
+            <div style="margin-top:12px;">
+              <el-button size="small" @click="switchTab('logs')">查看任务与日志 →</el-button>
+            </div>
+          </div>
+        </template>
         <template v-if="tab==='accounts'">
           <div class="funnel" v-if="funnel">
             <div class="fitem"><div class="k">作业总数</div><div class="v">{{ funnel.total }}</div></div>
@@ -278,6 +322,7 @@ const post = (p, body) => api(p, {method:'POST', headers:{'Content-Type':'applic
 createApp({
   setup() {
     const menus = [
+      {key:'register', label:'注册'},
       {key:'accounts', label:'账号管理'},
       {key:'sms', label:'号码池'},
       {key:'codex', label:'Codex 凭证'},
@@ -308,7 +353,7 @@ createApp({
     function reload() { page.value = 1; load(); }
     function onPage(p) { page.value = p; load(); }
     function onSize(s) { pageSize.value = s; page.value = 1; load(); }
-    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } else if (k === 'logs') { loadJobs(); } else if (k === 'settings') { loadSettings(); } }
+    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } else if (k === 'logs') { loadJobs(); } else if (k === 'settings') { loadSettings(); } else if (k === 'register') { loadSources(); loadCounts(); } }
 
     const ids = () => sel.value.map(r => Number(r.id));
 
@@ -375,6 +420,7 @@ createApp({
 
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
     return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+             regCount, regWorkers, regSource, regDriver, sourceOptions, driverOptions, jobCounts, startRegistration,
              manualOauthOpen, oauthEmail, oauthUrl, oauthCallback, oauthBusy, oauthStep, openManualOauth, startOauth, finishOauth,
              cfg, creds, backups, loadSettings,
              jobRows, logOpen, logText, logJobId, loadJobs, openLog, stopJob, retryJob, jobTag,
