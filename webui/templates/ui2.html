@@ -283,6 +283,12 @@
               <el-button type="success" @click="openManualOauth">人工授权</el-button>
               <el-button type="primary" @click="loadCodex">查询</el-button>
               <span class="right"></span>
+              <el-button :disabled="!cxSel.length" :loading="busy==='cxretry'" @click="cxBulk('retry')">重试</el-button>
+              <el-button :disabled="!cxSel.length" :loading="busy==='cxstop'" @click="cxBulk('stop')">停止</el-button>
+              <el-button :disabled="!cxSel.length" :loading="busy==='cxdl'" @click="cxBulk('download')">批量下载</el-button>
+              <el-button :disabled="!cxSel.length" :loading="busy==='cxdlcpa'" @click="cxBulk('cpa')">从 CPA 下载</el-button>
+              <el-button :disabled="!cxSel.length" @click="cxBulk('archive')">归档</el-button>
+              <el-button type="danger" plain :disabled="!cxSel.length" :loading="busy==='cxdel'" @click="cxBulk('delete')">删除</el-button>
               <span class="muted">共 {{ cxTotal }} 条</span>
             </div>
             <el-table :data="cxRows" empty-text="暂无凭据" v-loading="busy==='codex'" size="small" border stripe style="width:100%">
@@ -652,6 +658,38 @@ createApp({
 
     /* ---------- Codex ---------- */
     const cxRows = ref([]), cxTotal = ref(0), cxPage = ref(1), cxPageSize = ref(50), cxQuery = ref('');
+    const cxSel = ref([]);
+    async function cxBulk(kind) {
+      const files = cxSel.value.map(r => r.filename).filter(Boolean);
+      // retry/stop 走的是 account_ids，不是 filenames（后端字段不同，传错会 400）
+      const ids = cxSel.value.map(r => Number(r.account_id)).filter(n => n > 0);
+      if (!files.length) return;
+      busy.value = kind === 'retry' ? 'cxretry' : kind === 'stop' ? 'cxstop'
+        : kind === 'download' ? 'cxdl' : kind === 'cpa' ? 'cxdlcpa'
+        : kind === 'archive' ? '' : 'cxdel';
+      try {
+        if (kind === 'retry') {
+          if (!ids.length) throw new Error('这些凭据没有绑定账号 id');
+          await post('/api/codex/retry-bulk', {account_ids: ids});
+          ElMessage.success('已提交重试 ' + ids.length + ' 个');
+        } else if (kind === 'stop') {
+          if (!ids.length) throw new Error('这些凭据没有绑定账号 id');
+          await post('/api/codex/stop-bulk', {account_ids: ids});
+          ElMessage.success('已提交停止 ' + ids.length + ' 个');
+        }
+        else if (kind === 'download') { await post('/api/codex/download-bulk', {filenames: files}); ElMessage.success('已准备下载'); }
+        else if (kind === 'cpa') { await post('/api/codex/download-bulk-from-cpa', {filenames: files}); ElMessage.success('已提交从 CPA 下载'); }
+        else if (kind === 'archive') { await post('/api/codex/archive-bulk', {filenames: files, archived: true}); ElMessage.success('已归档'); }
+        else if (kind === 'delete') {
+          await ElMessageBox.confirm('删除 ' + files.length + ' 个凭据？', '确认', {type:'warning'});
+          await post('/api/codex/delete-bulk', {filenames: files});
+          ElMessage.success('已删除');
+        }
+        await loadCodex();
+      } catch (e) { if (e !== 'cancel') ElMessage.error('操作失败：' + (e.message || e)); }
+      finally { busy.value = ''; }
+    }
+
     async function loadCodex() {
       busy.value = 'codex';
       try {
@@ -808,7 +846,7 @@ createApp({
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
 
     return {
-      menus, tab, title, busy, cfgItems, cfgDraft, cfgDirty, cfgGroup, cfgFilter, cfgGroups, cfgVisible, loadConfig, saveConfig, markCfgDirty, bulkChangeEmail, cleanupDead, cancelPending, rows, total, page, pageSize, loading, query, archived, sel, funnel,
+      menus, tab, title, busy, cxSel, cxBulk, cfgItems, cfgDraft, cfgDirty, cfgGroup, cfgFilter, cfgGroups, cfgVisible, loadConfig, saveConfig, markCfgDirty, bulkChangeEmail, cleanupDead, cancelPending, rows, total, page, pageSize, loading, query, archived, sel, funnel,
       load, reload, onPage, onSize, switchTab, bulk, bulkNote, backfillCodex, tagType, fmt,
       regRunning, toggleRegistration, regCount, regWorkers, regSource, regDriver,
       sourceOptions, driverOptions, jobCounts, loadSources, loadCounts, startRegistration,
