@@ -1,44 +1,39 @@
+{% raw %}
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Turb 控制台 v2</title>
+<title>Turb 控制台</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/element-plus@2.7.6/dist/index.css">
 <script src="https://cdn.jsdelivr.net/npm/vue@3.4.31/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/element-plus@2.7.6/dist/index.full.min.js"></script>
 <style>
-  :root { --side:#1f2733; --side-active:#2b6cb0; }
-  * { box-sizing: border-box; }
-  html, body, #app { height: 100%; margin: 0; }
-  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background:#f5f7fa; }
-  .shell { display: flex; height: 100%; }
-  .side { width: 208px; background: var(--side); color:#c9d1d9; display:flex; flex-direction:column; }
-  .brand { padding: 18px 20px; font-size: 15px; font-weight: 600; color:#fff; letter-spacing:.5px;
-           border-bottom: 1px solid rgba(255,255,255,.08); display:flex; align-items:center; gap:8px; }
-  .brand .dot { width:8px; height:8px; border-radius:50%; background:#4ade80; }
-  .menu { flex:1; padding: 10px 0; }
-  .menu-item { padding: 11px 20px; cursor:pointer; font-size:14px; display:flex; align-items:center; gap:10px;
-               color:#aab6c4; border-left:3px solid transparent; }
-  .menu-item:hover { background: rgba(255,255,255,.05); color:#fff; }
-  .menu-item.active { background: rgba(43,108,176,.18); color:#fff; border-left-color: var(--side-active); }
-  .side-foot { padding: 12px 20px; font-size:12px; color:#7b8794; border-top:1px solid rgba(255,255,255,.08); }
-  .main { flex:1; display:flex; flex-direction:column; min-width:0; }
-  .topbar { height:56px; background:#fff; border-bottom:1px solid #e5e7eb; display:flex; align-items:center;
-            padding:0 20px; gap:12px; }
-  .topbar h2 { margin:0; font-size:16px; font-weight:600; color:#1f2d3d; }
-  .topbar .spacer { flex:1; }
-  .content { flex:1; overflow:auto; padding:16px; }
-  .card { background:#fff; border-radius:10px; padding:16px; box-shadow:0 1px 3px rgba(16,24,40,.06); }
-  .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
-  .stat-row { display:flex; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
-  .stat { flex:1; min-width:150px; background:#fff; border-radius:10px; padding:14px 16px;
-          box-shadow:0 1px 3px rgba(16,24,40,.06); }
-  .stat .label { font-size:12px; color:#8492a6; }
-  .stat .value { font-size:22px; font-weight:600; color:#1f2d3d; margin-top:4px; }
-  .muted { color:#909399; }
-  .el-table .email-cell { display:flex; flex-direction:column; line-height:1.35; }
-  .el-table .email-cell .sub { font-size:12px; color:#909399; }
+  *{box-sizing:border-box}
+  html,body,#app{height:100%;margin:0}
+  body{font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#f5f7fa;color:#1f2d3d}
+  .shell{display:flex;height:100%}
+  .side{width:212px;background:#1d2531;display:flex;flex-direction:column;flex-shrink:0}
+  .brand{padding:18px 20px;color:#fff;font-weight:600;font-size:15px;display:flex;align-items:center;gap:9px;border-bottom:1px solid rgba(255,255,255,.07)}
+  .brand .dot{width:8px;height:8px;border-radius:50%;background:#3ddc84;box-shadow:0 0 8px #3ddc84}
+  .menu{flex:1;padding:8px 0}
+  .menu-item{padding:11px 20px;font-size:14px;color:#9aa7b8;cursor:pointer;border-left:3px solid transparent;transition:.15s}
+  .menu-item:hover{background:rgba(255,255,255,.05);color:#fff}
+  .menu-item.active{background:rgba(64,158,255,.16);color:#fff;border-left-color:#409eff}
+  .side-foot{padding:12px 20px;font-size:12px;color:#6b7787;border-top:1px solid rgba(255,255,255,.07)}
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  .topbar{height:56px;background:#fff;border-bottom:1px solid #e8eaef;display:flex;align-items:center;padding:0 20px;gap:12px}
+  .topbar h2{margin:0;font-size:16px;font-weight:600}
+  .content{flex:1;overflow:auto;padding:16px}
+  .card{background:#fff;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
+  .funnel{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .fitem{flex:1;min-width:132px;background:#fff;border-radius:10px;padding:12px 14px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
+  .fitem .k{font-size:12px;color:#8492a6}
+  .fitem .v{font-size:20px;font-weight:600;margin-top:3px}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  .email-cell{display:flex;flex-direction:column;line-height:1.35}
+  .email-cell .sub{font-size:12px;color:#909399}
+  .right{margin-left:auto}
 </style>
 </head>
 <body>
@@ -47,166 +42,177 @@
     <aside class="side">
       <div class="brand"><span class="dot"></span> Turb 控制台</div>
       <nav class="menu">
-        <div v-for="m in menus" :key="m.key" class="menu-item" :class="{active: tab === m.key}" @click="tab = m.key">
-          <span>{{ m.label }}</span>
-        </div>
+        <div v-for="m in menus" :key="m.key" class="menu-item" :class="{active:tab===m.key}" @click="switchTab(m.key)">{{ m.label }}</div>
       </nav>
       <div class="side-foot">v2 · Element Plus</div>
     </aside>
-
     <section class="main">
       <header class="topbar">
-        <h2>{{ currentMenuLabel }}</h2>
-        <span class="spacer"></span>
-        <el-button v-if="tab === 'accounts'" size="small" @click="loadAccounts">刷新</el-button>
-        <el-button size="small" tag="a" href="/" text>返回旧版</el-button>
+        <h2>{{ title }}</h2>
+        <span class="right"></span>
+        <el-button size="small" @click="reload">刷新</el-button>
+        <el-button size="small" text tag="a" href="/">返回旧版</el-button>
       </header>
-
       <main class="content">
-        <!-- 账号 -->
-        <template v-if="tab === 'accounts'">
-          <div class="stat-row">
-            <div class="stat"><div class="label">账号总数</div><div class="value">{{ total }}</div></div>
-            <div class="stat"><div class="label">本页显示</div><div class="value">{{ rows.length }}</div></div>
-            <div class="stat"><div class="label">已选</div><div class="value">{{ selected.length }}</div></div>
+        <template v-if="tab==='accounts'">
+          <div class="funnel" v-if="funnel">
+            <div class="fitem"><div class="k">作业总数</div><div class="v">{{ funnel.total }}</div></div>
+            <div class="fitem"><div class="k">成功</div><div class="v">{{ (funnel.status||{}).success || 0 }}</div></div>
+            <div class="fitem"><div class="k">部分成功</div><div class="v">{{ (funnel.status||{}).partial_success || 0 }}</div></div>
+            <div class="fitem"><div class="k">失败</div><div class="v">{{ (funnel.status||{}).failed || 0 }}</div></div>
+            <div class="fitem"><div class="k">Codex 未跑</div><div class="v">{{ (funnel.sub_status||{})['codex_status:skipped'] || 0 }}</div></div>
+            <div class="fitem"><div class="k">Codex 失败</div><div class="v">{{ (funnel.sub_status||{})['codex_status:failed'] || 0 }}</div></div>
           </div>
-
           <div class="card">
             <div class="toolbar">
-              <el-input v-model="query" placeholder="搜索邮箱 / 备注" clearable style="width:240px" @keyup.enter="reload" />
-              <el-select v-model="archived" style="width:130px" @change="reload">
-                <el-option label="默认账号" value="0" />
-                <el-option label="已归档" value="only" />
+              <el-input v-model="query" placeholder="搜索邮箱/备注" clearable style="width:220px" @keyup.enter="reload"/>
+              <el-select v-model="archived" style="width:120px" @change="reload">
+                <el-option label="默认账号" value="0"/><el-option label="已归档" value="only"/>
               </el-select>
               <el-button type="primary" @click="reload">查询</el-button>
-              <span class="spacer" style="flex:1"></span>
-              <el-button :disabled="!selected.length">查活</el-button>
-              <el-button :disabled="!selected.length">导出</el-button>
-              <el-button type="danger" plain :disabled="!selected.length">删除</el-button>
+              <span class="right"></span>
+              <el-button :disabled="!sel.length" :loading="busy==='live'" @click="bulk('live')">批量查活</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='totp'" @click="bulk('totp')">开 2FA</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='cpa'" @click="bulk('cpa')">导出凭据</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='codex'" @click="backfillCodex">Codex 补跑</el-button>
+              <el-button :disabled="!sel.length" @click="bulk('archive')">归档</el-button>
+              <el-button type="danger" plain :disabled="!sel.length" :loading="busy==='del'" @click="bulk('del')">删除</el-button>
             </div>
-
-            <el-table :data="rows" v-loading="loading" size="small" border stripe
-                      @selection-change="onSelect" style="width:100%">
-              <el-table-column type="selection" width="42" />
-              <el-table-column prop="id" label="ID" width="72">
-                <template #default="{ row }">#{{ row.id }}</template>
-              </el-table-column>
+            <el-table :data="rows" v-loading="loading" size="small" border stripe @selection-change="v=>sel=v" style="width:100%">
+              <el-table-column type="selection" width="42"/>
+              <el-table-column label="ID" width="76"><template #default="{row}">#{{ row.id }}</template></el-table-column>
               <el-table-column label="邮箱" min-width="230">
-                <template #default="{ row }">
-                  <div class="email-cell">
-                    <span>{{ row.email }}</span>
-                    <span class="sub">{{ row.user_name || '-' }}</span>
-                  </div>
+                <template #default="{row}">
+                  <div class="email-cell"><span>{{ row.email }}</span><span class="sub">{{ row.user_name || '-' }}</span></div>
                 </template>
               </el-table-column>
-              <el-table-column prop="email_source" label="来源" width="110">
-                <template #default="{ row }">{{ row.email_source || '-' }}</template>
+              <el-table-column label="来源" width="104"><template #default="{row}">{{ row.email_source || '-' }}</template></el-table-column>
+              <el-table-column label="套餐" width="92">
+                <template #default="{row}"><el-tag size="small" :type="row.plan_type==='plus'?'warning':'info'">{{ row.plan_type || 'free' }}</el-tag></template>
               </el-table-column>
-              <el-table-column label="套餐" width="100">
-                <template #default="{ row }">
-                  <el-tag size="small" :type="row.plan_type === 'plus' ? 'warning' : 'info'">{{ row.plan_type || 'free' }}</el-tag>
-                </template>
+              <el-table-column label="Codex" width="104">
+                <template #default="{row}"><el-tag size="small" :type="tagType('codex',row.codex_status)">{{ row.codex_status || '未开始' }}</el-tag></template>
               </el-table-column>
-              <el-table-column label="Codex" width="110">
-                <template #default="{ row }">
-                  <el-tag size="small" :type="codexTagType(row.codex_status)">{{ row.codex_status || '未开始' }}</el-tag>
-                </template>
+              <el-table-column label="测活" width="98">
+                <template #default="{row}"><el-tag size="small" :type="tagType('live',row.live_check_status)">{{ row.live_check_status || '-' }}</el-tag></template>
               </el-table-column>
-              <el-table-column label="测活" width="100">
-                <template #default="{ row }">
-                  <el-tag size="small" :type="liveTagType(row.live_check_status)">{{ row.live_check_status || '-' }}</el-tag>
-                </template>
+              <el-table-column label="密码" width="86">
+                <template #default="{row}"><el-tag size="small" v-if="row.registration_password" type="success">已设</el-tag><el-tag size="small" v-else type="warning">缺失</el-tag></template>
               </el-table-column>
-              <el-table-column label="创建时间" width="170">
-                <template #default="{ row }">{{ fmt(row.created_at) }}</template>
-              </el-table-column>
+              <el-table-column label="创建时间" width="164"><template #default="{row}">{{ fmt(row.created_at) }}</template></el-table-column>
             </el-table>
-
-            <div style="display:flex; justify-content:flex-end; margin-top:12px;">
-              <el-pagination background layout="total, sizes, prev, pager, next"
-                             :total="total" :page-size="pageSize" :current-page="page"
-                             :page-sizes="[20, 50, 100]"
-                             @current-change="onPage" @size-change="onSize" />
+            <div style="display:flex;justify-content:flex-end;margin-top:12px">
+              <el-pagination background layout="total, sizes, prev, pager, next" :total="total" :page-size="pageSize"
+                             :current-page="page" :page-sizes="[20,50,100]" @current-change="onPage" @size-change="onSize"/>
             </div>
           </div>
         </template>
-
         <template v-else>
-          <div class="card">
-            <el-empty :description="currentMenuLabel + ' 模块迁移中'" />
-          </div>
+          <div class="card"><el-empty :description="title + ' 迁移中'"/></div>
         </template>
       </main>
     </section>
   </div>
-</div>
-
-<script>
+</div><script>
 const { createApp, ref, computed, onMounted } = Vue;
-const { ElMessage } = ElementPlus;
+const { ElMessage, ElMessageBox } = ElementPlus;
 
 async function api(path, options) {
   const res = await fetch(path, Object.assign({ credentials: 'include' }, options || {}));
-  if (!res.ok) {
-    let detail = '';
-    try { detail = (await res.text()).slice(0, 160); } catch (e) {}
-    throw new Error('HTTP ' + res.status + ' ' + detail);
-  }
+  if (!res.ok) { let d=''; try { d = (await res.text()).slice(0,140); } catch(e){} throw new Error('HTTP '+res.status+' '+d); }
   const ct = res.headers.get('content-type') || '';
   return ct.includes('json') ? res.json() : res.text();
 }
+const post = (p, body) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
 
 createApp({
   setup() {
     const menus = [
-      { key: 'accounts', label: '账号管理' },
-      { key: 'sms', label: '号码池' },
-      { key: 'codex', label: 'Codex 凭证' },
-      { key: 'logs', label: '任务与日志' },
-      { key: 'settings', label: '设置' },
+      {key:'accounts', label:'账号管理'},
+      {key:'sms', label:'号码池'},
+      {key:'codex', label:'Codex 凭证'},
+      {key:'logs', label:'任务与日志'},
+      {key:'settings', label:'设置'},
     ];
     const tab = ref('accounts');
-    const currentMenuLabel = computed(() => (menus.find(m => m.key === tab.value) || {}).label || '');
+    const title = computed(() => (menus.find(m => m.key === tab.value) || {}).label || '');
 
-    const rows = ref([]);
-    const total = ref(0);
-    const page = ref(1);
-    const pageSize = ref(20);
-    const loading = ref(false);
-    const query = ref('');
-    const archived = ref('0');
-    const selected = ref([]);
+    const rows = ref([]); const total = ref(0); const page = ref(1); const pageSize = ref(20);
+    const loading = ref(false); const busy = ref('');
+    const query = ref(''); const archived = ref('0'); const sel = ref([]); const funnel = ref(null);
 
-    async function loadAccounts() {
+    async function loadFunnel() {
+      try { funnel.value = await api('/api/funnel?limit=500'); } catch (e) { funnel.value = null; }
+    }
+    async function load() {
       loading.value = true;
       try {
-        const qs = new URLSearchParams({
-          paged: '1', page: String(page.value), page_size: String(pageSize.value),
-          archived: archived.value, q: query.value,
-        });
+        const qs = new URLSearchParams({paged:'1', page:String(page.value), page_size:String(pageSize.value),
+          archived:archived.value, q:query.value});
         const data = await api('/api/accounts?' + qs.toString());
-        rows.value = data.items || data.accounts || [];
+        rows.value = data.items || [];
         total.value = Number(data.total || rows.value.length || 0);
-      } catch (e) {
-        ElMessage.error('加载账号失败：' + e.message);
-      } finally {
-        loading.value = false;
-      }
+      } catch (e) { ElMessage.error('加载失败：' + e.message); }
+      finally { loading.value = false; }
     }
-    function reload() { page.value = 1; loadAccounts(); }
-    function onPage(p) { page.value = p; loadAccounts(); }
-    function onSize(s) { pageSize.value = s; page.value = 1; loadAccounts(); }
-    function onSelect(list) { selected.value = list; }
+    function reload() { page.value = 1; load(); }
+    function onPage(p) { page.value = p; load(); }
+    function onSize(s) { pageSize.value = s; page.value = 1; load(); }
+    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } }
 
-    const codexTagType = (s) => ({ success: 'success', failed: 'danger', pending: 'warning', blocked: 'warning' }[s] || 'info');
-    const liveTagType = (s) => ({ live: 'success', deactivated: 'danger', failed: 'danger' }[s] || 'info');
-    const fmt = (v) => String(v || '').replace('T', ' ').slice(0, 19) || '-';
+    const ids = () => sel.value.map(r => Number(r.id));
 
-    onMounted(loadAccounts);
-    return { menus, tab, currentMenuLabel, rows, total, page, pageSize, loading, query, archived,
-             selected, loadAccounts, reload, onPage, onSize, onSelect, codexTagType, liveTagType, fmt };
+    async function bulk(kind) {
+      const list = ids();
+      if (!list.length) return;
+      busy.value = kind === 'live' ? 'live' : kind === 'totp' ? 'totp' : kind === 'cpa' ? 'cpa' : kind === 'del' ? 'del' : '';
+      try {
+        if (kind === 'live') {
+          const r = await post('/api/accounts/check-live-bulk', {account_ids:list, workers:4});
+          ElMessage.success('已提交查活：' + (r.started_count ?? list.length));
+        } else if (kind === 'totp') {
+          const r = await post('/api/accounts/totp-setup-bulk', {account_ids:list});
+          ElMessage.success('已提交 2FA：' + (r.started_count ?? list.length));
+        } else if (kind === 'cpa') {
+          const r = await post('/api/accounts/download-cpa-bulk', {account_ids:list, prepare:true});
+          ElMessage.success('已准备导出：' + (r.count ?? r.prepared_count ?? list.length));
+        } else if (kind === 'archive') {
+          const r = await post('/api/accounts/archive-bulk', {account_ids:list, archived: archived.value !== 'only'});
+          ElMessage.success('归档处理完成：' + (r.archived ?? list.length));
+        } else if (kind === 'del') {
+          await ElMessageBox.confirm('删除 ' + list.length + ' 个账号？不可恢复。', '确认删除', {type:'warning'});
+          const r = await post('/api/accounts/delete-bulk', {account_ids:list});
+          ElMessage.success('已删除：' + (r.deleted_count ?? list.length));
+        }
+        await load(); await loadFunnel();
+      } catch (e) {
+        if (e !== 'cancel') ElMessage.error('操作失败：' + (e.message || e));
+      } finally { busy.value = ''; }
+    }
+
+    async function backfillCodex() {
+      busy.value = 'codex';
+      try {
+        const r = await post('/api/codex/backfill', {limit: Math.min(ids().length || 10, 50)});
+        ElMessage.success('Codex 补跑已入队：' + ((r.queued || []).length));
+        await loadFunnel();
+      } catch (e) { ElMessage.error('补跑失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+
+    const tagType = (kind, s) => {
+      if (kind === 'codex') return ({success:'success', failed:'danger', pending:'warning', blocked:'warning'}[s] || 'info');
+      return ({live:'success', deactivated:'danger', failed:'danger'}[s] || 'info');
+    };
+    const fmt = (v) => String(v || '').replace('T',' ').slice(0,19) || '-';
+
+    onMounted(() => { load(); loadFunnel(); });
+    return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+             load, reload, onPage, onSize, switchTab, bulk, backfillCodex, tagType, fmt };
   }
 }).use(ElementPlus).mount('#app');
 </script>
 </body>
 </html>
+
+{% endraw %}

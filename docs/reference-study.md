@@ -1756,3 +1756,49 @@ Element Plus 的 `el-table / el-pagination / el-dialog / el-message` 直接对�
   等新版功能齐了再决定是否上 Vite；
 - 先做骨架（侧边栏 + 顶栏 + 内容区），再逐页迁移：
   账号列表 → sms-pool → Codex/日志 → 设置。
+
+## 42. wenfxl/openai-cpa 补深读（第 2 轮）
+
+上一版只有 22 行且只看了启动横幅。补读 `utils/auth_pipeline/register.py`(110KB)
+与 `utils/core_engine.py`(126KB) 后，拿到两个实际机制。
+
+### 42.1 静默取 Token：先试 OAuth，失败再走登录
+
+`run_oauth_only(email, password, proxy, run_ctx, access_token, device_id)`：
+
+```python
+s_log = requests.Session(proxies=proxies, impersonate="chrome")   # 全新会话
+resp, current_url = _follow_redirect_chain_local(s_log, oauth_log.auth_url, proxies)
+if "code=" in current_url and "state=" in current_url:
+    return submit_callback_url(callback_url=current_url, code_verifier=..., ...)
+# 否则继续走密码登录
+```
+
+即：**先拿一个干净会话直接打 authorize 链**，能直接出 code 就收工，
+出不来才登录。这与我们第 17 轮的结论完全一致（服务端要求真实认证），
+差别在于它把这个"先试后登录"做成了默认路径，而不是一上来就登录。
+
+另外它给无密码号留了哨兵值：`password == "Takeover_NoPassword"` →
+`is_takeover = True`，走接管分支。**这正好可以用于我们那 13 个无密码老号。**
+
+### 42.2 CPA 库存治理（core_engine）
+
+- `_normalize_cpa_auth_files_url` / `upload_to_cpa_integrated`：上传到 CPA 并规范化 URL；
+- `_is_codex_free_cpa_file` / `_filter_cpa_inventory_files` / `_is_sub2api_openai_free_item`：
+  **按类型过滤库存**（free 的 Codex 文件、sub2api 的 free 条目分开处理）；
+- `process_grok2api_worker`：多平台（Grok）同一套 worker；
+- `_extract_remaining_percent(window_info)`：从额度窗口里解析剩余百分比。
+
+我们目前只关心"有没有凭据"，**没有按类型/额度做库存治理**，
+这在凭据变多后会成为问题（哪些能用、哪些是 free 档、额度还剩多少）。
+
+### 42.3 团队/提权分支
+
+`TEAM_MODE_ENABLE` + `sys_node_allocate(s_init, did, access_token, proxies)`
+→ 返回三个 `sys_handle`，用于"团队静默流程"。这条我们没有对应实现。
+
+```
+覆盖情况：register.py 的 run_oauth_only / init_auth / _follow_redirect_chain_local /
+submit_callback_url 已读；core_engine 的 CPA 库存与额度解析已读。
+未读：luckmail / plugin / agent 目录（本轮未涉及）。
+```
