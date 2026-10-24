@@ -79,3 +79,67 @@ def explicit_ban_code(value) -> str:
 
 def has_explicit_ban(value) -> bool:
     return bool(explicit_ban_code(value))
+
+
+# ---------------------------------------------------------------- 响应分类
+
+#: 封号措辞（dango 实测：封号号的 AT 会被一并吊销，拿不到 200，
+#: 所以必须从 401/403 的**响应体文本**里找证据，不能只等 200+is_deactivated）
+_BAN_TEXT_MARKERS = (
+    "account_deactivated",
+    "deactivated",
+    "suspended",
+    "banned",
+    "violat",
+    "potential abuse",
+    "terms of use",
+    "policy violation",
+)
+
+#: 凭据失效（可重登恢复），不是封号
+_REVOKED_TEXT_MARKERS = (
+    "invalidated oauth token",
+    "invalid oauth token",
+    "token_revoked",
+    "token revoked",
+    "invalid api key",
+)
+
+BANNED = "banned"
+REVOKED = "revoked"
+EXPIRED = "expired"
+UNKNOWN = "unknown"
+
+
+def classify_token_failure(status_code, body) -> dict:
+    """把 401/403 之类的失败响应归类。
+
+    返回 {"kind": banned|revoked|expired|unknown, "reason": str, "ban_code": str}
+
+    顺序很重要：**结构化封禁码优先**，其次是封号措辞，
+    然后是吊销措辞——否则"invalidated oauth token"会被误判成封号，
+    导致把还能重登救回来的号直接删掉。
+    """
+    text = str(body or "")
+    code = explicit_ban_code(text)
+    if code:
+        return {"kind": BANNED, "reason": code, "ban_code": code}
+
+    lowered = text.lower()
+    for marker in _BAN_TEXT_MARKERS:
+        if marker in lowered:
+            return {"kind": BANNED, "reason": marker, "ban_code": ""}
+    for marker in _REVOKED_TEXT_MARKERS:
+        if marker in lowered:
+            return {"kind": REVOKED, "reason": marker, "ban_code": ""}
+    if "expired" in lowered or "exp" in lowered and "token" in lowered:
+        return {"kind": EXPIRED, "reason": "token expired", "ban_code": ""}
+    try:
+        status = int(status_code)
+    except Exception:
+        status = 0
+    return {"kind": UNKNOWN, "reason": "http-%s" % (status or "?"), "ban_code": ""}
+
+
+def is_banned_response(status_code, body) -> bool:
+    return classify_token_failure(status_code, body)["kind"] == BANNED

@@ -156,11 +156,14 @@ def _probe_me(token: str, proxy: str | None, timeout: float = 20.0) -> tuple[str
     #   任何状态码 + 结构化封禁标记 → 真封禁，记 revoked 并注明 ban
     #   403 但没有封禁标记         → 多半是 IP/CF 拦截，记 unknown（别误判成号废）
     try:
-        from core.ban_detect import explicit_ban_code
+        from core.ban_detect import classify_token_failure
 
-        ban = explicit_ban_code(body)
+        verdict = classify_token_failure(code, body)
     except Exception:
-        ban = ''
+        verdict = {'kind': 'unknown', 'reason': '', 'ban_code': ''}
+    if verdict.get('kind') == 'banned':
+        return 'revoked', 'ban:%s' % (verdict.get('ban_code') or verdict.get('reason') or 'banned')
+    ban = verdict.get('ban_code') or ''
     if ban:
         return 'revoked', 'ban:%s %s' % (ban, body[:60])
     if code == 401 or 'token_revoked' in body:
