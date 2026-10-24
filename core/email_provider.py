@@ -341,6 +341,11 @@ def wait_for_otp(
             job_id = None
         result = wait_for_manual_otp(email, timeout=timeout, job_id=job_id)
         _check_stop_requested()
+        if _lock is not None:
+            try:
+                _lock.__exit__(None, None, None)
+            except Exception:
+                pass
         return result
 
     extra_kwargs = {}
@@ -360,19 +365,32 @@ def wait_for_otp(
         _kwargs = dict(extra_kwargs)
         if max_wait:
             _kwargs.setdefault('max_wait', int(max_wait))
+        # 同邮箱串行取码：两个流程同时拉码会互相作废对方的验证码，
+        # 表现为"验证码一直错"，实际是我们自己把码换了（starmiaoa 的 otp_lock 思路）。
+        # 必须用 with：手工 __enter__/__exit__ 在异常路径上会漏释放，导致该邮箱永久死锁。
+        from contextlib import nullcontext
+
         try:
-            result = fetcher(email, after_ts=after_ts, **_kwargs)
-        except TypeError as exc:
-            # 兼容尚未升级的第三方邮箱 provider；已升级的实现仍负责过滤旧 OTP。
-            if "exclude_codes" not in extra_kwargs or "exclude_codes" not in str(exc):
-                raise
-            legacy_kwargs = dict(_kwargs)
-            legacy_kwargs.pop("exclude_codes", None)
-            legacy_kwargs.pop("max_wait", None)
-            logger.warning("[EmailProvider] provider 尚未支持 exclude_codes，降级调用：%s", getattr(fetcher, "__module__", fetcher))
-            result = fetcher(email, after_ts=after_ts, **legacy_kwargs)
-        _check_stop_requested()
-        return result
+            from core.otp_lock import otp_lock
+
+            _lock_ctx = otp_lock(email)
+        except Exception:
+            _lock_ctx = nullcontext()
+
+        with _lock_ctx:
+            try:
+                result = fetcher(email, after_ts=after_ts, **_kwargs)
+            except TypeError as exc:
+                # 兼容尚未升级的第三方邮箱 provider；已升级的实现仍负责过滤旧 OTP。
+                if "exclude_codes" not in extra_kwargs or "exclude_codes" not in str(exc):
+                    raise
+                legacy_kwargs = dict(_kwargs)
+                legacy_kwargs.pop("exclude_codes", None)
+                legacy_kwargs.pop("max_wait", None)
+                logger.warning("[EmailProvider] provider 尚未支持 exclude_codes，降级调用：%s", getattr(fetcher, "__module__", fetcher))
+                result = fetcher(email, after_ts=after_ts, **legacy_kwargs)
+            _check_stop_requested()
+            return result
 
     # 新注册任务优先采用任务级来源；没有任务覆盖时，已注册账号优先采用落库来源。
     source = (
