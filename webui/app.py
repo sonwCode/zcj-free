@@ -422,6 +422,13 @@ def create_app(auth_code: str | None = None) -> Flask:
     init_auth(app, auth_code=auth_code)
     register_auth_routes(app)
     recovered_registration_jobs = svc.recover_interrupted_jobs()
+    try:
+        requeue_info = svc.requeue_restart_cancelled()
+        if requeue_info.get('submitted'):
+            logger.info('[启动] 重启补偿入队 %s 条（发现 %s 条被取消作业）',
+                        requeue_info.get('submitted'), requeue_info.get('cancelled'))
+    except Exception:
+        logger.exception('[启动] 重启补偿入队失败')
     if recovered_registration_jobs:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的注册任务", recovered_registration_jobs)
     recovered_plan_checks = db.recover_interrupted_plan_checks()

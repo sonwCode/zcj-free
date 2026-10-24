@@ -1068,6 +1068,70 @@ DB_LOCK = threading.RLock()
 
 ---
 
-## 23. 其余项目
+## 23. taiguanren/chatgpt-auto-register 与"重启即丢一批"的修复
 
-（后续轮次补齐：taiguanren、MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+### 23.1 项目本身（8KB + 8KB + 4KB）
+
+纯协议手机号注册（SMSBower 接码），README 强调"20MB 内存、无浏览器"，
+`sentinel.py` 只有 4KB，用 **FNV-1a 工作量证明**自己算 token。
+
+这正是第 6 轮 Regert888 文档里点破的**老路线**：
+纯 Python 合成 PoW 能过表面校验，但 OTP 派发服务端会用真 SDK 复验，
+合成 token 过不了 → 邮件静默丢弃。它的体量也说明这是早期实现。
+
+无可迁移项（我们跑的已经是真 sdk.js）。
+
+### 23.2 真正的收获来自作业表：`webui_restarted` 183 条
+
+用 payload 里的**结构化字段**（error_code / phase）重新统计 614 条作业：
+
+```
+error_code 前 10：
+  webui_restarted        183   ← 最大项
+  (无)                   106
+  runtimeerror            71
+  codex_failed            38
+  sms_no_numbers           8
+  twofa_failed             7
+  phone_fraud_guard        6
+  otp_timeout              6
+  codex_disabled           5
+phase：codex 187 / cancelled 154 / registration 90 / stopped 28
+retryable：True 426 / False 33
+```
+
+**`webui_restarted` 183 条 = 全部作业的 30%**——每次重启服务（部署、改配置），
+排队中的作业被落成 `cancelled` + "请重试"，而**没有人会去逐个点重试**。
+
+### 23.3 已落地：重启后自动补偿入队
+
+`core/registration_service.py` 新增 `requeue_restart_cancelled(limit, dry_run)`：
+
+1. 扫描 `db.list_jobs(limit=1000)`，挑出 `status=cancelled` 且
+   `error_code=webui_restarted` 的作业；
+2. **去重**：已补偿过的作业 ID 记在 `requeue_state.json`，不再重复补；
+3. 按 `AUTO_REQUEUE_LIMIT`（默认 10）调用 `submit_registration(count=N)` 补偿；
+4. 只补偿"数量"，不硬复用原邮箱（原邮箱可能已被回收或占用）。
+
+接入 `webui/app.py` 启动流程（`recover_interrupted_jobs()` 之后）。
+
+**实测**：
+```
+第一次重启：[Service] 重启补偿：发现 150 条被取消作业，已补偿入队 10 条
+          状态文件 {"done": [664,665,...,964]}
+第二次重启：[Service] 重启补偿：发现 145 条被取消作业，已补偿入队 10 条
+          状态文件增加 [659..663, 970..974]  ← 补的是新的 10 条，不是重复
+```
+
+去重有效：两次重启补偿的作业 ID 完全不重叠。
+
+### 23.4 为什么这条比"再研究一个项目"重要
+
+183 条作业对应的容量是**真实损失**：按每条 30–290 秒算，最保守也是 1.5 小时
+的注册产能被重启吃掉。这条修复直接把这类损失变成自动补偿。
+
+---
+
+## 24. 其余项目
+
+（后续轮次补齐：MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）

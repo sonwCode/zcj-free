@@ -9,6 +9,7 @@
     submit_registration(email_source="outlook", count=5)
     → 创建 5 个任务，丢入线程池，立即返回 [job_dict, ...]
 """
+import json
 import logging
 import threading
 import time
@@ -365,6 +366,69 @@ def shutdown_executor(wait: bool = True) -> None:
         ex.shutdown(wait=wait, cancel_futures=False)
 
 
+def requeue_restart_cancelled(limit: int = 10, dry_run: bool = False) -> dict:
+    """把"因 WebUI 重启被取消"的排队作业重新排一批，恢复吞吐。
+
+    背景：重启时 pending 作业会被落成 cancelled + error_code=webui_restarted，
+    提示"请重试"——但没人会去逐个点。实测 614 条作业里有 183 条是这类，
+    等于每次部署都白丢一批容量。
+
+    这里只补偿"数量"（重新从池里取邮箱），不强行复用原邮箱：
+    原邮箱在恢复时可能已被回收或已被占用，硬复用反而更容易失败。
+    """
+    try:
+        from config import register as _rc
+
+        if not bool(getattr(_rc, 'AUTO_REQUEUE_ON_RESTART', True)):
+            return {'ok': False, 'reason': 'disabled'}
+        cap = int(getattr(_rc, 'AUTO_REQUEUE_LIMIT', 10) or 10)
+    except Exception:
+        cap = 10
+    cap = max(1, min(int(limit or cap), cap))
+    # 去重状态：已经补偿过的作业 ID 不再重复补，避免每次重启都多开一批
+    state_path = Path('/opt/turb-gpt-register/requeue_state.json')
+    done_ids: set = set()
+    try:
+        raw_state = json.loads(state_path.read_text(encoding='utf-8'))
+        done_ids = {int(x) for x in (raw_state.get('done') or [])}
+    except Exception:
+        done_ids = set()
+    pending = 0
+    picked: list = []
+    try:
+        # list_jobs 把 payload 摊平到顶层，error_code / status 都在一级字段上
+        for job in db.list_jobs(limit=1000):
+            if str(job.get('status')) != 'cancelled':
+                continue
+            if str(job.get('error_code')) != 'webui_restarted':
+                continue
+            job_id = int(job.get('id') or 0)
+            if job_id in done_ids:
+                continue
+            pending += 1
+            picked.append(job_id)
+    except Exception:
+        pending = 0
+    if pending <= 0:
+        return {'ok': True, 'cancelled': 0, 'submitted': 0}
+    count = min(pending, cap)
+    if dry_run:
+        return {'ok': True, 'cancelled': pending, 'would_submit': count, 'dry_run': True}
+    try:
+        submitted = submit_registration(count=count)
+    except Exception as exc:
+        logger.warning('[Service] 重启补偿入队失败：%s', str(exc)[:160])
+        return {'ok': False, 'cancelled': pending, 'submitted': 0,
+                'error': '%s: %s' % (type(exc).__name__, str(exc)[:120])}
+    try:
+        done_ids.update(picked[:count])
+        state_path.write_text(json.dumps({'done': sorted(done_ids)}), encoding='utf-8')
+    except Exception:
+        pass
+    logger.info('[Service] 重启补偿：发现 %d 条被取消作业，已补偿入队 %d 条', pending, count)
+    return {'ok': True, 'cancelled': pending, 'submitted': len(submitted or [])}
+
+
 def recover_interrupted_jobs() -> int:
     """服务启动时收尾上次进程遗留的注册任务，并回收未消耗邮箱。"""
     with _STOP_LOCK:
@@ -485,39 +549,62 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             with email_provider.email_source_context(
                 current.get("email_source") if force_email_pool else None
             ):
-                _protocol_gate_enter(log_logger)
+                # 断点恢复：账号已建好但上次没拿到会话，这里直接落库。
+                _resumed = None
                 try:
-                    _edge_enabled = True
-                    _edge_attempts = 2
+                    from core.resume_service import try_resume as _try_resume
+
+                    _resumed = _try_resume(email) if email else None
+                except Exception:
+                    _resumed = None
+                if _resumed is not None:
+                    log_logger.info('[Job %s] 命中注册断点，直接落库 account_id=%s',
+                                    job_id, _resumed.get('account_id'))
+                    result = _resumed
+                else:
+                    _protocol_gate_enter(log_logger)
                     try:
-                        from config import register as _edge_cfg
+                        _edge_enabled = True
+                        _edge_attempts = 2
+                        try:
+                            from config import register as _edge_cfg
 
-                        _edge_enabled = bool(getattr(_edge_cfg, 'EDGE_RETRY_ENABLED', True))
-                        _edge_attempts = int(getattr(_edge_cfg, 'EDGE_RETRY_MAX_ATTEMPTS', 2) or 2)
-                    except Exception:
-                        pass
-                    _reg_kwargs = {
-                        'email': email,
-                        'name': name,
-                        'birthday': birthday,
-                        'on_email_acquired': _on_email_acquired,
-                        'exclude_emails': excluded_emails,
-                    }
-                    if _edge_enabled:
-                        from core.edge_retry import run_with_edge_retry
+                            _edge_enabled = bool(getattr(_edge_cfg, 'EDGE_RETRY_ENABLED', True))
+                            _edge_attempts = int(getattr(_edge_cfg, 'EDGE_RETRY_MAX_ATTEMPTS', 2) or 2)
+                        except Exception:
+                            pass
+                        _reg_kwargs = {
+                            'email': email,
+                            'name': name,
+                            'birthday': birthday,
+                            'on_email_acquired': _on_email_acquired,
+                            'exclude_emails': excluded_emails,
+                        }
+                        if _edge_enabled:
+                            from core.edge_retry import run_with_edge_retry
 
-                        def _on_rotate(attempt, old_proxy, new_proxy):
-                            log_logger.warning(
-                                '[Job %s] CF 边缘挑战，换出口重试（第 %s 次）', job_id, attempt + 1)
-                        result = run_with_edge_retry(
-                            run_registration, _reg_kwargs,
-                            max_attempts=_edge_attempts, on_rotate=_on_rotate,
-                        )
-                    else:
-                        result = run_registration(**_reg_kwargs)
-                finally:
-                    _protocol_gate_leave()
+                            def _on_rotate(attempt, old_proxy, new_proxy):
+                                log_logger.warning(
+                                    '[Job %s] CF 边缘挑战，换出口重试（第 %s 次）', job_id, attempt + 1)
+                            result = run_with_edge_retry(
+                                run_registration, _reg_kwargs,
+                                max_attempts=_edge_attempts, on_rotate=_on_rotate,
+                            )
+                        else:
+                            result = run_registration(**_reg_kwargs)
+                    finally:
+                        _protocol_gate_leave()
             result_dict = result if isinstance(result, dict) else {}
+            try:
+                from core.failure_registry import classify_error as _classify
+
+                _outcome = str(result_dict.get('outcome') or '').strip()
+                if not _outcome:
+                    _outcome = 'success' if result_dict.get('success') else _classify(result_dict)
+                    result_dict['outcome'] = _outcome
+                log_logger.info('[Job %s] 结果分类：%s', job_id, _outcome)
+            except Exception:
+                pass
             result_email = str(result_dict.get("email") or email or "").strip() or None
             result_account_id = result_dict.get("account_id")
             _persist_codex_phone_activation(result_dict, result_email, result_account_id)

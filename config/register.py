@@ -77,3 +77,15 @@ PROTOCOL_MAILBOX_PROBE: bool = True
 # 命中 Cloudflare 边缘挑战时，换出口重试注册
 EDGE_RETRY_ENABLED: bool = True
 EDGE_RETRY_MAX_ATTEMPTS: int = 2
+
+# CF 挑战：给真实浏览器自愈的时间窗（秒）；0 表示不等待、直接抛错
+CF_CLEARANCE_WAIT_SECONDS: int = 45
+# 是否尝试点击 Turnstile 复选框
+CF_CLEARANCE_TRY_CLICK: bool = True
+
+# 注册断点：建号成功但取会话失败时，重试可直接落库
+PROTOCOL_CHECKPOINT_ENABLED: bool = True
+
+# 服务重启后，把被取消的排队作业自动补偿一批（恢复吞吐）
+AUTO_REQUEUE_ON_RESTART: bool = True
+AUTO_REQUEUE_LIMIT: int = 10
