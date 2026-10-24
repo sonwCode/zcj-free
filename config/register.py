@@ -98,6 +98,6 @@ REGISTRATION_AUTO_SUBMIT: bool = True
 
 # warmup 守卫：确保会话拿到 oai-did 再建立登录事务（dango 实测：没拿到必 409）
 # 默认关，观察后再开。
-REGISTRATION_WARMUP_GATE: bool = False
+REGISTRATION_WARMUP_GATE: bool = True
 REGISTRATION_WARMUP_ATTEMPTS: int = 4
 REGISTRATION_WARMUP_TIMEOUT: float = 40.0
