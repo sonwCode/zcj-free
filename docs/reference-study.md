@@ -1440,3 +1440,83 @@ load(filename) / exists() / list_files() / stats()
 ## 33. 其余项目
 
 （后续轮次补齐：GuJumpgate）
+
+## 34. 落地：节点级脉冲调度器（core/registration_pulse.py）
+
+按 aBaiFreeGPT 的形态实现，并把三处为避免歧义而显式化的语义写进代码。
+
+### 34.1 结构
+
+```python
+@dataclass
+class NodeState:
+    proxy: str
+    status: str = 'healthy'         # healthy | paused
+    consecutive_no_email: int = 0
+    paused_at: float = 0.0
+
+class PulseScheduler:
+    def run(self, indices) -> PulseStats: ...
+```
+
+runner 契约：`runner(index, proxy) -> (kind, payload)`
+
+| kind | 含义 | 调度器动作 |
+|---|---|---|
+| `ok` | 注册成功 | 节点 no-email 计数清零 |
+| `no_email` | OTP 没到（出口疑似被封） | **账号重排到队尾**，节点计数 +1，达到阈值暂停节点 |
+| 其他 | 普通失败 | 判失败，不重排 |
+| `timeout` | 波次硬截止时仍未返回 | 账号重排，节点计数 +1 |
+
+### 34.2 四条机制在代码里的位置
+
+- **波次 + 硬超时**：`run_wave()` 用 `ThreadPoolExecutor` + `wait(timeout=deadline)`，
+  超时的 future 一律 `cancel()` 并记 `timeouts`，**不会阻塞下一波**；
+- **账号级重排**：`self.queue.append(idx)`，下一波重新分配到（可能不同的）节点；
+- **节点级封禁**：`consecutive_no_email >= ban_after` → `node.pause(now)`；
+- **探测解封**：全部节点都 paused 时，`_probe_paused()` 按
+  `probe_interval` 对每个暂停节点跑 `runner(-1, proxy)`。
+
+### 34.3 一个真实 bug（自测抓到的）
+
+第一版把探测结果写成：
+
+```python
+if kind in (OK, NO_EMAIL):   # ← 错
+    node.revive()
+```
+
+结果 **探测返回 no-email 反而把节点解封了**——语义正好反了。
+正确逻辑是只有 `ok`（注册成功）或显式的 `otp_received` 才算恢复：
+
+```python
+if kind in (OK, 'otp_received'):
+    node.revive()
+```
+
+这个错误在单测里表现为 `test_probe_revives_node` 失败，
+调试打印才看出节点在第一轮就被"解封"了。
+
+### 34.4 测试
+
+`tests/test_registration_pulse.py` **5 项全部 PASS**：
+
+| 用例 | 验证点 |
+|---|---|
+| all_success_drains_queue | 全成功时队列清空、计数正确 |
+| no_email_requeues_account | no-email 会被重排并在后续波次成功 |
+| node_paused_after_threshold | 连续 no-email 达到阈值即暂停节点 |
+| probe_revives_node | 探测成功才解封（修复后的语义） |
+| timeout_requeues_and_counts | 超时任务重排并计入统计 |
+
+### 34.5 还没做的（下一步）
+
+- **接进生产队列**：目前 `registration_service` 是固定线程池，
+  要把它换成"脉冲 + 全局暂停"，需要先解决 `protocol` 串行闸门与波次的交互；
+- **探测用短超时**：`runner(-1, proxy)` 在真实接入时需要专门的短超时注册路径。
+
+---
+
+## 35. 其余项目
+
+（后续轮次补齐：GuJumpgate）
