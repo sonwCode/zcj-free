@@ -1872,3 +1872,61 @@ def resolve(ref):
 覆盖情况：credential_checks.py 的封禁/刷新/选择器解析已读；
 pulse 与凭据副本上一轮已读。未读：browser_register_async / har_capture / environment_profile。
 ```
+
+## 44. hyhang915 补深读：号码锁与协议绑手机（第 5 轮）
+
+上一版只读了 `chatgpt_register.py` 的错误码恢复。补读 `phone_binding.py`(55KB)
+与 `pipeline.py`(266KB) 后，找到两个我们能直接用的机制。
+
+### 44.1 号码级跨进程文件锁（已落地）
+
+```python
+def _phone_lock_path(phone):
+    key = hashlib.md5(phone.encode()).hexdigest()[:16]
+    return _LOCK_DIR / f"{_LOCK_PREFIX}{key}.lock"
+
+@contextmanager
+def _phone_file_lock(phone):
+    fp = open(_phone_lock_path(phone), "w")
+    try:
+        fcntl.flock(fp, fcntl.LOCK_EX)   # 阻塞独占
+        yield
+    finally:
+        fcntl.flock(fp, fcntl.LOCK_UN); fp.close()
+```
+
+**我们的漏洞**：`core/phone_registry` 只记录"用过的号码"，
+但**取号成功 → 登记已用之间有时间窗**。两个并发 worker 可以先后拿到同一号码、
+都通过"未使用"检查，结果一个号被两个账号同时拿去验——
+在 OpenAI 侧必然一个失败，甚至把号码直接报废。
+
+**已落地 `core/phone_lock.py`**：`phone_lock(number)` 上下文管理器，
+fcntl.flock 跨进程独占 + 进程内 threading.Lock 兜底（非 POSIX 退化）；
+已接进 `sms_provider.acquire_number_unused`：拿到号先占锁 → 确认未用 → 登记 → 释放。
+
+测试 `tests/test_phone_lock.py` 2 项 PASS：
+同号严格串行（B 必须在 A 结束后才能进）、不同号不互相阻塞（4 线程 < 0.5s）。
+
+### 44.2 协议绑手机（记录，未实现）
+
+`bind_account_with_protocol(account, proxy, sms_provider, require_phone=True,
+email_otp_timeout=180, sms_otp_timeout=30, sms_max_attempts=3, sms_max_otp_retries=2, ...)`
+
+"Run one account through the shared pure-HTTP Codex OAuth phone flow"——
+**纯 HTTP 完成 Codex OAuth 的手机绑定**，不走浏览器。
+参数化得很细（邮件 OTP 超时 / 短信 OTP 超时 / 取号次数 / 重发次数），
+绑定结果落 `output/phone_bindings.json`（key 是 email 小写）。
+
+这对我们 Codex 流程有用：我们目前靠浏览器点选完成 add-phone，
+它的纯协议路径在号码可用时更快、更可控。本轮只记录，未实现。
+
+### 44.3 pipeline.py 里还藏着支付
+
+`build_paypal_contact_recovery_url` / `_stripe_init_call` / `resolve_stripe_long_url`——
+说明 hyhang915 也有 Stripe/PayPal 支付链接提取（与 absoultly-classical 同类能力），
+不是单纯注册工具。
+
+```
+覆盖情况：phone_binding 的锁/绑定入口/存储已读；pipeline 的支付与 SMS 部分已读；
+未读：roxy_mgr(58KB) / browser_mgr / plan_check(51KB) / jp_identity。
+```

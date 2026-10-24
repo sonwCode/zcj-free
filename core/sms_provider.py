@@ -3084,8 +3084,19 @@ def acquire_number_unused(
             http=http, service=service, country=country,
             preferred_provider=preferred_provider,
         )
-        if not is_used(phone):
-            return activation_id, phone
+        # 号码级锁：取号到登记之间有窗口，并发下两个流程可能拿到同一个号。
+        # 拿到号就先占锁，确认可用后立刻登记，再释放。
+        from core.phone_lock import phone_lock
+
+        with phone_lock(phone):
+            if not is_used(phone):
+                try:
+                    from core.phone_registry import mark_used as _mark_used
+
+                    _mark_used(phone)
+                except Exception:
+                    pass
+                return activation_id, phone
         logger.warning('[SMS] 分配到已用过的号码，取消并换号（%s/%s）', attempt, tries)
         try:
             cancel_and_report_failure(activation_id, http,
