@@ -1132,6 +1132,87 @@ retryable：True 426 / False 33
 
 ---
 
-## 24. 其余项目
+## 24. ZeroAd-06/MAACodex（MaaFramework 桌面自动化）
 
-（后续轮次补齐：MAACodex、GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+### 24.1 完全不同的技术路线
+
+它用 [MaaFramework](https://github.com/MaaXYZ/MaaFramework) 驱动 **Windows 桌面浏览器**，
+靠**图像识别 + ROI 区域**定位元素，而不是 DOM 选择器。
+规模很小（脚本 12KB + 8KB），主体是 JSON 流程定义与一个 CJS agent。
+
+### 24.2 声明式流程：节点 + 动作 + 超时 + 下一跳
+
+`assets/resource/pipeline/auth_browser.json` 是一个状态机：
+
+```json
+"RegisterNavigateToHome": {
+  "action": { "type": "Custom",
+              "param": { "custom_action": "browser_navigate",
+                         "custom_action_param": { "url": "https://chatgpt.com" } } },
+  "post_delay": 1200,
+  "next": "RegisterFreeSignupButton"
+}
+```
+
+全文件 `"next"` 出现 8 次、各种 `timeout`（4s/15s/25s/30s/40s）十几处。
+
+**可借鉴的点**：把注册流程写成"阶段表"，每一步都有显式的超时与失败去向，
+读起来就是一张流程图；而我们的流程是命令式 Python，阶段边界靠日志字符串表达。
+
+### 24.3 为什么本轮没有直接迁移
+
+- 它是 Windows 桌面 + 图像识别，我们是 Linux 无头 Playwright，定位方式不可移植；
+- 阶段表重构属于架构级改动（要把 `run_protocol_registration` 拆成可枚举节点），
+  风险高、收益是"可读性"，不是当期瓶颈。
+
+记录在此，作为后续重构的参考形态。
+
+---
+
+## 25. 本轮附带的两处实证改进
+
+### 25.1 漏斗口径改为优先用结构化 `error_code`
+
+之前报表用 `result.error` 做文本分类，导致 71 条只显示笼统的 `runtimeerror`。
+改用 payload 里的 `error_code` 优先、文本分类兜底后，同一个作业集立刻分层：
+
+```
+webui_restarted 183 / runtimeerror 71 / codex_failed 38 / sms_no_numbers 8
+twofa_failed 7 / network 6 / otp_timeout 6 / phone_fraud_guard 6
+codex_disabled 5 / twofa_queue_rejected 4 / remailerror 4
+```
+
+再把 `runtimeerror` 的 message 抽样，得到两个真实子因：
+```
+48 条  等待 /api/auth/session accessToken 超时
+23 条  找不到 OTP 输入框，已刷新重试3次
+```
+
+### 25.2 OTP 页缺失时先给 Cloudflare 一次自愈窗口
+
+`找不到 OTP 输入框` 最常见的原因是页面停在 CF 挑战页。原实现只是刷新重试 3 次，
+刷新后如果还是挑战页就放弃。现在在放弃前插入第 8 轮的等待能力：
+
+```python
+_state = _email_otp_page_state(driver)
+if looks_like_challenge(_state):
+    logger.warning('[OTP] 页面停在 Cloudflare 挑战，等待自愈…')
+    wait_for_clearance(driver, _email_otp_page_state, deadline_s=45.0)
+    continue   # 回到循环重新找输入框
+```
+
+已部署（`grep 等待自愈` 命中 1 处、`wait_for_clearance` 4 处），服务 active。
+
+### 25.3 数据库快照：保留 3 天
+
+数据恢复事件后加的 `tools/backup_db.py` 按用户要求改为**按天数保留**：
+默认 `--days 3`（也可 `--keep N` 指定份数），启动时自动快照一份。
+```
+{'ok': True, 'path': 'backups/db-20261024T003320.sqlite3', 'removed': 0, 'count': 3, 'days': 3}
+```
+
+---
+
+## 26. 其余项目
+
+（后续轮次补齐：GPT_zhuceji、klsf、wenfxl、GuJumpgate）
