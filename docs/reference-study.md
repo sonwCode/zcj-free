@@ -2160,3 +2160,56 @@ token 仍有效(无需联网): 31
 ```
 结论：上游 3 个新文件里，1 个移植、1 个部分移植、1 个明确不移植。
 ```
+
+## 49. 2951461586/GPT-Register-Tool 深读：注册 A/B 实验框架（第 21 轮）
+
+24 万行里真正新的东西不是支付（与 absoultly 同源，第 40 节已读），
+而是 `scripts/registration_ab.py`(86KB)——一个**预注册的注册实验框架**。
+
+### 49.1 它把"改注册逻辑"当成实验来做
+
+文件头写得很清楚：`docs/current/protocol-registration.md` 的
+"Validation limits" 要求：**任何落地但未验证的改动，必须先做受控线上对比**。
+脚本本身不发真实流量，只做三件事：`plan`（打印实验设计）/ `collect`（归一化产物）/
+`compare`（按决策规则给结论）。
+
+七组实验（arms）：
+
+| 编号 | 变量 | 开关 |
+|---|---|---|
+| P0-1 | preflight 登录入口：`chatgpt.com/auth/login` vs `auth.openai.com/log-in` | 二选一 |
+| P0-2 | Cloudflare 挑战识别（只观察） | 常开 |
+| P1-3 | 密码页 sentinel bundle 关/开 | `sentinel_password_bundle` |
+| P1-4 | `user/register` 前预热密码页 | — |
+| P1-5 | signup 车道的 `screen_hint` | `signup_continue_screen_hint` |
+| P1-6 | `create_account` 前 GET `/about-you` 预热 | `prime_about_you_page` |
+| P1-7 | `registration_disallowed` 有界退避 | `create_account_disallowed_backoff` |
+
+### 49.2 关键细节（原文摘录）
+
+**P1-6 预热 /about-you 的假设**：
+"GET `/about-you` before POSTing create_account aligns the auth session's page
+state with the Referer the POST already claims" —— 让 Referer 与真实页面状态一致。
+
+**P1-7 退避的具体参数**：
+"Retrying create_account with a bounded backoff (**[8, 20, 45]s**,
+a **fresh Sentinel proof each round**) on `registration_disallowed`"
+—— 理由是服务端 IP/Sentinel 风险窗需要时间消退。
+
+### 49.3 对我们逐条核对（结论：大部分已有，别瞎改）
+
+| 参考实验 | 我们的现状 | 判定 |
+|---|---|---|
+| P1-6 /about-you 预热 | `protocol_registration.py:298,339` 已调 `oa.navigate_about_you(session)` | **已有，无需移植** |
+| P1-7 disallowed 退避 | `protocol_registration.py:330` 已有"刷新 sentinel 后重试，最多 3 次" | **已有**，但间隔不是 [8,20,45] |
+| P1-5 screen_hint | 我们用 `screen_hint: login_or_signup`（`protocol_registration.py:258`） | **不盲改**：参考的两个 arm 是 signup/默认，且注释说 `prompt=login`（不是 screen_hint=signup）效果不同；要改必须先做 A/B |
+| P0-1 preflight 入口 | 无对应概念 | 记录，待验证 |
+
+**方法论才是最大收获**：对注册这种成功率波动大的链路，
+"改一处 + 跑一批 + 按预注册规则比成功率"比"凭感觉调参"可靠得多。
+我们每次改动都没有对照组，这是真实短板。
+
+```
+移植判定：0 个直接移植，3 个已具备，1 个待 A/B。
+但这个项目的"实验设计"思路值得抄（写进下一轮计划）。
+```
