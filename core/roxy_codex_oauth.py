@@ -3128,7 +3128,7 @@ def _do_phone_verification_if_present(driver, activation: dict | None = None) ->
                     )
                 else:
                     preferred_provider = getattr(sms_provider, "provider_for_retry", lambda _attempt: None)(attempt)
-                    activation_id, phone = sms_provider.acquire_number(
+                    activation_id, phone = sms_provider.acquire_number_unused(
                         http, country=configured_country, preferred_provider=preferred_provider
                     )
                 snapshot = {}

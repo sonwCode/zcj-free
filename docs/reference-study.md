@@ -1308,60 +1308,117 @@ if (continueURL === `${AUTH_BASE_URL}/add-phone`) {
 统计 `codex_failed` 的 error_message：
 
 ```
+
+```
 12 条  手机号验证重试 10 次仍失败（provider=smsbower）
  6 条  同上（provider=tiger）
  5 条  Roxy 手机验证重试 10 次仍失败：whatsapp_channel_reverted: Phone number required
  2 条  send_not_accepted：单次提交后仍停留在 add-phone
  2 条  随机尝试/刷新 12 个价格范围内国家后仍无可用号码
- 3 条  codex_email_submit_stalled：authorize 恢复后仍未进入密码/OTP 步骤
+ 3 条  codex_email_submit_stalled
 ```
 
-**27 条属于手机验证/号码耗尽**——这是外部依赖（号码质量与风控），不是代码 bug。
-
+**27 条属于手机验证/号码耗尽**——外部依赖（号码质量与风控），不是代码 bug。
 而我们每条要重试 10 次、最多遍历 12 个国家才放弃。
 
-### 28.3 已落地两项
+### 28.3 已落地两项（第 26 轮）
 
-**(a) 新增 `phone_required` 失败类**（`core/failure_registry.py`）
+**(a) 新增 `phone_required` 失败类**，`retain_for_future_batch=True`（过段时间可能不需要绑定）。
 
-```python
-FailureClass('phone_required',
-    ('手机号验证重试', '手机验证重试', 'phone number required', 'add-phone',
-     'phone_verification_required', 'whatsapp_channel_reverted',
-     '没有新的价格范围内国家', '无可用号码', 'phone_numbers_exhausted'),
-    retain_for_future_batch=True,   # 过段时间可能又不需要绑定，保留到下一批
-)
-```
-
-验证：
-
-```
-手机号验证重试 10 次仍失败        -> phone_required（保留下批）
-当前账号触发 add-phone 绑手机流程  -> phone_required
-刷新库存后没有新的价格范围内国家    -> phone_required
-phone_numbers_exhausted          -> phone_required
-```
-
-**(b) 号码耗尽自适应早停**（`core/browser_use_codex_oauth.py`）
-
-原来固定重试 `SMS_MAX_RETRIES=10`。现在统计"取号类失败"连续次数，
-连续 3 次即抛 `phone_numbers_exhausted` 停止：
-
-```python
-_no_number = any(k in _low for k in ("no numbers", "没有新的价格", "无可用号码", "inventory"))
-no_number_streak = no_number_streak + 1 if _no_number else 0
-if no_number_streak >= 3:
-    raise RuntimeError(f"phone_numbers_exhausted: 连续 {no_number_streak} 次取号失败…")
-```
+**(b) 号码耗尽自适应早停**：连续 3 次取号类失败即抛 `phone_numbers_exhausted`，
+不再固定重试 `SMS_MAX_RETRIES=10`。
 
 ### 28.4 收益
 
-- 号码池空时**从 10 次 × 12 国 降到 3 次**，单条失败节省数分钟；
-- 漏斗里 `phone_required` 与代码类失败彻底分开，一眼看出"是不是接码平台的问题"；
-- 保留到下一批而不是掉号——号码恢复后还能再试。
+- 号码池空时从 10 次 × 12 国 降到 3 次，单条失败省数分钟；
+- 漏斗里"接码平台问题"与"代码问题"彻底分开。
 
 ---
 
-## 29. 其余项目
+## 29. wenfxl/openai-cpa（分支陷阱与 add-phone 官方口径）
 
-（后续轮次补齐：wenfxl、GuJumpgate）
+### 29.1 克隆踩的坑
+
+`git clone` 默认分支 `master` **只有 LICENSE**（单次提交 "Update LICENSE"）。
+但仓库 API 显示 size 94MB、★1404、标签到 `v18.2.0`：
+
+```
+branches: main, master
+tags: v18.2.0 … v18.1.0
+```
+
+真代码在 **`main`** 分支。重新 `git clone --branch main` 后拿到 129 个文件：
+`utils/core_engine.py` 126KB、`utils/auth_pipeline/register.py` 110KB、
+`turnstile-solver/api_solver.py` 77KB（与 sky3100 同源）、
+`utils/integrations/{hero,fivesim,smsbower}_sms.py`。
+
+**教训**：判空不能只看默认分支，要看 `branches` 与 `tags`。
+
+### 29.2 它启动横幅里的三条官方口径（关键）
+
+```
+根据官网披露消息：add-phone 主要面向美国、荷兰、法国、西班牙、英国、…
+根据官网披露消息：创建账号时验证手机号，**一个号码只能验证一个账号**
+根据官网披露消息：在某些国家，您可以使用 WhatsApp 完成手机验证，而无需…
+```
+
+第二条直接解释了第 26 轮的发现：接码平台会反复分配**已被用过**的号码，
+而这类号码在 OpenAI 侧必然被拒——所以重试 10 次也全失败。
+
+### 29.3 接码抽象
+
+三个 provider 集成（hero / fivesim / smsbower）+ 国家重试测试，
+与我们 `sms_provider` 的多 provider 链同构。
+
+---
+
+## 30. 本轮落地：已用号码登记表
+
+新增 `core/phone_registry.py`：
+
+```python
+normalize(number)          # → 纯数字（保留国家码）
+is_used(number)            # 是否用过
+mark_used(number, email)   # 幂等登记
+filter_unused(numbers)     # 剔除用过的
+stats()                    # 统计
+```
+
+状态落盘 `data/used_phone_numbers.json`，跨进程共享。
+
+### 30.1 接入取号链路
+
+`core/sms_provider.acquire_number_unused(max_tries=3)`：
+取号 → 命中已用记录则 `cancel_and_report_failure` 取消换号 →
+连续 3 次撞旧号则抛 `phone_numbers_exhausted`。
+
+三处调用点全部切换：
+
+```
+core/browser_use_codex_oauth.py
+core/codex_oauth.py
+core/roxy_codex_oauth.py
+```
+
+### 30.2 验证
+
+```
+py_compile: OK（5 个文件）
+acquire_number_unused 可用: True
+号码登记表: {'used': 0, 'path': 'data/used_phone_numbers.json'}
+服务: active
+```
+
+测试 `tests/test_phone_registry.py` **5 项全部 PASS**。
+
+### 30.3 为什么值钱
+
+- 旧号码在 OpenAI 侧注定失败——现在第一次就换掉；
+- 与自适应早停配合：撞旧号 3 次即停，不再 10 次 × 12 国；
+- 登记表可统计"号码复用率"，作为换平台的依据。
+
+---
+
+## 31. 其余项目
+
+（后续轮次补齐：GuJumpgate）

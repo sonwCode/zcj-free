@@ -3061,6 +3061,40 @@ def _acquire_number_for_provider(
     raise SmsNumberRejectedError(f"连续 {attempts} 次取到的号码或供应商层级均被策略排除")
 
 
+def acquire_number_unused(
+    http: CurlSession | None = None,
+    service: str | None = None,
+    country: str | None = None,
+    preferred_provider: str | None = None,
+    max_tries: int = 3,
+) -> tuple[str, str]:
+    """取一个"没用过"的号码（OpenAI 一个号码只能验一个账号）。
+
+    平台会重复分配旧号码，这类号码在 OpenAI 侧必然被拒。
+    命中已用记录时立刻取消并换号，而不是把配额和次数浪费在上面。
+    """
+    try:
+        from core.phone_registry import is_used
+    except Exception:
+        return acquire_number(http=http, service=service, country=country,
+                             preferred_provider=preferred_provider)
+    tries = max(1, int(max_tries or 1))
+    for attempt in range(1, tries + 1):
+        activation_id, phone = acquire_number(
+            http=http, service=service, country=country,
+            preferred_provider=preferred_provider,
+        )
+        if not is_used(phone):
+            return activation_id, phone
+        logger.warning('[SMS] 分配到已用过的号码，取消并换号（%s/%s）', attempt, tries)
+        try:
+            cancel_and_report_failure(activation_id, http,
+                                      RuntimeError('number_already_used'))
+        except Exception:
+            pass
+    raise RuntimeError('phone_numbers_exhausted: 连续 %s 次分配到已用号码' % tries)
+
+
 def acquire_number(
     http: CurlSession | None = None,
     service: str | None = None,
