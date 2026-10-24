@@ -535,11 +535,12 @@ createApp({
     }
 
     async function cleanupDead() {
-      // 先预检（dry_run=true）：只统计不删除，把名单摆出来
+      // 先预检（dry_run=true）：只统计不删除，把名单摆出来。
+      // 用户要求：**不做二次探测**，直接用已探测出的结论（verify=false）。
       busy.value = 'cleanup';
       let preview;
       try {
-        preview = await post('/api/accounts/cleanup-dead', {dry_run: true, mode: 'delete', verify: true});
+        preview = await post('/api/accounts/cleanup-dead', {dry_run: true, mode: 'delete', verify: false});
       } catch (e) {
         busy.value = '';
         ElMessage.error('预检失败：' + e.message);
@@ -551,13 +552,13 @@ createApp({
       const names = (preview.sample || []).map(x => (typeof x === 'string' ? x : (x.email || x))).slice(0, 8).join('\n');
       try {
         await ElMessageBox.confirm(
-          '预检发现 ' + count + ' 个已废账号（已重新探活确认）：\n' + names +
+          '将删除 ' + count + ' 个已判定为已废的账号（基于已探测结论，不再探活）：\n' + names +
           (count > 8 ? '\n…' : '') + '\n\n删除不可恢复，确认继续？',
           '危险操作确认', {type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消'});
       } catch (e) { return; }
       busy.value = 'cleanup';
       try {
-        const d = await post('/api/accounts/cleanup-dead', {dry_run: false, mode: 'delete', verify: true});
+        const d = await post('/api/accounts/cleanup-dead', {dry_run: false, mode: 'delete', verify: false});
         ElMessage.success('已删除 ' + (d.deleted_count ?? 0) + ' 个已废账号');
         await load(); await loadFunnel();
       } catch (e) { ElMessage.error('清理失败：' + e.message); }

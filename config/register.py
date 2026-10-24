@@ -101,3 +101,7 @@ REGISTRATION_AUTO_SUBMIT: bool = True
 REGISTRATION_WARMUP_GATE: bool = True
 REGISTRATION_WARMUP_ATTEMPTS: int = 4
 REGISTRATION_WARMUP_TIMEOUT: float = 40.0
+
+# 查活是否只探"本地 JWT 已过期"的账号（上游做法，可省大量请求）。
+# 默认 False：我们的主要失效是"未过期但被吊销"，开了会漏掉这类号。
+INSPECT_ONLY_EXPIRED: bool = False

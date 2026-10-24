@@ -192,12 +192,29 @@ def _probe_me(token: str, proxy: str | None, timeout: float = 20.0,
 
 def inspect_network(*, account_ids: list[int] | None = None, workers: int = 4,
                     timeout: float = 20.0, update_db: bool = True,
-                    include_archived: bool = False) -> dict:
-    """一次 /me 探活（不走 OAuth，不起浏览器），并可选把结论写回库。"""
+                    include_archived: bool = False,
+                    only_expired: bool | None = None) -> dict:
+    """一次 /me 探活（不走 OAuth，不起浏览器），并可选把结论写回库。
+
+    only_expired: 只探"本地 JWT 已过期"的账号（上游 myfanhua 的做法），
+    省掉大量无谓请求。默认读 config：INSPECT_ONLY_EXPIRED（默认 False）。
+    **注意**：我们的主要失效模式是"未过期但被服务端吊销"，
+    开这个开关会漏掉这类账号，所以默认关闭。
+    """
     from concurrent.futures import ThreadPoolExecutor
 
     from config.proxy import PROXY_POOL, pick_proxy_excluding
     from core import db
+
+    if only_expired is None:
+        try:
+            from config import register as _rg
+
+            only_expired = bool(getattr(_rg, 'INSPECT_ONLY_EXPIRED', False))
+        except Exception:
+            only_expired = False
+    _only_expired = bool(only_expired)
+    skipped_unexpired = 0
 
     rows = db.list_accounts(limit=100000) or []
     wanted = {int(x) for x in (account_ids or []) if str(x).strip()}
@@ -211,6 +228,12 @@ def inspect_network(*, account_ids: list[int] | None = None, workers: int = 4,
         token = str(acc.get('access_token') or '')
         if not token:
             continue
+        if _only_expired:
+            from core.token_expiry import token_needs_refresh
+
+            if not token_needs_refresh(token):
+                skipped_unexpired += 1
+                continue
         targets.append((acc_id, str(acc.get('email') or ''), token))
 
     results: dict[str, list] = {'alive': [], 'revoked': [], 'unknown': []}
