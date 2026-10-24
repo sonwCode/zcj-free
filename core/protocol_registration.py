@@ -227,6 +227,29 @@ def run_protocol_registration(
         # 少这一步，后面的 authorize/continue 会返回 409 invalid_state。
         from core import chatgpt_auth
 
+        # 可选 warmup 守卫（默认关）：确保真拿到 oai-did 再建立登录事务。
+        # dango 实测：没拿到 oai-did 就继续，authorize/continue 必然 409（5/5）；
+        # 而原实现"只看有没有抛异常"会把 CF 403 误判成成功。开关见 config/register.py。
+        try:
+            from config import register as _rg
+
+            if bool(getattr(_rg, "REGISTRATION_WARMUP_GATE", False)):
+                from core.auth_warmup_gate import ensure_oai_did
+
+                ensure_oai_did(
+                    session,
+                    attempts=int(getattr(_rg, "REGISTRATION_WARMUP_ATTEMPTS", 4) or 4),
+                    timeout=float(getattr(_rg, "REGISTRATION_WARMUP_TIMEOUT", 40.0) or 40.0),
+                )
+                _log_phase("warmup 守卫", True, "oai-did 已就绪")
+        except Exception as _warm_exc:
+            from core.auth_warmup_gate import WarmupFailed
+
+            if isinstance(_warm_exc, WarmupFailed):
+                # 拦在花邮箱之前：没 oai-did 的轮次注定 409
+                raise
+            _log_phase("warmup 守卫", False, "%s: %s" % (type(_warm_exc).__name__, str(_warm_exc)[:120]))
+
         session.get(
             "https://chatgpt.com/auth/login",
             headers=session.get_chatgpt_headers(referer="https://chatgpt.com/"),

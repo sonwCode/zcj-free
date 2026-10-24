@@ -95,3 +95,9 @@ REGISTRATION_REQUIRE_PASSWORD: bool = True
 
 # 注册总开关：关闭后重启补偿等自动提交全部停止（只影响自动，不影响手动提交）
 REGISTRATION_AUTO_SUBMIT: bool = True
+
+# warmup 守卫：确保会话拿到 oai-did 再建立登录事务（dango 实测：没拿到必 409）
+# 默认关，观察后再开。
+REGISTRATION_WARMUP_GATE: bool = False
+REGISTRATION_WARMUP_ATTEMPTS: int = 4
+REGISTRATION_WARMUP_TIMEOUT: float = 40.0
