@@ -374,133 +374,303 @@ const { ElMessage, ElMessageBox } = ElementPlus;
 
 async function api(path, options) {
   const res = await fetch(path, Object.assign({ credentials: 'include' }, options || {}));
-  if (!res.ok) { let d=''; try { d = (await res.text()).slice(0,140); } catch(e){} throw new Error('HTTP '+res.status+' '+d); }
+  if (!res.ok) { let d = ''; try { d = (await res.text()).slice(0, 140); } catch (e) {} throw new Error('HTTP ' + res.status + ' ' + d); }
   const ct = res.headers.get('content-type') || '';
   return ct.includes('json') ? res.json() : res.text();
 }
-const post = (p, body) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+const post = (p, body) => api(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 
 createApp({
   setup() {
     const menus = [
-      {key:'register', label:'注册'},
-      {key:'pool', label:'邮箱池'},
-      {key:'accounts', label:'账号管理'},
-      {key:'sms', label:'号码池'},
-      {key:'codex', label:'Codex 凭证'},
-      {key:'logs', label:'任务与日志'},
-      {key:'settings', label:'设置'},
+      { key: 'register', label: '注册' },
+      { key: 'pool', label: '邮箱池' },
+      { key: 'accounts', label: '账号管理' },
+      { key: 'sms', label: '号码池' },
+      { key: 'codex', label: 'Codex 凭证' },
+      { key: 'logs', label: '任务与日志' },
+      { key: 'settings', label: '设置' },
     ];
     const tab = ref('accounts');
     const title = computed(() => (menus.find(m => m.key === tab.value) || {}).label || '');
+    const busy = ref('');
 
-    const rows = ref([]); const total = ref(0); const page = ref(1); const pageSize = ref(20);
-    const loading = ref(false); const busy = ref('');
-    const query = ref(''); const archived = ref('0'); const sel = ref([]); const funnel = ref(null);
-
-    async function loadFunnel() {
-      try { funnel.value = await api('/api/funnel?limit=500'); } catch (e) { funnel.value = null; }
-    }
+    /* ---------- 账号 ---------- */
+    const rows = ref([]), total = ref(0), page = ref(1), pageSize = ref(20);
+    const loading = ref(false), query = ref(''), archived = ref('0'), sel = ref([]), funnel = ref(null);
     async function load() {
       loading.value = true;
       try {
-        const qs = new URLSearchParams({paged:'1', page:String(page.value), page_size:String(pageSize.value),
-          archived:archived.value, q:query.value});
-        const data = await api('/api/accounts?' + qs.toString());
-        rows.value = data.items || [];
-        total.value = Number(data.total || rows.value.length || 0);
+        const qs = new URLSearchParams({ paged: '1', page: String(page.value), page_size: String(pageSize.value), archived: archived.value, q: query.value });
+        const d = await api('/api/accounts?' + qs.toString());
+        rows.value = d.items || [];
+        total.value = Number(d.total || rows.value.length || 0);
       } catch (e) { ElMessage.error('加载失败：' + e.message); }
       finally { loading.value = false; }
+    }
+    async function loadFunnel() {
+      try { funnel.value = await api('/api/funnel?limit=500'); } catch (e) { funnel.value = null; }
     }
     function reload() { page.value = 1; load(); }
     function onPage(p) { page.value = p; load(); }
     function onSize(s) { pageSize.value = s; page.value = 1; load(); }
-    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } else if (k === 'logs') { loadJobs(); } else if (k === 'settings') { loadSettings(); } else if (k === 'register') { loadSources(); loadCounts(); } else if (k === 'pool') { loadPool(); } }
-
     const ids = () => sel.value.map(r => Number(r.id));
-
     async function bulk(kind) {
       const list = ids();
       if (!list.length) return;
-      busy.value = kind === 'live' ? 'live' : kind === 'totp' ? 'totp' : kind === 'cpa' ? 'cpa' : kind === 'del' ? 'del' : '';
+      busy.value = kind;
       try {
-        if (kind === 'live') {
-          const r = await post('/api/accounts/check-live-bulk', {account_ids:list, workers:4});
-          ElMessage.success('已提交查活：' + (r.started_count ?? list.length));
-        } else if (kind === 'totp') {
-          const r = await post('/api/accounts/totp-setup-bulk', {account_ids:list});
-          ElMessage.success('已提交 2FA：' + (r.started_count ?? list.length));
-        } else if (kind === 'cpa') {
-          const r = await post('/api/accounts/download-cpa-bulk', {account_ids:list, prepare:true});
-          ElMessage.success('已准备导出：' + (r.count ?? r.prepared_count ?? list.length));
-        } else if (kind === 'plan') {
-          const r = await post('/api/accounts/check-plan-bulk', {account_ids:list, workers:4});
-          ElMessage.success('已提交查套餐：' + (r.started_count ?? list.length));
-        } else if (kind === 'link') {
-          const r = await post('/api/accounts/extract-link-bulk', {account_ids:list});
-          ElMessage.success('已提交提取链接：' + (r.started_count ?? list.length));
-        } else if (kind === 'secret') {
-          const r = await post('/api/accounts/secret-bulk', {account_ids:list});
-          ElMessage.success('已提交取密钥：' + (r.started_count ?? list.length));
-        } else if (kind === 'archive') {
-          const r = await post('/api/accounts/archive-bulk', {account_ids:list, archived: archived.value !== 'only'});
-          ElMessage.success('归档处理完成：' + (r.archived ?? list.length));
-        } else if (kind === 'del') {
-          await ElMessageBox.confirm('删除 ' + list.length + ' 个账号？不可恢复。', '确认删除', {type:'warning'});
-          const r = await post('/api/accounts/delete-bulk', {account_ids:list});
+        if (kind === 'live') { const r = await post('/api/accounts/check-live-bulk', { account_ids: list, workers: 4 }); ElMessage.success('已提交查活：' + (r.started_count ?? list.length)); }
+        else if (kind === 'totp') { const r = await post('/api/accounts/totp-setup-bulk', { account_ids: list }); ElMessage.success('已提交 2FA：' + (r.started_count ?? list.length)); }
+        else if (kind === 'cpa') { const r = await post('/api/accounts/download-cpa-bulk', { account_ids: list, prepare: true }); ElMessage.success('已准备导出：' + (r.count ?? r.prepared_count ?? list.length)); }
+        else if (kind === 'plan') { const r = await post('/api/accounts/check-plan-bulk', { account_ids: list, workers: 4 }); ElMessage.success('已提交查套餐：' + (r.started_count ?? list.length)); }
+        else if (kind === 'link') { const r = await post('/api/accounts/extract-link-bulk', { account_ids: list }); ElMessage.success('已提交提取链接：' + (r.started_count ?? list.length)); }
+        else if (kind === 'secret') { const r = await post('/api/accounts/secret-bulk', { account_ids: list }); ElMessage.success('已提交取密钥：' + (r.started_count ?? list.length)); }
+        else if (kind === 'archive') { const r = await post('/api/accounts/archive-bulk', { account_ids: list, archived: archived.value !== 'only' }); ElMessage.success('归档处理完成：' + (r.archived ?? list.length)); }
+        else if (kind === 'del') {
+          await ElMessageBox.confirm('删除 ' + list.length + ' 个账号？不可恢复。', '确认删除', { type: 'warning' });
+          const r = await post('/api/accounts/delete-bulk', { account_ids: list });
           ElMessage.success('已删除：' + (r.deleted_count ?? list.length));
         }
         await load(); await loadFunnel();
-      } catch (e) {
-        if (e !== 'cancel') ElMessage.error('操作失败：' + (e.message || e));
-      } finally { busy.value = ''; }
+      } catch (e) { if (e !== 'cancel') ElMessage.error('操作失败：' + (e.message || e)); }
+      finally { busy.value = ''; }
     }
-
+    async function bulkNote() {
+      const list = ids();
+      if (!list.length) return;
+      try {
+        const { value } = await ElMessageBox.prompt('输入要写入的备注（空=清空）', '批量备注', { inputValue: '' });
+        await post('/api/accounts/note-bulk', { account_ids: list, note: value || '' });
+        ElMessage.success('备注已更新');
+        await load();
+      } catch (e) { if (e !== 'cancel') ElMessage.error('备注失败：' + (e.message || e)); }
+    }
     async function backfillCodex() {
       busy.value = 'codex';
       try {
-        const r = await post('/api/codex/backfill', {limit: Math.min(ids().length || 10, 50)});
+        const r = await post('/api/codex/backfill', { limit: Math.min(ids().length || 10, 50) });
         ElMessage.success('Codex 补跑已入队：' + ((r.queued || []).length));
         await loadFunnel();
       } catch (e) { ElMessage.error('补跑失败：' + e.message); }
       finally { busy.value = ''; }
     }
+    const tagType = (kind, s) => kind === 'codex'
+      ? ({ success: 'success', failed: 'danger', pending: 'warning', blocked: 'warning' }[s] || 'info')
+      : ({ live: 'success', deactivated: 'danger', failed: 'danger' }[s] || 'info');
+    const fmt = (v) => String(v || '').replace('T', ' ').slice(0, 19) || '-';
 
-    const tagType = (kind, s) => {
-      if (kind === 'codex') return ({success:'success', failed:'danger', pending:'warning', blocked:'warning'}[s] || 'info');
-      return ({live:'success', deactivated:'danger', failed:'danger'}[s] || 'info');
-    };
-    const fmt = (v) => String(v || '').replace('T',' ').slice(0,19) || '-';
-
+    /* ---------- 注册开关 ---------- */
     const regRunning = ref(true);
     async function loadSwitch() {
-      try {
-        const s = await api('/api/registration/switch');
-        regRunning.value = !(s && s.paused);
-      } catch (e) { /* 忽略 */ }
+      try { const s = await api('/api/registration/switch'); regRunning.value = !(s && s.paused); } catch (e) {}
     }
     async function toggleRegistration(val) {
       try {
-        await post('/api/registration/switch', {paused: !val, reason: 'ui'});
+        await post('/api/registration/switch', { paused: !val, reason: 'ui' });
         ElMessage.success(val ? '注册已恢复' : '注册已暂停');
-      } catch (e) {
-        ElMessage.error('切换失败：' + e.message);
-        regRunning.value = !val;
-      }
+      } catch (e) { ElMessage.error('切换失败：' + e.message); regRunning.value = !val; }
+    }
+
+    /* ---------- 注册页 ---------- */
+    const regCount = ref(1), regWorkers = ref(4), regSource = ref('auto'), regDriver = ref('');
+    const sourceOptions = ref([{ value: 'auto', label: '自动（按配置顺序）' }]);
+    const driverOptions = ['protocol', 'cloak', 'roxy', 'browser_use', 'skyvern'];
+    const jobCounts = ref({});
+    async function loadSources() {
+      try { const d = await api('/api/registration/email-sources'); if (d.options) sourceOptions.value = d.options; } catch (e) {}
+    }
+    async function loadCounts() {
+      try { const d = await api('/api/jobs?limit=1&paged=1'); jobCounts.value = d.status_counts || {}; } catch (e) {}
+    }
+    async function startRegistration() {
+      busy.value = 'reg';
+      try {
+        const body = { count: regCount.value, workers: regWorkers.value, email_source: regSource.value };
+        if (regDriver.value) body.driver = regDriver.value;
+        const d = await post('/api/jobs', body);
+        if (d.ok === false) throw new Error(d.error || '提交失败');
+        ElMessage.success('已提交任务');
+        await loadCounts();
+      } catch (e) { ElMessage.error('提交失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+
+    /* ---------- 邮箱池 ---------- */
+    const poolSources = [
+      { value: 'outlook', label: 'Outlook' },
+      { value: 'generic_api', label: '通用 API' },
+      { value: 'imap', label: '通用 IMAP' },
+      { value: 'cloudflare_domain', label: '域名邮箱' },
+    ];
+    const poolSource = ref('outlook'), poolRows = ref([]), poolTotal = ref(0);
+    const poolPage = ref(1), poolQuery = ref(''), poolSel = ref([]);
+    const importOpen = ref(false), importText = ref(''), importSource = ref('outlook'), imapServer = ref('');
+    async function loadPool() {
+      busy.value = 'pool';
+      try {
+        const qs = new URLSearchParams({ paged: '1', page: String(poolPage.value), page_size: '50', source: poolSource.value, q: poolQuery.value });
+        const d = await api('/api/outlook?' + qs.toString());
+        poolRows.value = d.items || d.emails || [];
+        poolTotal.value = Number(d.total || poolRows.value.length || 0);
+      } catch (e) { ElMessage.error('邮箱池加载失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+    function reloadPool() { poolPage.value = 1; loadPool(); }
+    function onPoolPage(p) { poolPage.value = p; loadPool(); }
+    async function deletePool() {
+      const list = poolSel.value.map(r => r.email);
+      if (!list.length) return;
+      try {
+        await ElMessageBox.confirm('删除 ' + list.length + ' 个邮箱？', '确认', { type: 'warning' });
+        await post('/api/outlook/delete-bulk', { emails: list, source: poolSource.value });
+        ElMessage.success('已删除');
+        await loadPool();
+      } catch (e) { if (e !== 'cancel') ElMessage.error('删除失败：' + (e.message || e)); }
+    }
+    async function doImport() {
+      busy.value = 'imp';
+      try {
+        const body = { source: importSource.value, text: importText.value };
+        if (importSource.value === 'imap' && imapServer.value) body.imap_server = imapServer.value;
+        const d = await post('/api/outlook/import', body);
+        if (d.ok === false) throw new Error(d.error || '导入失败');
+        ElMessage.success('已导入 ' + (d.imported ?? d.count ?? 0) + ' 条');
+        importOpen.value = false; importText.value = '';
+        await loadPool();
+      } catch (e) { ElMessage.error('导入失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+
+    /* ---------- 号码池 ---------- */
+    const sms = ref({}), smsEligible = ref([]), smsReservations = ref([]);
+    async function loadSms() {
+      busy.value = 'sms';
+      try {
+        const st = await api('/api/sms-pool/status');
+        sms.value = st || {};
+        try { const e = await api('/api/sms-pool/eligible'); smsEligible.value = (e.items || e.accounts || e || []).slice(0, 50); } catch (e2) { smsEligible.value = []; }
+        try { const r = await api('/api/sms-pool/reservations'); smsReservations.value = (r.items || r.reservations || r || []).slice(0, 50); } catch (e3) { smsReservations.value = []; }
+      } catch (e) { ElMessage.error('号码池加载失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+    async function smsToggle() {
+      try { await post('/api/sms-pool/toggle', { paused: !sms.value.paused }); await loadSms(); }
+      catch (e) { ElMessage.error('操作失败：' + e.message); }
+    }
+
+    /* ---------- Codex ---------- */
+    const cxRows = ref([]), cxTotal = ref(0), cxPage = ref(1), cxPageSize = ref(50), cxQuery = ref('');
+    async function loadCodex() {
+      busy.value = 'codex';
+      try {
+        const qs = new URLSearchParams({ paged: '1', page: String(cxPage.value), page_size: String(cxPageSize.value), q: cxQuery.value });
+        const d = await api('/api/codex?' + qs.toString());
+        cxRows.value = d.items || [];
+        cxTotal.value = Number(d.total || cxRows.value.length || 0);
+      } catch (e) { ElMessage.error('Codex 加载失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+    function onCodexPage(p) { cxPage.value = p; loadCodex(); }
+    async function deleteCodex(row) {
+      try {
+        await ElMessageBox.confirm('删除凭证 ' + row.filename + '？', '确认', { type: 'warning' });
+        await post('/api/codex/delete', { filename: row.filename });
+        ElMessage.success('已删除');
+        await loadCodex();
+      } catch (e) { if (e !== 'cancel') ElMessage.error('删除失败：' + (e.message || e)); }
+    }
+    const manualOauthOpen = ref(false), oauthEmail = ref(''), oauthUrl = ref('');
+    const oauthCallback = ref(''), oauthBusy = ref(false), oauthStep = ref(0), oauthSid = ref('');
+    function openManualOauth() {
+      manualOauthOpen.value = true; oauthUrl.value = ''; oauthCallback.value = '';
+      oauthStep.value = 0; oauthSid.value = '';
+    }
+    async function startOauth() {
+      oauthBusy.value = true;
+      try {
+        const d = await post('/api/codex/oauth/start', { email: oauthEmail.value });
+        if (!d.ok) throw new Error(d.error || '生成失败');
+        oauthUrl.value = d.authorize_url; oauthSid.value = d.session_id; oauthStep.value = 1;
+        ElMessage.success('已生成，链接 10 分钟内有效');
+      } catch (e) { ElMessage.error('生成失败：' + e.message); }
+      finally { oauthBusy.value = false; }
+    }
+    async function finishOauth() {
+      oauthBusy.value = true;
+      try {
+        const d = await post('/api/codex/oauth/finish', { session_id: oauthSid.value, callback: oauthCallback.value });
+        if (!d.ok) throw new Error(d.error || '兑换失败');
+        oauthStep.value = 3;
+        ElMessage.success('授权成功：' + (d.email || '已入库'));
+        manualOauthOpen.value = false;
+        await loadCodex();
+      } catch (e) { ElMessage.error('兑换失败：' + e.message); }
+      finally { oauthBusy.value = false; }
+    }
+
+    /* ---------- 任务与日志 ---------- */
+    const jobRows = ref([]), logOpen = ref(false), logText = ref(''), logJobId = ref(0);
+    const jobTag = (s) => ({ success: 'success', failed: 'danger', cancelled: 'info', stopped: 'warning', running: '', pending: 'info', partial_success: 'warning' }[s] || 'info');
+    async function loadJobs() {
+      busy.value = 'jobs';
+      try {
+        const d = await api('/api/jobs?limit=100');
+        jobRows.value = (d.items || d.jobs || d || []).slice(0, 100);
+        if (d.status_counts) jobCounts.value = d.status_counts;
+      } catch (e) { ElMessage.error('任务加载失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+    async function openLog(row) {
+      logJobId.value = row.id; logText.value = '加载中…'; logOpen.value = true;
+      try { const d = await api('/api/jobs/' + row.id + '/log'); logText.value = d.log || '（暂无日志）'; }
+      catch (e) { logText.value = '加载失败：' + e.message; }
+    }
+    async function stopJob(row) {
+      try { await post('/api/jobs/' + row.id + '/stop', {}); ElMessage.success('已请求停止'); await loadJobs(); }
+      catch (e) { ElMessage.error('停止失败：' + e.message); }
+    }
+    async function retryJob(row) {
+      try { await post('/api/jobs/' + row.id + '/retry', {}); ElMessage.success('已重试'); await loadJobs(); }
+      catch (e) { ElMessage.error('重试失败：' + e.message); }
+    }
+
+    /* ---------- 设置 ---------- */
+    const cfg = ref({}), creds = ref({}), backups = ref({});
+    async function loadSettings() {
+      try {
+        const d = await api('/api/settings/overview');
+        cfg.value = d.config || {}; creds.value = d.credentials || {}; backups.value = d.backups || {};
+        if (d.switch) regRunning.value = !d.switch.paused;
+      } catch (e) { ElMessage.error('设置加载失败：' + e.message); }
+    }
+
+    function switchTab(k) {
+      tab.value = k;
+      if (k === 'accounts') { load(); loadFunnel(); }
+      else if (k === 'register') { loadSources(); loadCounts(); }
+      else if (k === 'pool') { loadPool(); }
+      else if (k === 'sms') { loadSms(); }
+      else if (k === 'codex') { loadCodex(); }
+      else if (k === 'logs') { loadJobs(); }
+      else if (k === 'settings') { loadSettings(); }
     }
 
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
-    return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel, bulkNote,
-             poolSources, poolSource, poolRows, poolTotal, poolPage, poolQuery, poolSel, loadPool, reloadPool, onPoolPage, deletePool,
-             importOpen, importText, importSource, imapServer, doImport,
-             regCount, regWorkers, regSource, regDriver, sourceOptions, driverOptions, jobCounts, startRegistration,
-             manualOauthOpen, oauthEmail, oauthUrl, oauthCallback, oauthBusy, oauthStep, openManualOauth, startOauth, finishOauth,
-             cfg, creds, backups, loadSettings,
-             jobRows, logOpen, logText, logJobId, loadJobs, openLog, stopJob, retryJob, jobTag,
-             cxRows, cxTotal, cxPage, cxPageSize, cxQuery, loadCodex, onCodexPage, deleteCodex,
-             regRunning, toggleRegistration,
-             sms, smsEligible, smsReservations, loadSms, smsToggle,
-             load, reload, onPage, onSize, switchTab, bulk, backfillCodex, tagType, fmt };
+
+    return {
+      menus, tab, title, busy, rows, total, page, pageSize, loading, query, archived, sel, funnel,
+      load, reload, onPage, onSize, switchTab, bulk, bulkNote, backfillCodex, tagType, fmt,
+      regRunning, toggleRegistration, regCount, regWorkers, regSource, regDriver,
+      sourceOptions, driverOptions, jobCounts, loadSources, loadCounts, startRegistration,
+      poolSources, poolSource, poolRows, poolTotal, poolPage, poolQuery, poolSel,
+      loadPool, reloadPool, onPoolPage, deletePool, importOpen, importText, importSource, imapServer, doImport,
+      sms, smsEligible, smsReservations, loadSms, smsToggle,
+      cxRows, cxTotal, cxPage, cxPageSize, cxQuery, loadCodex, onCodexPage, deleteCodex,
+      manualOauthOpen, oauthEmail, oauthUrl, oauthCallback, oauthBusy, oauthStep, openManualOauth, startOauth, finishOauth,
+      jobRows, logOpen, logText, logJobId, loadJobs, openLog, stopJob, retryJob, jobTag,
+      cfg, creds, backups, loadSettings,
+    };
   }
 }).use(ElementPlus).mount('#app');
 </script>
