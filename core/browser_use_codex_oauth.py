@@ -1452,6 +1452,8 @@ def _do_phone_verification_if_present(page) -> dict | None:
     # 与其他Codex驱动保持一致：显式国家贯穿整轮手机号重试。
     configured_country = str(getattr(sms_provider._cfg, "SMS_COUNTRY", "") or "").strip() or None
     last_error = ""
+    # 号码耗尽类失败连续出现时早停：继续遍历国家/重试只是白烧时间与额度。
+    no_number_streak = 0
     for attempt in range(1, max_retries + 1):
         activation_id = None
         try:
@@ -1540,6 +1542,15 @@ def _do_phone_verification_if_present(page) -> dict | None:
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {str(exc)[:220]}"
             logger.warning("[Codex][BrowserUse] 手机验证失败（%s/%s）：%s", attempt, max_retries, last_error)
+            _low = last_error.lower()
+            _no_number = any(k in _low for k in (
+                "no numbers", "no_number", "没有新的价格", "无可用号码", "inventory",
+            ))
+            no_number_streak = no_number_streak + 1 if _no_number else 0
+            if no_number_streak >= 3:
+                raise RuntimeError(
+                    f"phone_numbers_exhausted: 连续 {no_number_streak} 次取号失败，停止重试：{last_error[:160]}"
+                )
             is_session_circuit = (
                 _codex_proto._is_codex_circuit_open_error(last_error)
                 or "status=403" in last_error.lower()

@@ -1288,6 +1288,80 @@ session 只有 WARNING_BANNER              -> account
 
 ---
 
-## 28. 其余项目
+## 28. klsf/codex-register（TypeScript）与"手机验证"这道硬门槛
 
-（后续轮次补齐：klsf、wenfxl、GuJumpgate）
+Node/TS 项目，纯协议注册 + Codex OAuth。它的价值不在规模，而在**明确的取舍**。
+
+### 28.1 它把 add-phone 当终止条件
+
+```ts
+if (continueURL === `${AUTH_BASE_URL}/add-phone`) {
+    throw new Error("当前账号触发 add-phone 绑手机流程，无法继续");
+}
+```
+
+同样的判断在 `openai.ts` 里出现 4 处（305/415/670/680）。
+**它不接码，直接判失败。**
+
+### 28.2 我们的差距：27/38 条 codex_failed 是手机验证
+
+统计 `codex_failed` 的 error_message：
+
+```
+12 条  手机号验证重试 10 次仍失败（provider=smsbower）
+ 6 条  同上（provider=tiger）
+ 5 条  Roxy 手机验证重试 10 次仍失败：whatsapp_channel_reverted: Phone number required
+ 2 条  send_not_accepted：单次提交后仍停留在 add-phone
+ 2 条  随机尝试/刷新 12 个价格范围内国家后仍无可用号码
+ 3 条  codex_email_submit_stalled：authorize 恢复后仍未进入密码/OTP 步骤
+```
+
+**27 条属于手机验证/号码耗尽**——这是外部依赖（号码质量与风控），不是代码 bug。
+
+而我们每条要重试 10 次、最多遍历 12 个国家才放弃。
+
+### 28.3 已落地两项
+
+**(a) 新增 `phone_required` 失败类**（`core/failure_registry.py`）
+
+```python
+FailureClass('phone_required',
+    ('手机号验证重试', '手机验证重试', 'phone number required', 'add-phone',
+     'phone_verification_required', 'whatsapp_channel_reverted',
+     '没有新的价格范围内国家', '无可用号码', 'phone_numbers_exhausted'),
+    retain_for_future_batch=True,   # 过段时间可能又不需要绑定，保留到下一批
+)
+```
+
+验证：
+
+```
+手机号验证重试 10 次仍失败        -> phone_required（保留下批）
+当前账号触发 add-phone 绑手机流程  -> phone_required
+刷新库存后没有新的价格范围内国家    -> phone_required
+phone_numbers_exhausted          -> phone_required
+```
+
+**(b) 号码耗尽自适应早停**（`core/browser_use_codex_oauth.py`）
+
+原来固定重试 `SMS_MAX_RETRIES=10`。现在统计"取号类失败"连续次数，
+连续 3 次即抛 `phone_numbers_exhausted` 停止：
+
+```python
+_no_number = any(k in _low for k in ("no numbers", "没有新的价格", "无可用号码", "inventory"))
+no_number_streak = no_number_streak + 1 if _no_number else 0
+if no_number_streak >= 3:
+    raise RuntimeError(f"phone_numbers_exhausted: 连续 {no_number_streak} 次取号失败…")
+```
+
+### 28.4 收益
+
+- 号码池空时**从 10 次 × 12 国 降到 3 次**，单条失败节省数分钟；
+- 漏斗里 `phone_required` 与代码类失败彻底分开，一眼看出"是不是接码平台的问题"；
+- 保留到下一批而不是掉号——号码恢复后还能再试。
+
+---
+
+## 29. 其余项目
+
+（后续轮次补齐：wenfxl、GuJumpgate）

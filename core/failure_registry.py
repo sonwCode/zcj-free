@@ -77,6 +77,15 @@ FAILURE_CLASSES: tuple[FailureClass, ...] = (
         batch_dropped=True,
     ),
     FailureClass(
+        'phone_required',
+        ('手机号验证重试', '手机验证重试', 'phone number required',
+         'add-phone', 'phone_verification_required', 'whatsapp_channel_reverted',
+         '没有新的价格范围内国家', '无可用号码', 'phone_numbers_exhausted'),
+        # 需要绑手机才能继续：这是外部依赖（号码质量/风控），不是代码问题。
+        # 同一个号过一段时间可能又不需要，所以保留到下一批再试，而不是直接掉号。
+        retain_for_future_batch=True,
+    ),
+    FailureClass(
         'mailbox',
         (
             'mailbox_auth_invalid',
