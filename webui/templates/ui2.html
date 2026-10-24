@@ -230,6 +230,9 @@
                 </template>
               </el-table-column>
               <el-table-column label="来源" width="104"><template #default="{row}">{{ row.email_source || '-' }}</template></el-table-column>
+              <el-table-column label="出口" width="72">
+                <template #default="{row}"><el-tag size="small" :type="row.proxy_used ? '' : 'info'">{{ regionOf(row.proxy_used) || '-' }}</el-tag></template>
+              </el-table-column>
               <el-table-column label="套餐" width="92">
                 <template #default="{row}"><el-tag size="small" :type="row.plan_type==='plus'?'warning':'info'">{{ row.plan_type || 'free' }}</el-tag></template>
               </el-table-column>
@@ -606,6 +609,11 @@ createApp({
       ? ({ success: 'success', failed: 'danger', pending: 'warning', blocked: 'warning' }[s] || 'info')
       : ({ live: 'success', deactivated: 'danger', failed: 'danger' }[s] || 'info');
     const fmt = (v) => String(v || '').replace('T', ' ').slice(0, 19) || '-';
+    // 从 proxy_used 里取地区码（region-VN），对标竞品后台的"注册国家"列
+    const regionOf = (proxy) => {
+      const m = String(proxy || '').match(/region-([A-Za-z]{2})/i);
+      return m ? m[1].toUpperCase() : '';
+    };
 
     /* ---------- 注册开关 ---------- */
     const splitRunning = ref(false);
