@@ -601,6 +601,28 @@ def _login_via_password_or_otp(
             email_source=email_source,
         )
 
+    # 409 invalid_state 的根因就是缺 oai-did（注册主流程已修，查活这里漏了）。
+    # 重新登录前必须先拿到 oai-did，否则密码登录直接 409。
+    try:
+        from core.auth_warmup_gate import ensure_oai_did
+
+        ensure_oai_did(session, rotate_proxy=False)
+        logger.info("[查活] warmup 守卫通过（oai-did 就绪）")
+    except Exception as exc:
+        logger.warning("[查活] warmup 守卫失败：%s: %s", type(exc).__name__, str(exc)[:120])
+    # 409 invalid_state 的第二个根因：密码登录前必须先建立授权事务。
+    # dango 的顺序是 authorize(建事务) → password/verify；直接 POST 密码必然 409。
+    try:
+        from core import chatgpt_auth as _ca
+        from core import openai_auth as _oa
+
+        _csrf = _ca.get_csrf_token(session)
+        _auth_url = _ca.signin_openai(session, _csrf, email=email)
+        _oa.follow_authorize(session, _auth_url)
+        logger.info("[查活] 登录事务已建立")  # 建立登录事务
+    except Exception as _txn_exc:
+        logger.warning("[查活] 建立登录事务失败：%s: %s",
+                       type(_txn_exc).__name__, str(_txn_exc)[:120])
     logger.info("[查活] 账号存在密码，优先走密码登录：%s", email)
     password_result = _password_verify(session, password)
     continue_url = _extract_continue_url(password_result)
@@ -929,6 +951,32 @@ def check_account_liveness(
             result["plan_result"] = {"ok": ok, "queued": True, **queued}
         except Exception as exc:
             result["plan_result"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+        # 顺手把本次登录的 session-token cookie 存进账号，后续可用 cookie 方式授权 Codex
+        # （不需要密码/OTP/2FA）。cookie 超过 3800 字节会分片保存。
+        try:
+            from core.account_extra import update_extra as _update_extra
+            from core.session_cookie import capture_from_session as _capture
+
+            _sc = _capture(session)
+            try:
+                from core.session_cookie import capture_all as _capture_all
+
+                _all = _capture_all(session)
+                if _all:
+                    _row2 = db.get_account_by_email(email) or {}
+                    _aid2 = int(_row2.get('id') or 0)
+                    if _aid2 and _update_extra(_aid2, {'auth_cookies': _all}):
+                        logger.info('[查活] 已保存跨域 cookie：%d 个（含 auth.openai.com）', len(_all))
+            except Exception as _all_exc:
+                logger.debug('[查活] 跨域 cookie 保存失败：%s', str(_all_exc)[:120])
+            if _sc:
+                _row = db.get_account_by_email(email) or {}
+                _aid = int(_row.get('id') or 0)
+                if _aid and _update_extra(_aid, {'session_cookies': _sc}):
+                    logger.info('[查活] 已保存 session cookie：%d 片', len(_sc))
+        except Exception as _sc_exc:
+            logger.debug('[查活] 保存 session cookie 失败：%s', str(_sc_exc)[:120])
         return result
 
     except AccountUnusableError as exc:

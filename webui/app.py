@@ -1278,6 +1278,40 @@ def create_app(auth_code: str | None = None) -> Flask:
                 continue
             accounts.append(acc)
 
+        # 查活先看本地 AT 是否过期（上游 myfanhua 口径：本地 exp 巡检，只有失效的才查活）。
+        # 未过期直接跳过，不做无谓的重新登录；需要强制刷新时传 force=true。
+        # 上游口径：已标记为已废的账号直接跳过，不做 AT 检查也不查活。
+        dead_skipped: list[dict] = []
+        kept_alive = []
+        for acc in accounts:
+            if str(acc.get("live_check_status") or "").strip().lower() == "deactivated":
+                dead_skipped.append({"id": acc.get("id"), "email": acc.get("email"),
+                                     "reason": "已标记为已废，跳过查活"})
+                continue
+            kept_alive.append(acc)
+        accounts = kept_alive
+        fresh_skipped: list[dict] = []
+        force = bool(data.get("force"))
+        if not force:
+            try:
+                from core.token_expiry import token_needs_refresh
+
+                kept = []
+                for acc in accounts:
+                    token = str(acc.get("access_token") or "")
+                    if token and not token_needs_refresh(token):
+                        fresh_skipped.append({"id": acc.get("id"),
+                                              "email": acc.get("email"),
+                                              "reason": "AT 未过期，跳过查活"})
+                        continue
+                    kept.append(acc)
+                accounts = kept
+            except Exception:
+                fresh_skipped = []
+
+        skipped.extend(dead_skipped)
+        skipped.extend(fresh_skipped)
+
         started = []
         busy_count = 0
         failed = []
