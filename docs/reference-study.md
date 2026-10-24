@@ -1989,3 +1989,56 @@ class AutoLoopController:
 覆盖情况：registrar / auto_loop / auth_flow 的关键函数已读；
 未读：mail_providers/icloud_relay(52KB) / sms_provider(48KB) / fingerprint(26KB)。
 ```
+
+## 46. basketikun/chatgpt2api 补深读：人工 OAuth 与账号池（第 11 轮）
+
+这个项目不是注册工具，是 **ChatGPT API 网关**（FastAPI + 账号池）。
+两个机制值得抄。
+
+### 46.1 人工 OAuth：把浏览器那一步交给人（已落地）
+
+```
+POST /api/accounts/oauth/start   → 登记 PKCE 会话，返回 authorize URL
+POST /api/accounts/oauth/finish  → 收用户抓回的 callback URL/code，
+                                   换 access/refresh/id_token 三件套并落盘
+```
+
+代码注释写得很直白："登记一次 PKCE 会话，返回可让用户浏览器打开的 authorize URL" /
+"收用户从浏览器抓回的 callback URL / code"。
+
+**这正好破解我们的死结**：我们服务端直连 authorize 链时，
+OpenAI 返回 `error=login_required`（The Authorization Server requires
+End-User authentication），这是产品级限制，绕不过。
+既然机器过不去，就让人过——服务端只负责 PKCE 登记与 code 换 token。
+
+**已落地 `core/codex_manual_oauth.py`**：
+- `start(email_hint)` → `{session_id, authorize_url, expires_in}`，
+  verifier 落 `data/manual_oauth_sessions.json`（0600），10 分钟过期；
+- `finish(session_id, callback)` → 校验 state、`exchange_codex_token`、
+  `build_codex_storage`、写本地凭据副本；
+- 接口 `POST /api/codex/oauth/{start,finish}`；
+- `/v2` Codex 页新增「人工授权」对话框（三步：生成链接 → 浏览器授权 → 粘贴回调）。
+
+实测：`start` 返回正确 authorize URL（client_id=app_EMoamE…）。
+
+### 46.2 账号池的"限流即淘汰"
+
+```python
+if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
+    ...  # 直接从池里摘掉
+```
+
+它把"限流"当成一等状态而不是异常，且可配置自动淘汰。
+我们的 live_check 只有 live/deactivated/failed，没有"限流/冷却"这个维度。
+
+### 46.3 其他模块规模
+
+`services/openai_backend_api.py`(124KB) 是协议网关核心，
+`services/protocol/conversation.py`(68KB) 是会话协议，
+`backup_service.py`(26KB)、`proxy_service.py`(24KB)。
+我们不需要这些（我们是注册/养护系统，不是 API 转售网关）。
+
+```
+覆盖情况：api/accounts 的 OAuth 与账号 CRUD、account_service 的状态判定已读；
+未读：openai_backend_api(124KB) / conversation(68KB) —— 与本项目目标无关。
+```

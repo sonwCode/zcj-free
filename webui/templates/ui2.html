@@ -150,6 +150,7 @@
           <div class="card">
             <div class="toolbar">
               <el-input v-model="cxQuery" placeholder="搜索文件名/邮箱" clearable style="width:240px" @keyup.enter="loadCodex"/>
+              <el-button type="success" @click="openManualOauth">人工授权</el-button>
               <el-button type="primary" @click="loadCodex">查询</el-button>
               <span class="right"></span>
               <span class="muted">共 {{ cxTotal }} 条</span>
@@ -201,6 +202,23 @@
               </el-table-column>
             </el-table>
           </div>
+          <el-dialog v-model="manualOauthOpen" title="人工 OAuth 授权" width="640px">
+            <el-steps :active="oauthStep" simple style="margin-bottom:16px">
+              <el-step title="生成链接" /><el-step title="浏览器授权" /><el-step title="粘贴回调" />
+            </el-steps>
+            <div class="toolbar">
+              <el-input v-model="oauthEmail" placeholder="账号邮箱（可选）" style="width:260px" />
+              <el-button type="primary" :loading="oauthBusy" @click="startOauth">生成授权链接</el-button>
+            </div>
+            <el-input v-if="oauthUrl" v-model="oauthUrl" readonly type="textarea" :rows="3" style="margin:10px 0" />
+            <el-alert v-if="oauthUrl" type="info" :closable="false" show-icon
+                      title="在浏览器打开上面的链接并完成登录；最后浏览器会跳到 localhost:1455 打不开，把地址栏 URL 整个复制回来。" />
+            <el-input v-model="oauthCallback" placeholder="粘贴 http://localhost:1455/auth/callback?code=...&state=..." type="textarea" :rows="3" style="margin:12px 0" />
+            <template #footer>
+              <el-button @click="manualOauthOpen = false">关闭</el-button>
+              <el-button type="primary" :loading="oauthBusy" @click="finishOauth">提交回调</el-button>
+            </template>
+          </el-dialog>
           <el-drawer v-model="logOpen" :title="'Job #' + logJobId + ' 日志'" size="56%">
             <pre class="logbox">{{ logText || '（暂无日志）' }}</pre>
           </el-drawer>
@@ -357,6 +375,7 @@ createApp({
 
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
     return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+             manualOauthOpen, oauthEmail, oauthUrl, oauthCallback, oauthBusy, oauthStep, openManualOauth, startOauth, finishOauth,
              cfg, creds, backups, loadSettings,
              jobRows, logOpen, logText, logJobId, loadJobs, openLog, stopJob, retryJob, jobTag,
              cxRows, cxTotal, cxPage, cxPageSize, cxQuery, loadCodex, onCodexPage, deleteCodex,

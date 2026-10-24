@@ -1318,6 +1318,33 @@ def create_app(auth_code: str | None = None) -> Flask:
         """新版界面（Vue 3 + Element Plus，与旧版并存）。"""
         return render_template("ui2.html")
 
+    @app.post("/api/codex/oauth/start")
+    def api_codex_oauth_start():
+        """人工 OAuth 第一步：生成 PKCE 会话与授权 URL。"""
+        from core import codex_manual_oauth
+
+        data = request.get_json(silent=True) or {}
+        try:
+            out = codex_manual_oauth.start(str(data.get("email") or ""))
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:160]}"}), 400
+        return jsonify({"ok": True, **out})
+
+    @app.post("/api/codex/oauth/finish")
+    def api_codex_oauth_finish():
+        """人工 OAuth 第二步：粘贴回调 URL/code，换 token 并入库。"""
+        from core import codex_manual_oauth
+
+        data = request.get_json(silent=True) or {}
+        try:
+            out = codex_manual_oauth.finish(
+                str(data.get("session_id") or ""),
+                str(data.get("callback") or ""),
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}), 400
+        return jsonify(out)
+
     @app.get("/api/settings/overview")
     def api_settings_overview():
         """运行态总览：开关状态 + 关键配置 + 备份/凭据数量。"""
