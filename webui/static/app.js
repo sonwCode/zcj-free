@@ -1371,7 +1371,8 @@ function _planCell(r) {
   if (err || r.plan_check_status === 'failed') {
     const reason = err || '套餐查询失败，未返回具体原因';
     const hasLastSuccess = Boolean(r.plan_last_success_at);
-    const lastPlan = hasLastSuccess ? `${plan}${promoSummaries.length ? `（${promoSummaries.join('；')}）` : ''}` : '';
+    // 套餐列只显示套餐；优惠不进套餐文本（用户要求：优惠不能显示在套餐里）
+    const lastPlan = hasLastSuccess ? plan : '';
     const lastText = lastPlan ? `（上次: ${lastPlan}）` : '';
     const lastTitle = hasLastSuccess ? `上次成功: ${esc(formatDateTime(r.plan_last_success_at))}` : '';
     return `<div class="extract-link-cell"><span class="pill status-failed" title="${[esc(reason), lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
@@ -1387,7 +1388,7 @@ function _planCell(r) {
     const t = promoSummaries.length ? `${title}；可用套餐优惠：${promoSummaries.join('；')}` : title;
     const keys = Object.keys(campaigns);
     const detailBtn = keys.length ? `<button type="button" class="promo-detail-btn" data-promo-details="${esc(JSON.stringify(campaigns))}">详情(${keys.length})</button>` : '';
-    return _promoStackHtml('free', cls, promoSummaries, t, detailBtn);
+    return _promoStackHtml('free', cls, [], t, detailBtn);
   }
 
   const cls = 'status-success';
@@ -1406,7 +1407,7 @@ function _planCell(r) {
   if (r.plan_renews_at) detail.push(`续费时间: ${formatDateTime(r.plan_renews_at)}`);
   if (r.discount_expires_at) detail.push(`折扣结束: ${formatDateTime(r.discount_expires_at)}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
-  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'));
+  return _promoStackHtml(text, cls, [], detail.join('；'));
 }
 function _planAction(r) {
   if (['queued','running'].includes(r.plan_check_status)) {
