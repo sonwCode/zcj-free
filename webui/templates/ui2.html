@@ -205,6 +205,40 @@
             <pre class="logbox">{{ logText || '（暂无日志）' }}</pre>
           </el-drawer>
         </template>
+        <template v-else-if="tab==='settings'">
+          <div class="card" style="margin-bottom:14px;">
+            <div style="font-weight:600;margin-bottom:12px;">运行开关</div>
+            <div class="toolbar">
+              <span class="muted" style="width:120px;">注册</span>
+              <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'" inline-prompt
+                         @change="toggleRegistration" />
+            </div>
+            <el-alert type="info" :closable="false" show-icon
+                      title="暂停后不再接受任何新的注册任务（含重启补偿）；手动提交也会被拒绝。" />
+          </div>
+          <div class="card" style="margin-bottom:14px;">
+            <div style="font-weight:600;margin-bottom:12px;">关键配置</div>
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="2FA 开关">{{ cfg.enable_2fa ? '开启' : '关闭' }}</el-descriptions-item>
+              <el-descriptions-item label="2FA 并发">{{ cfg.twofa_workers }}</el-descriptions-item>
+              <el-descriptions-item label="2FA 取码窗口">{{ cfg.twofa_otp_max_wait }} 秒</el-descriptions-item>
+              <el-descriptions-item label="OTP 全局窗口">{{ cfg.otp_max_wait }} 秒</el-descriptions-item>
+              <el-descriptions-item label="Codex 自动">{{ cfg.enable_codex_auto ? '开启' : '关闭' }}</el-descriptions-item>
+              <el-descriptions-item label="强制密码注册">{{ cfg.require_password ? '是' : '否' }}</el-descriptions-item>
+              <el-descriptions-item label="重启补偿">{{ cfg.auto_requeue_on_restart ? '开启' : '关闭' }}</el-descriptions-item>
+              <el-descriptions-item label="注册驱动">{{ cfg.registration_driver }}</el-descriptions-item>
+            </el-descriptions>
+          </div>
+          <div class="card">
+            <div style="font-weight:600;margin-bottom:12px;">本地凭据与备份</div>
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="本地凭据文件">{{ (creds.count ?? 0) }} 个</el-descriptions-item>
+              <el-descriptions-item label="占用空间">{{ ((creds.bytes || 0) / 1024).toFixed(1) }} KB</el-descriptions-item>
+              <el-descriptions-item label="数据库快照">{{ (backups.count ?? 0) }} 份</el-descriptions-item>
+              <el-descriptions-item label="最新快照">{{ backups.latest || '—' }}</el-descriptions-item>
+            </el-descriptions>
+          </div>
+        </template>
         <template v-else>
           <div class="card"><el-empty :description="title + ' 迁移中'"/></div>
         </template>
@@ -256,7 +290,7 @@ createApp({
     function reload() { page.value = 1; load(); }
     function onPage(p) { page.value = p; load(); }
     function onSize(s) { pageSize.value = s; page.value = 1; load(); }
-    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } else if (k === 'logs') { loadJobs(); } }
+    function switchTab(k) { tab.value = k; if (k === 'accounts') { load(); loadFunnel(); } else if (k === 'sms') { loadSms(); } else if (k === 'codex') { loadCodex(); } else if (k === 'logs') { loadJobs(); } else if (k === 'settings') { loadSettings(); } }
 
     const ids = () => sel.value.map(r => Number(r.id));
 
@@ -323,6 +357,7 @@ createApp({
 
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
     return { menus, tab, title, rows, total, page, pageSize, loading, busy, query, archived, sel, funnel,
+             cfg, creds, backups, loadSettings,
              jobRows, logOpen, logText, logJobId, loadJobs, openLog, stopJob, retryJob, jobTag,
              cxRows, cxTotal, cxPage, cxPageSize, cxQuery, loadCodex, onCodexPage, deleteCodex,
              regRunning, toggleRegistration,
