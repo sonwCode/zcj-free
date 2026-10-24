@@ -1213,6 +1213,81 @@ if looks_like_challenge(_state):
 
 ---
 
-## 26. 其余项目
+## 26. davidqiangzi/GPT_zhuceji（Node + Browserbase）
 
-（后续轮次补齐：GPT_zhuceji、klsf、wenfxl、GuJumpgate）
+Node.js 技术栈：Browserbase 托管远程浏览器 + DDG 邮箱别名，分两阶段（注册 → Codex OAuth）。
+
+### 26.1 Codex 阶段的实现与我们一致
+
+```js
+this.redirectPort = 1455;
+this.redirectUri = `http://localhost:${this.redirectPort}/auth/callback`;
+// authorize 参数同样带 codex_cli_simplified_flow: 'true'
+// 拿到回调 URL 后 extractCallbackParams(callbackUrl) 取 code
+```
+
+这是第 **五** 个独立实现使用同一套参数（前有 2951461586、Haohuangsix、
+sky3100、88cjohn）。生态标准确认无误。
+
+### 26.2 可借鉴但暂不迁移
+
+| 它的做法 | 我们的现状 |
+|---|---|
+| Browserbase 托管浏览器 | 已有 browser_use / skyvern 驱动 |
+| DDG 邮箱别名 | 已有 remail / outlook / generic_api / imap |
+
+把"远程浏览器"当第一等公民可以省本地资源，但我们已经有多驱动抽象，
+再引入一个托管服务收益有限。
+
+---
+
+## 27. 本轮落地：把 session 超时拆成两类失败
+
+`runtimeerror` 里 48 条是 `等待 /api/auth/session accessToken 超时`。
+细看代码发现这个错误把**两种完全不同的情况**混在一起：
+
+```
+A) session 里只有 WARNING_BANNER → 会话存在，但被风控标记
+B) session 为空/未授权          → 可能只是 SPA 还没水合
+```
+
+A 类继续等 150 秒毫无意义。
+
+### 27.1 改动
+
+`core/roxy_registration._fetch_chatgpt_session` 抛错前分流，
+并把 `session-token cookie 是否存在` 写进错误信息：
+
+```python
+if 'WARNING_BANNER' in _text:
+    raise RuntimeError(f"session 只有 WARNING_BANNER（会话存在但被风控警告），"
+                       f"最后 URL={last_url}，{_cookie_hint}，...")
+raise RuntimeError(f"等待 /api/auth/session accessToken 超时，...{_cookie_hint}...")
+```
+
+### 27.2 分类同步（core/failure_registry）
+
+| 错误文本 | 归类 | 含义 |
+|---|---|---|
+| `warning_banner` | account | 被风控标记，不该在出口/重试上折腾 |
+| `accesstoken 超时` | auth_state | 会话未就绪，值得重试 |
+
+验证：
+
+```
+等待 /api/auth/session accessToken 超时  -> auth_state
+session 只有 WARNING_BANNER              -> account
+找不到 OTP 输入框，已刷新重试3次          -> auth_state
+```
+
+### 27.3 收益
+
+- A 类失败**提前 100+ 秒结束**，不白占协议闸门；
+- 漏斗能把"被风控"与"会话未就绪"分开统计，指导不同处置；
+- 错误信息自带 cookie 线索，下次排查不用猜。
+
+---
+
+## 28. 其余项目
+
+（后续轮次补齐：klsf、wenfxl、GuJumpgate）

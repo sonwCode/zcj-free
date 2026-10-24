@@ -3585,9 +3585,27 @@ def _fetch_chatgpt_session(
                 last_data = f"{type(exc).__name__}: {exc}"
         _stop_aware_sleep(2)
 
+    # 区分两种截然不同的失败，别让它们共用一个笼统的超时错误：
+    #   A) session 里只有 WARNING_BANNER —— 会话是存在的，但被风控标记；
+    #      再等下去毫无意义（实测这类浪费满 150s 预算）。
+    #   B) session 为空/未授权 —— 可能只是 SPA 还没水合，值得继续等。
+    _text = str(last_data or '')
+    _cookie_hint = ''
+    try:
+        _names = {c.get('name') for c in (driver.get_cookies() or [])}
+        _cookie_hint = 'session-token=%s' % ('有' if any(
+            n and 'session-token' in str(n) for n in _names) else '无')
+    except Exception:
+        _cookie_hint = 'session-token=未知'
+    if 'WARNING_BANNER' in _text:
+        raise RuntimeError(
+            f"session 只有 WARNING_BANNER（会话存在但被风控警告），"
+            f"最后 URL={last_url or 'unknown'}，{_cookie_hint}，"
+            f"最后响应: {_text[:600]}"
+        )
     raise RuntimeError(
         f"等待 /api/auth/session accessToken 超时，最后 URL={last_url or 'unknown'}，"
-        f"最后响应: {str(last_data)[:800]}"
+        f"{_cookie_hint}，最后响应: {_text[:800]}"
     )
 
 

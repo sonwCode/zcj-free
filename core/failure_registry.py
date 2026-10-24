@@ -68,6 +68,7 @@ FAILURE_CLASSES: tuple[FailureClass, ...] = (
         'account',
         (
             'account_deactivated',
+            'warning_banner',
             'account has been deactivated',
             'token_revoked',
             'account has been deleted',
@@ -144,6 +145,7 @@ FAILURE_CLASSES: tuple[FailureClass, ...] = (
             '未进入密码页',
             '找不到邮箱输入框',
             '找不到 otp 输入框',
+            'accesstoken 超时',
         ),
         attempt_retryable=True,
         retain_for_future_batch=True,
