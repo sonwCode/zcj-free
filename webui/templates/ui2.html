@@ -9,40 +9,61 @@
 <script src="https://cdn.jsdelivr.net/npm/vue@3.4.31/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/element-plus@2.7.6/dist/index.full.min.js"></script>
 <style>
+  :root{
+    --bg:#f8f9fa; --surface:#ffffff; --soft:#f7f9fc; --text:#172033; --muted:#667085;
+    --line:#e3e9f2; --blue:#2563eb; --green:#16803c; --red:#c2413a; --amber:#b7791f;
+    --sidebar:#141b2d; --sidebar-accent:#3b66f5;
+  }
   *{box-sizing:border-box}
   html,body,#app{height:100%;margin:0}
-  body{font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#f5f7fa;color:#1f2d3d}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--text);font-size:13px;-webkit-font-smoothing:antialiased}
   .shell{display:flex;height:100%}
-  .side{width:212px;background:#1d2531;display:flex;flex-direction:column;flex-shrink:0}
-  .brand{padding:18px 20px;color:#fff;font-weight:600;font-size:15px;display:flex;align-items:center;gap:9px;border-bottom:1px solid rgba(255,255,255,.07)}
-  .brand .dot{width:8px;height:8px;border-radius:50%;background:#3ddc84;box-shadow:0 0 8px #3ddc84}
-  .menu{flex:1;padding:8px 0}
-  .menu-item{padding:11px 20px;font-size:14px;color:#9aa7b8;cursor:pointer;border-left:3px solid transparent;transition:.15s}
-  .menu-item:hover{background:rgba(255,255,255,.05);color:#fff}
-  .menu-item.active{background:rgba(64,158,255,.16);color:#fff;border-left-color:#409eff}
-  .side-foot{padding:12px 20px;font-size:12px;color:#6b7787;border-top:1px solid rgba(255,255,255,.07)}
+  /* 侧边栏 */
+  .side{width:216px;background:var(--sidebar);display:flex;flex-direction:column;flex-shrink:0}
+  .brand{padding:20px;color:#fff;font-weight:600;font-size:15px;display:flex;align-items:center;gap:9px;
+         border-bottom:1px solid rgba(255,255,255,.08);letter-spacing:.3px}
+  .brand .dot{width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 10px #22c55e}
+  .menu{flex:1;padding:10px 0;overflow:auto}
+  .menu-item{padding:10px 20px;font-size:13.5px;color:#9aa8bd;cursor:pointer;border-left:3px solid transparent;transition:.15s}
+  .menu-item:hover{background:rgba(255,255,255,.06);color:#fff}
+  .menu-item.active{background:rgba(59,102,245,.18);color:#fff;border-left-color:var(--sidebar-accent);font-weight:500}
+  .side-foot{padding:14px 20px;font-size:11.5px;color:#5f6b80;border-top:1px solid rgba(255,255,255,.08)}
+  /* 主区 */
   .main{flex:1;display:flex;flex-direction:column;min-width:0}
-  .topbar{height:56px;background:#fff;border-bottom:1px solid #e8eaef;display:flex;align-items:center;padding:0 20px;gap:12px}
-  .topbar h2{margin:0;font-size:16px;font-weight:600}
-  .content{flex:1;overflow:auto;padding:16px}
-  .card{background:#fff;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
-  .funnel{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
-  .fitem{flex:1;min-width:132px;background:#fff;border-radius:10px;padding:12px 14px;box-shadow:0 1px 3px rgba(16,24,40,.06)}
-  .fitem .k{font-size:12px;color:#8492a6}
-  .fitem .v{font-size:20px;font-weight:600;margin-top:3px}
-  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
-  .email-cell{display:flex;flex-direction:column;line-height:1.35}
-  .email-cell .sub{font-size:12px;color:#909399}
+  .topbar{height:58px;background:var(--surface);border-bottom:1px solid var(--line);display:flex;align-items:center;
+          padding:0 22px;gap:12px;position:sticky;top:0;z-index:10}
+  .topbar h2{margin:0;font-size:15.5px;font-weight:600;letter-spacing:.2px}
+  .content{flex:1;overflow:auto;padding:18px 22px 40px}
+  .inner{max-width:1560px;margin:0 auto;width:100%}
+  /* 卡片 */
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px;
+        box-shadow:0 1px 2px rgba(16,24,40,.04)}
+  .card + .card{margin-top:14px}
+  .card-title{font-weight:600;font-size:13.5px;margin-bottom:12px;color:var(--text);
+              display:flex;align-items:center;gap:8px}
+  .card-title::before{content:"";width:3px;height:13px;border-radius:2px;background:var(--blue)}
+  /* 统计 */
+  .funnel{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+  .fitem{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+         box-shadow:0 1px 2px rgba(16,24,40,.04);position:relative;overflow:hidden}
+  .fitem::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--blue);opacity:.85}
+  .fitem.g::after{background:var(--green)} .fitem.r::after{background:var(--red)} .fitem.a::after{background:var(--amber)}
+  .fitem .k{font-size:12px;color:var(--muted)}
+  .fitem .v{font-size:22px;font-weight:600;margin-top:5px;letter-spacing:.5px}
+  /* 工具条 */
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .toolbar .muted{font-size:12px;color:var(--muted)}
   .right{margin-left:auto}
-  .logbox{background:#0f1720;color:#c9d1d9;padding:14px;border-radius:8px;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-all;max-height:80vh;overflow:auto}
-  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
-  .topbar{position:sticky;top:0;z-index:10}
-  .content{max-width:1580px;margin:0 auto;width:100%}
-  .el-table th{background:#fafbfc!important;font-weight:600;color:#5a6b80}
-  .el-table .cell{line-height:1.5}
-  .card+.card{margin-top:14px}
-  .toolbar .spacer{flex:1}
-  .brand small{font-weight:400;font-size:11px;color:#7b8794;margin-left:2px}
+  /* 表格 */
+  .el-table{font-size:12.5px}
+  .el-table th{background:#f7f9fc!important;color:#475569;font-weight:600}
+  .email-cell{display:flex;flex-direction:column;line-height:1.4}
+  .email-cell .sub{font-size:11.5px;color:#94a3b8}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
+  .muted{color:var(--muted)}
+  .logbox{background:#0f172a;color:#cbd5e1;padding:14px;border-radius:8px;font-size:12px;line-height:1.65;
+          white-space:pre-wrap;word-break:break-all;max-height:78vh;overflow:auto}
 </style>
 </head>
 <body>
@@ -66,7 +87,7 @@
         <el-button size="small" @click="reload">刷新</el-button>
         <el-button size="small" text tag="a" href="/">返回旧版</el-button>
       </header>
-      <main class="content">
+      <main class="content"><div class="inner">
         <template v-if="tab==='pool'">
           <div class="card" style="margin-bottom:14px;">
             <div class="toolbar">
@@ -116,9 +137,9 @@
             </template>
           </el-dialog>
         </template>
-        <template v-if="tab==='register'">
+        <template v-else-if="tab==='register'">
           <div class="card" style="margin-bottom:14px;">
-            <div style="font-weight:600;margin-bottom:12px;">注册总开关</div>
+            <div class="card-title">注册总开关</div>
             <div class="toolbar">
               <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'" inline-prompt
                          style="--el-switch-on-color:#13ce66" @change="toggleRegistration" />
@@ -126,7 +147,7 @@
             </div>
           </div>
           <div class="card" style="margin-bottom:14px;">
-            <div style="font-weight:600;margin-bottom:12px;">发起注册</div>
+            <div class="card-title">发起注册</div>
             <div class="toolbar">
               <span class="muted">数量</span>
               <el-input-number v-model="regCount" :min="1" :max="200" size="default" style="width:130px" />
@@ -148,7 +169,7 @@
                       title="当前已暂停：请先打开上方开关再发起注册。" />
           </div>
           <div class="card">
-            <div style="font-weight:600;margin-bottom:10px;">队列状态</div>
+            <div class="card-title">队列状态</div>
             <el-descriptions :column="4" border size="small">
               <el-descriptions-item label="待执行">{{ jobCounts.pending ?? 0 }}</el-descriptions-item>
               <el-descriptions-item label="执行中">{{ jobCounts.running ?? 0 }}</el-descriptions-item>
@@ -160,7 +181,7 @@
             </div>
           </div>
         </template>
-        <template v-if="tab==='accounts'">
+        <template v-else-if="tab==='accounts'">
           <div class="funnel" v-if="funnel">
             <div class="fitem"><div class="k">作业总数</div><div class="v">{{ funnel.total }}</div></div>
             <div class="fitem"><div class="k">成功</div><div class="v">{{ (funnel.status||{}).success || 0 }}</div></div>
@@ -185,7 +206,11 @@
               <el-button :disabled="!sel.length" :loading="busy==='link'" @click="bulk('link')">提取链接</el-button>
               <el-button :disabled="!sel.length" :loading="busy==='note'" @click="bulkNote">批量备注</el-button>
               <el-button :disabled="!sel.length" :loading="busy==='secret'" @click="bulk('secret')">查看密钥</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='cxcheck'" @click="bulk('cxcheck')">Codex 测活</el-button>
+              <el-button :disabled="!sel.length" :loading="busy==='chgmail'" @click="bulkChangeEmail">换邮箱</el-button>
               <el-button :disabled="!sel.length" @click="bulk('archive')">归档</el-button>
+              <el-button :loading="busy==='cleanup'" @click="cleanupDead">清理已废</el-button>
+              <el-button :loading="busy==='cancelq'" @click="cancelPending">取消排队</el-button>
               <el-button type="danger" plain :disabled="!sel.length" :loading="busy==='del'" @click="bulk('del')">删除</el-button>
             </div>
             <el-table :data="rows" v-loading="loading" size="small" border stripe @selection-change="v=>sel=v" style="width:100%">
@@ -241,7 +266,7 @@
             </el-table>
           </div>
           <div class="card">
-            <div style="font-weight:600;margin-bottom:10px;">号码占用</div>
+            <div class="card-title">号码占用</div>
             <el-table :data="smsReservations" size="small" border stripe style="width:100%">
               <el-table-column label="ID" width="70"><template #default="{row}">#{{ row.id }}</template></el-table-column>
               <el-table-column label="号码" width="140"><template #default="{row}">{{ row.phone_mask || row.phone || '-' }}</template></el-table-column>
@@ -328,9 +353,45 @@
             <pre class="logbox">{{ logText || '（暂无日志）' }}</pre>
           </el-drawer>
         </template>
+        <template v-else-if="tab==='config'">
+          <div class="card">
+            <div class="toolbar">
+              <el-select v-model="cfgGroup" style="width:200px" placeholder="选择分组">
+                <el-option v-for="g in cfgGroups" :key="g" :label="g" :value="g" />
+              </el-select>
+              <el-input v-model="cfgFilter" placeholder="按名称/键筛选" clearable style="width:240px" />
+              <el-button :loading="busy==='cfg'" @click="loadConfig">重新加载</el-button>
+              <span class="right"></span>
+              <span class="muted">改动 {{ Object.keys(cfgDirty).length }} 项</span>
+              <el-button type="primary" :loading="busy==='cfgsave'" :disabled="!Object.keys(cfgDirty).length"
+                         @click="saveConfig">保存配置</el-button>
+            </div>
+            <el-table :data="cfgVisible" size="small" border style="width:100%" >
+              <el-table-column label="配置项" width="260">
+                <template #default="{row}">
+                  <div class="email-cell">
+                    <span>{{ row.label || row.key }}</span>
+                    <span class="sub mono">{{ row.key }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="值" min-width="320">
+                <template #default="{row}">
+                  <el-switch v-if="row.type==='bool'" v-model="cfgDraft[row.key]" />
+                  <el-input v-else-if="row.type==='int'||row.type==='float'" type="number" v-model="cfgDraft[row.key]" />
+                  <el-input v-else-if="row.type==='list_str_multiline'" type="textarea" :rows="3" v-model="cfgDraft[row.key]" />
+                  <el-input v-else :type="row.secret ? 'password' : 'text'" show-password v-model="cfgDraft[row.key]" />
+                </template>
+              </el-table-column>
+              <el-table-column label="说明" min-width="260">
+                <template #default="{row}"><span class="muted">{{ row.help || '-' }}</span></template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </template>
         <template v-else-if="tab==='settings'">
           <div class="card" style="margin-bottom:14px;">
-            <div style="font-weight:600;margin-bottom:12px;">运行开关</div>
+            <div class="card-title">运行开关</div>
             <div class="toolbar">
               <span class="muted" style="width:120px;">注册</span>
               <el-switch v-model="regRunning" :active-text="regRunning ? '运行中' : '已暂停'" inline-prompt
@@ -340,7 +401,7 @@
                       title="暂停后不再接受任何新的注册任务（含重启补偿）；手动提交也会被拒绝。" />
           </div>
           <div class="card" style="margin-bottom:14px;">
-            <div style="font-weight:600;margin-bottom:12px;">关键配置</div>
+            <div class="card-title">关键配置</div>
             <el-descriptions :column="2" border size="small">
               <el-descriptions-item label="2FA 开关">{{ cfg.enable_2fa ? '开启' : '关闭' }}</el-descriptions-item>
               <el-descriptions-item label="2FA 并发">{{ cfg.twofa_workers }}</el-descriptions-item>
@@ -353,7 +414,7 @@
             </el-descriptions>
           </div>
           <div class="card">
-            <div style="font-weight:600;margin-bottom:12px;">本地凭据与备份</div>
+            <div class="card-title">本地凭据与备份</div>
             <el-descriptions :column="2" border size="small">
               <el-descriptions-item label="本地凭据文件">{{ (creds.count ?? 0) }} 个</el-descriptions-item>
               <el-descriptions-item label="占用空间">{{ ((creds.bytes || 0) / 1024).toFixed(1) }} KB</el-descriptions-item>
@@ -362,10 +423,7 @@
             </el-descriptions>
           </div>
         </template>
-        <template v-else>
-          <div class="card"><el-empty :description="title + ' 迁移中'"/></div>
-        </template>
-      </main>
+      </div></main>
     </section>
   </div>
 </div><script>
@@ -389,6 +447,7 @@ createApp({
       { key: 'sms', label: '号码池' },
       { key: 'codex', label: 'Codex 凭证' },
       { key: 'logs', label: '任务与日志' },
+      { key: 'config', label: '配置' },
       { key: 'settings', label: '设置' },
     ];
     const tab = ref('accounts');
@@ -436,6 +495,38 @@ createApp({
       } catch (e) { if (e !== 'cancel') ElMessage.error('操作失败：' + (e.message || e)); }
       finally { busy.value = ''; }
     }
+    async function bulkChangeEmail() {
+      const list = ids();
+      if (!list.length) return;
+      try {
+        const d = await post('/api/accounts/change-email-bulk', {account_ids: list, source: 'auto'});
+        if (d.ok === false) throw new Error(d.error || '提交失败');
+        ElMessage.success('已提交换邮箱：' + (d.started_count ?? list.length));
+        await load();
+      } catch (e) { if (e !== 'cancel') ElMessage.error('换邮箱失败：' + (e.message || e)); }
+    }
+
+    async function cleanupDead() {
+      try {
+        await ElMessageBox.confirm('清理已判定为已废的账号？该操作会删除数据。', '确认', {type:'warning'});
+        busy.value = 'cleanup';
+        const d = await post('/api/accounts/cleanup-dead', {max_batch: 50, force: false});
+        ElMessage.success('清理完成：' + (d.deleted_count ?? d.deleted ?? 0));
+        await load(); await loadFunnel();
+      } catch (e) { if (e !== 'cancel') ElMessage.error('清理失败：' + (e.message || e)); }
+      finally { busy.value = ''; }
+    }
+
+    async function cancelPending() {
+      try {
+        busy.value = 'cancelq';
+        const d = await post('/api/jobs/cancel-pending', {});
+        ElMessage.success('已取消排队：' + (d.cancelled ?? 0));
+        await loadCounts();
+      } catch (e) { ElMessage.error('取消失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+
     async function bulkNote() {
       const list = ids();
       if (!list.length) return;
@@ -653,13 +744,71 @@ createApp({
       else if (k === 'sms') { loadSms(); }
       else if (k === 'codex') { loadCodex(); }
       else if (k === 'logs') { loadJobs(); }
-      else if (k === 'settings') { loadSettings(); }
+      else if (k === 'settings') { loadSettings(); } else if (k === 'config') { loadConfig(); }
+    }
+
+    const cfgItems = ref([]); const cfgDraft = ref({}); const cfgOriginal = ref({});
+    const cfgDirty = ref({}); const cfgGroup = ref(''); const cfgFilter = ref(''); const cfgGroups = ref([]);
+    const cfgVisible = computed(() => {
+      const q = (cfgFilter.value || '').toLowerCase();
+      return cfgItems.value.filter(it => {
+        if (cfgGroup.value && it.group !== cfgGroup.value) return false;
+        if (!q) return true;
+        return String(it.key).toLowerCase().includes(q) || String(it.label || '').toLowerCase().includes(q);
+      });
+    });
+    async function loadConfig() {
+      busy.value = 'cfg';
+      try {
+        const items = await api('/api/config');
+        cfgItems.value = items || [];
+        const draft = {}, orig = {};
+        for (const it of cfgItems.value) {
+          const v = (it.type === 'list_str_multiline' && Array.isArray(it.value))
+            ? it.value.join('\n') : it.value;
+          draft[it.key] = v; orig[it.key] = v;
+        }
+        cfgDraft.value = draft; cfgOriginal.value = orig; cfgDirty.value = {};
+        cfgGroups.value = Array.from(new Set(cfgItems.value.map(i => i.group).filter(Boolean)));
+        if (!cfgGroup.value && cfgGroups.value.length) cfgGroup.value = cfgGroups.value[0];
+      } catch (e) { ElMessage.error('配置加载失败：' + e.message); }
+      finally { busy.value = ''; }
+    }
+    function markCfgDirty() {
+      const dirty = {};
+      for (const it of cfgItems.value) {
+        const now = JSON.stringify(cfgDraft.value[it.key]);
+        const was = JSON.stringify(cfgOriginal.value[it.key]);
+        if (now !== was) dirty[it.key] = cfgDraft.value[it.key];
+      }
+      cfgDirty.value = dirty;
+    }
+    async function saveConfig() {
+      const updates = {};
+      for (const it of cfgItems.value) {
+        const key = it.key;
+        if (!(key in cfgDirty.value)) continue;
+        let v = cfgDraft.value[key];
+        if (it.type === 'list_str_multiline') v = String(v || '').split('\n').map(s => s.trim()).filter(Boolean);
+        else if (it.type === 'int') v = parseInt(v, 10) || 0;
+        else if (it.type === 'float') v = parseFloat(v) || 0;
+        updates[key] = v;
+      }
+      if (!Object.keys(updates).length) { ElMessage.info('没有改动'); return; }
+      busy.value = 'cfgsave';
+      try {
+        const d = await post('/api/config', {updates});
+        if (d.ok === false) throw new Error(d.error || '保存失败');
+        ElMessage.success('已保存 ' + Object.keys(updates).length + ' 项，部分配置需重启生效');
+        await loadConfig();
+      } catch (e) { ElMessage.error('保存失败：' + e.message); }
+      finally { busy.value = ''; }
     }
 
     onMounted(() => { loadSwitch(); load(); loadFunnel(); });
 
     return {
-      menus, tab, title, busy, rows, total, page, pageSize, loading, query, archived, sel, funnel,
+      menus, tab, title, busy, cfgItems, cfgDraft, cfgDirty, cfgGroup, cfgFilter, cfgGroups, cfgVisible, loadConfig, saveConfig, markCfgDirty, bulkChangeEmail, cleanupDead, cancelPending, rows, total, page, pageSize, loading, query, archived, sel, funnel,
       load, reload, onPage, onSize, switchTab, bulk, bulkNote, backfillCodex, tagType, fmt,
       regRunning, toggleRegistration, regCount, regWorkers, regSource, regDriver,
       sourceOptions, driverOptions, jobCounts, loadSources, loadCounts, startRegistration,
