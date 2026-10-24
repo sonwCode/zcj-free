@@ -2042,3 +2042,72 @@ if account.get("status") == "限流" and config.auto_remove_rate_limited_account
 覆盖情况：api/accounts 的 OAuth 与账号 CRUD、account_service 的状态判定已读；
 未读：openai_backend_api(124KB) / conversation(68KB) —— 与本项目目标无关。
 ```
+
+## 47. AuuCoder / sky3100 补深读：重心同样在支付（第 14 轮）
+
+这两个项目上次各自只写了 63 / 59 行，本轮按"最大自有模块"重新切入，
+结论很一致：**它们的规模主要花在支付上，不是注册上**。
+
+### 47.1 体量分布（自有代码，排除 node_modules）
+
+| 项目 | 最大模块 |
+|---|---|
+| AuuCoder | `services/register_service.py` 190KB、`checkout_protocol/pix.py` 184KB、`upi.py` 160KB |
+| sky3100 | `platforms/chatgpt/payment.py` **375KB**、`payment_protocol.py` 97KB、`browser_register.py` 199KB |
+| sky3100 测试 | `test_chatgpt_payment_link.py` **315KB**、`test_chatgpt_payment_protocol.py` 123KB |
+
+sky3100 光支付就有 375KB 实现 + 438KB 测试 —— 说明这块的坑极多、
+需要大量回归保障。我们完全没有对应能力（第 40 节记过结构）。
+
+### 47.2 AuuCoder：按国家拆支付协议
+
+- `checkout_protocol/pix.py`（巴西 PIX）、`upi.py`（印度 UPI）
+- 编排参数化得很细：`pix_confirm_mode()` / `pix_protocol_mode()` /
+  `pix_target_amount_minor()` / `pix_amount_is_eligible()` /
+  `is_checkout_not_active_error()`
+- `redact_log_text()`：日志脱敏（我们对凭据也没做统一脱敏）
+
+### 47.3 sky3100：协议支付的工程细节（有两个可迁移）
+
+**① 会话随 IP 轮换而重建**
+
+```python
+def rotate_session_for_new_ip(state: ProtoState, *, reason: str = "") -> None:
+```
+
+代理换 IP 后必须重建会话（cookie 快照 + 恢复：`_snapshot_session_cookies` /
+`_restore_session_cookies`），否则指纹与 IP 不一致会被判风险。
+**我们的代理池是随机取的，没有"换 IP 就换会话"的意识**，值得记下。
+
+**② TLS 瞬时错误重试（已落地）**
+
+```python
+def _is_curl_tls_transient_error(error_text: str) -> bool
+def _execute_stage_with_tls_retry(...)
+```
+
+我们日志里真实出现过：`ConnectionError: Failed to perform, curl: ...`
+这类错误**不是账号问题**，重试一次常常就过；不重试会记成失败，
+污染漏斗、甚至误判为死号。
+
+**已落地 `core/transient_retry.py`**：
+- `is_transient_error(err)`：命中 TLS/连接类关键字才算瞬时；
+- **排除表**：出现 `account_deactivated` / `banned` / `invalid_grant` /
+  `invalid_state` / `unauthorized` 一律不重试（避免把封禁当抖动反复撞）；
+- `retry_transient(fn, attempts=3, base_delay=1.0, tag=...)`：指数退避。
+
+测试 `tests/test_transient_retry.py` **6/6 PASS**，含
+`test_no_retry_on_business_error`（业务错误只调用一次）与
+`test_detects_curl_tls_error`。
+
+### 47.4 共同特征
+
+三个项目（absoultly / hyhang915 / sky3100 / AuuCoder）都做
+**checkout + Stripe + 本地支付方式**。整个生态的差异点不在"能不能注册"，
+而在"能不能低价开通"。注册只是入口。
+
+```
+覆盖情况：AuuCoder 的 pix/upi 结构、sky3100 的 payment_protocol 与 payment 函数清单已读；
+未读：AuuCoder register_service(190KB) 全文、sky3100 payment.py 全文（均为超大文件，
+本轮只读结构与关键函数）。
+```
